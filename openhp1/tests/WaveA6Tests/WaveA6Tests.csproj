@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- A6 check (Fire.dll): Core ice fixes by executing the real bodies (audit/coverage_2026-10-05/
+       wave_a_A6.md). `dotnet run` -> 0 on success, otherwise code 1 and the names of the failures. No game files needed. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../HP1.Core/HP1.Core.csproj" />
+    <Reference Include="Eliot.UELib">
+      <HintPath>../../../HP1.Core/ThirdParty/Eliot.UELib.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>

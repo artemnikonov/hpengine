@@ -1,0 +1,37 @@
+name: Bug report
+description: Something in OpenHP1 behaves differently from the original game, crashes or does not start.
+labels: [bug]
+body:
+  - type: input
+    id: edition
+    attributes:
+      label: Game edition
+      description: As shown by HP1Setup, the launcher or the first lines of the log (e.g. US English 1.53).
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: System and display
+      description: e.g. macOS 15 on an M2, 2560x1440 at 120 Hz; Windows 11, RTX 3060; Steam Deck.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: OpenHP1 version
+      description: The release you downloaded (e.g. 0.1.0-beta).
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The map or place in the story, what you did, what happened and what you expected. How does the original game behave there, if you know?
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Attach the newest run_<date>_<time>.log from <game folder>/OpenHP1Data/logs/ (it may contain your user name in file paths). A save close to the problem helps too.

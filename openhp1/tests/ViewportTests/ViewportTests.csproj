@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- OpenHP1 window device (openhp1/SdlViewport.cs): the windowed Resolution list offers only sizes a window can take
+       (usable display area minus decorations, in pixels). Pure functions only: no window, no game files.
+       dotnet run -> 0 / 1. Red mutations — redtest.sh. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="*.cs" />
+    <Compile Include="../../SdlViewport.cs" Link="SdlViewport.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="ppy.SDL3-CS" Version="2026.1002.1" />
+    <ProjectReference Include="../../../HP1.Core/HP1.Core.csproj" />
+    <Reference Include="Eliot.UELib">
+      <HintPath>../../../HP1.Core/ThirdParty/Eliot.UELib.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Tests of the ProcTex subsystem: Core ice (HP1.Core/Runtime/VM/IceTexture.cs) and the
+       fire/water manager (openhp1/ProcTex). `dotnet run` -> 0 on success, otherwise code 1 and the names of the failures. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../ProcTex/*.cs" Link="ProcTex/%(Filename)%(Extension)" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../HP1.Core/HP1.Core.csproj" />
+    <Reference Include="Eliot.UELib">
+      <HintPath>../../../HP1.Core/ThirdParty/Eliot.UELib.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>

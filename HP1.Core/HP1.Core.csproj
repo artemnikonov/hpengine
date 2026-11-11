@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AssemblyName>HP1.Core</AssemblyName>
+    <RootNamespace>HP1.Core</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Runtime/**/*.cs" />
+    <!-- NOT ORIGINAL (author 2026-11-03): the OS font of CreateNativeFont ('MS Sans Serif', RU edition) is served by
+         Liberation Sans (SIL OFL 1.1, Fonts/LiberationSans-LICENSE.txt), shipped unmodified. -->
+    <EmbeddedResource Include="Fonts/LiberationSans-Regular.ttf" LogicalName="HP1.Core.Fonts.LiberationSans-Regular.ttf" />
+    <!-- The SAME patched UELib build every consumer and the runtime bind
+         (the HP1 fork carries GetRawPropertyValueBytes(+All) and the
+         KnowWonder opcode handlers). Referencing the upstream-clean
+         Unreal-Library csproj here compiled against a DIFFERENT API surface
+         than the dll the process actually loads. -->
+    <Reference Include="Eliot.UELib">
+      <HintPath>ThirdParty/Eliot.UELib.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+  <!-- The reachability step counter is a test seam, not shipped state: it is
+       internal so the frontends cannot read or reset it, and only the headless
+       selftest assembly is let in. -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>HP1.Headless.Smoke</_Parameter1>
+    </AssemblyAttribute>
+    <!-- The cross-check reference (HP1.Reference: Render.dll translation and world mirror) reads the same
+         internal seams as headless. It is not part of the game. -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>HP1.Reference</_Parameter1>
+    </AssemblyAttribute>
+    <!-- The Galaxy pool tests simulate an end of voice data (UEGalaxyAudio.Playback setters are internal: the frontend
+         gets a read-only view, review 2026-10-31 F7). -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>AudioTests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+</Project>

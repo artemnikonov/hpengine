@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <!-- Build artifacts live outside the source tree (.artifacts), next to the other projects. -->
+    <BaseOutputPath>../.artifacts/HP1.Core/bin/</BaseOutputPath>
+    <BaseIntermediateOutputPath>../.artifacts/HP1.Core/obj/</BaseIntermediateOutputPath>
+  </PropertyGroup>
+</Project>

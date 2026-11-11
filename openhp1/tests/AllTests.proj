@@ -1,0 +1,14 @@
+<Project DefaultTargets="Build">
+  <!-- Builds every openhp1/tests/<T>/<T>.csproj in ONE parallel MSBuild invocation (run_all.sh, -m).
+       Same projects, same outputs as building them one by one; only the per-invocation start-up
+       (~0.8 s x 25) is saved. HP1.Core is built once: MSBuild dedups the shared ProjectReference. -->
+  <ItemGroup>
+    <TestProject Include="*/*.csproj" />
+  </ItemGroup>
+  <Target Name="Restore">
+    <MSBuild Projects="@(TestProject)" Targets="Restore" BuildInParallel="true" />
+  </Target>
+  <Target Name="Build">
+    <MSBuild Projects="@(TestProject)" Targets="Build" BuildInParallel="true" />
+  </Target>
+</Project>

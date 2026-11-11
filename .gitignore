@@ -1,0 +1,8 @@
+# Build output; game files never belong here.
+.artifacts/
+bin/
+obj/
+.DS_Store
+*.user
+.vs/
+.idea/

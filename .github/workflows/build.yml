@@ -1,0 +1,36 @@
+# Build only: the engine, the tests that need no game files, and the three release packages.
+# No game files exist on the runner; publish.sh fails the build if a package would contain any.
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Build OpenHP1
+        run: dotnet build openhp1/OpenHP1.csproj -c Release
+
+      - name: Tests without game files
+        run: sh openhp1/tests/run_all.sh
+
+      - name: Packages win-x64 linux-x64 osx-arm64
+        run: sh openhp1/packaging/publish.sh --out "$RUNNER_TEMP/pkg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenHP1-packages
+          path: |
+            ${{ runner.temp }}/pkg/OpenHP1-win-x64.zip
+            ${{ runner.temp }}/pkg/OpenHP1-linux-x64.tar.gz
+            ${{ runner.temp }}/pkg/OpenHP1-osx-arm64.tar.gz
+          if-no-files-found: error
