@@ -300,7 +300,7 @@ not yet on an Intel Mac; reports are welcome.
 gamepad. For Game Mode add `HPEngine-Launcher` in Desktop Mode: Steam → **Add a Game → Add a Non-Steam Game**. A full
 playthrough there is still to do.
 
-**Chamber of Secrets?** Not supported right now. It may become a separate project later.
+**Chamber of Secrets?** Not yet. It is planned in this project, on the same engine, after Philosopher's Stone.
 
 **Is this legal?** HPEngine contains no code, data or assets of the original game; it runs a copy you own. See
 [Legal](#legal).
