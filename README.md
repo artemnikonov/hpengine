@@ -21,8 +21,7 @@ reads the maps, UnrealScript code, textures, sounds and music from a copy you ow
 
 **A legally obtained copy of the game is required.** See [Requirements](#requirements).
 
-Until version 0.2.0 this project was called OpenHP1. It is not related to
-[SplittyDev/openhp1](https://github.com/SplittyDev/openhp1), a project in Rust with that name.
+Until version 0.2.0 this project was called OpenHP1.
 
 Status: **beta (0.2.0)**. Only Harry Potter 1 is playable; Harry Potter 2 is planned. The full campaign was completed
 on 0.1.0. Coming from 0.1.0? See [CHANGELOG.md](CHANGELOG.md) for how to move your saves.
