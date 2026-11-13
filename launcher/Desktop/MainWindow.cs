@@ -40,6 +40,7 @@ public sealed class MainWindow : Window
 
     readonly TextBlock _status = new() { Name = "Status", Foreground = new SolidColorBrush(Colors.White, 0.85) },
         _editionText = new() { Name = "EditionText", FontSize = 14, FontWeight = FontWeight.Medium },
+        _editionDetail = new() { Name = "EditionDetail", FontSize = 12, Foreground = Th.Dim, TextWrapping = TextWrapping.Wrap, IsVisible = false },
         _editionChip = new() { Name = "EditionChip", FontSize = 11, FontWeight = FontWeight.SemiBold },
         _warningText = new() { Name = "WarningText", TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center },
         _errorText = new() { Name = "ErrorText", TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
@@ -56,6 +57,10 @@ public sealed class MainWindow : Window
     readonly Button _play2 = new() { Name = "PlayButton" }, _install = new() { Name = "InstallButton" };
     // "Start map" (Logic.cs StartMap): shown only while an enabled mod adds a map; never saved.
     readonly ComboBox _startMap = new() { Name = "StartMap", MinWidth = 180, MaxWidth = 300, MaxDropDownHeight = 320, VerticalAlignment = VerticalAlignment.Center };
+    readonly ComboBox _language = new() { Name = "GameLanguage", MinWidth = 180, MaxDropDownHeight = 240 };
+    readonly StackPanel _languageRow = new() { Name = "GameLanguageRow", Orientation = Orientation.Horizontal, Spacing = 12 };
+    List<HPEngine.Packaging.LanguageChoice> _languages = new();
+    bool _loadingLanguage;
     readonly StackPanel _startMapBox = new() { Name = "StartMapBox", Orientation = Orientation.Horizontal, Spacing = 8, Margin = new Thickness(0, 0, 12, 0), IsVisible = false };
     List<(string Mod, string Map)> _addedMaps = new();
     string SelectedMap => _startMap.SelectedIndex > 0 && _startMap.SelectedIndex <= _addedMaps.Count ? _addedMaps[_startMap.SelectedIndex - 1].Map : null;
@@ -96,6 +101,17 @@ public sealed class MainWindow : Window
         _errorBanner = MakeBanner(Th.Red, "×", _errorText);
         BuildSetupPanel();
         BuildReadyPanel();
+        _language.SelectionChanged += (_, _) =>
+        {
+            if (_loadingLanguage || _playing || _running || _language.SelectedIndex < 0) return;
+            try
+            {
+                HPEngine.Packaging.GameLanguage.Save(_game, _language.SelectedIndex == 0 ? null : _languages[_language.SelectedIndex - 1].Code);
+                _error = null;
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { _error = "Could not change game language: " + e.Message; }
+            Refresh();
+        };
 
         _play2.Classes.Add("gold"); _install.Classes.Add("gold");
         _play2.Content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Center, Children = {
@@ -217,6 +233,8 @@ public sealed class MainWindow : Window
         _chipBox.Child = _editionChip;
         var gameCard = MakeCard("Game",
             new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { _editionText, _chipBox } },
+            _editionDetail,
+            _languageRow,
             new DockPanel { Children = { Dock(new TextBlock { Text = "Drop other game files here to reinstall", IsVisible = !_own, FontSize = 11, Foreground = Th.Dim, VerticalAlignment = VerticalAlignment.Center }, Avalonia.Controls.Dock.Right),
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { saves, logs } } } });
         var openMods = new Button { Name = "OpenModsButton", Content = "Open Mods Folder" }; var refresh = new Button { Name = "RefreshMods", Content = "Refresh" };
@@ -229,6 +247,8 @@ public sealed class MainWindow : Window
             new DockPanel { Children = { Dock(_modsHint, Avalonia.Controls.Dock.Right), new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { openMods, refresh } } } });
         _readyPanel.Children.Add(gameCard);
         _readyPanel.Children.Add(modsCard);
+        _languageRow.Children.Add(new TextBlock { Text = "Game language", Foreground = Th.Dim, VerticalAlignment = VerticalAlignment.Center });
+        _languageRow.Children.Add(_language);
     }
     // "i" in a ring (amber) + the dim hint lines of the card; shown by RebuildMods per ModsNotice.Lines
     readonly StackPanel _modsNotice = new() { Name = "ModsNotice", Orientation = Orientation.Horizontal, Spacing = 8, IsVisible = false, Children = {
@@ -293,6 +313,32 @@ public sealed class MainWindow : Window
         _play2.IsVisible = ready; _play2.IsEnabled = !_playing;
         _install.IsVisible = !ready; _installText.Text = Installed ? "Install Again" : "Install";
         _install.IsEnabled = _inputs.Count > 0 && !_running && !_playing;
+        _loadingLanguage = true;
+        try
+        {
+            _languages = Installed ? HPEngine.Packaging.GameLanguage.Available(_game) : new();
+            var editionDisplay = EditionLabel.Describe(_edition, _languages);
+            if (_languages.Count > 1)
+            {
+                _editionText.Text = editionDisplay.Name;
+                _editionChip.Text = editionDisplay.Tier;
+                _editionDetail.Text = editionDisplay.Detail;
+            }
+            _editionDetail.IsVisible = _languages.Count > 1;
+            ToolTip.SetTip(_chipBox, editionDisplay.Tier == "different data"
+                ? "These files differ from the engine family's reference manifest. This alone does not establish that your disc was modified."
+                : null);
+            string selected = HPEngine.Packaging.GameLanguage.Selected(_game);
+            var labels = _languages.Select(l => l.Label).Prepend(HPEngine.Packaging.GameLanguage.DefaultLabel).ToList();
+            int index = _languages.FindIndex(l => l.Code == selected) + 1;
+            if (!string.IsNullOrEmpty(selected) && index == 0) { labels.Add("Unavailable (" + selected + ")"); index = labels.Count - 1; }
+            _language.ItemsSource = labels; _language.SelectedIndex = index;
+            _languageRow.IsVisible = Installed && (_languages.Count > 0 || selected != null);
+            _language.IsEnabled = !_playing && !_running;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        { _error = "Could not read game languages: " + e.Message; UpdateBanners(); }
+        finally { _loadingLanguage = false; }
         _mods = Installed ? ModsIni.Load(_game) : new List<ModEntry>();
         RebuildMods();
     }

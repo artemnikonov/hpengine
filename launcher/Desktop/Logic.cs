@@ -6,6 +6,29 @@ using System.Text.Json;
 
 namespace HPEngine.Launcher;
 
+// A matching engine family does not identify a disc's region. In particular, the Nordic multilingual CD uses
+// the same native/script hashes as the family called UK 1.1. Its language files differ from that reference manifest.
+public static class EditionLabel
+{
+    public sealed record Display(string Name, string Tier, string Detail);
+
+    public static Display Describe(string edition, IReadOnlyList<HPEngine.Packaging.LanguageChoice> languages)
+    {
+        var parts = (edition ?? "").Split(": ");
+        string name = parts.Length > 1 ? string.Join(": ", parts[..^1]) : edition;
+        string tier = parts.Length > 1 ? parts[^1] : "";
+        if (languages.Count < 2) return new(name, tier, null);
+        var codes = languages.Select(l => l.Code).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        bool nordic = codes.SetEquals(new[] { "dan", "eng", "fin", "nor", "swe" });
+        string detail = (string.IsNullOrEmpty(name) ? "" : "Engine family: " + name + ". ")
+            + "Languages: " + string.Join(", ", languages.Select(l => l.Label)) + ".";
+        // Keep the engine's identity/support decisions intact. The UI reports the manifest difference without
+        // implying that a genuine multilingual disc was patched. This does not authenticate an exact disc image.
+        return new(nordic ? "Nordic multilingual data" : "Multilingual game data",
+            nordic && name == "UK 1.1" && tier == "modified" ? "different data" : tier, detail);
+    }
+}
+
 public enum SetupKind { Step, Progress, Error, Warning, Edition, Done, Malformed }
 
 // One line of HP1Setup's stdout (launcher/HP1Setup/Program.cs header). Key: ERROR/WARNING key, EDITION id, STEP key;

@@ -12,9 +12,9 @@
 //     [Mods]
 //     Enabled=<name>      ; one line per mod, in order: a later mod wins over an earlier one
 //
-// With no mod enabled the engine runs on the install itself, exactly as before. Otherwise a working copy
-// <data>/modroot is rebuilt at every start: every game directory of the install as a real directory of links to its
-// files, then the enabled mods' files linked over them. Paths are matched case-insensitively, as on the shipped
+// With no mod or data language selected the engine runs on the install itself, exactly as before. Otherwise a working
+// copy <data>/modroot is rebuilt at every start: the install, then GameLanguage's selected files, then the enabled
+// mods' files. Paths are matched case-insensitively, as on the shipped
 // Windows file system (a mod's "system/engine.u" replaces "System/Engine.u"). Core boots from the working copy and
 // gets only the enabled names (UEGameEngine.Boot mods), a label for its saves: a save records them with the GUIDs of the
 // script packages it depends on, and a save that does not fit the current scripts is refused before the old level is
@@ -22,8 +22,9 @@
 // logs stay in <data>. Save/ is still linked into the working copy like game data: the slot pictures the installer put
 // there ("..\Save\SGS <level>.bmp", DefaultGameSnap.bmp) are opened relative to System/ (native 321, UETextureImport).
 // Only the windowed game uses mods: snapshots, probes and judges always run on the install (HPEngineProgram).
-// Links: symbolic on macOS and Linux; hard links on Windows (no privilege needed, but the same volume — otherwise a
-// loud error). The working copy holds only real directories and file links, so deleting it never reaches a target.
+// Links: symbolic on macOS and Linux; hard links on Windows, with independent writable copies for read-only files
+// or files on a volume that cannot be hard-linked. The working copy holds only real directories and files, so
+// deleting it never reaches a target. Attributes on an original file or hard link are never changed.
 // Problems are loud (ModOverlayException, exit code 5): a missing or empty enabled mod is not skipped silently.
 using System;
 using System.Collections.Generic;
@@ -75,13 +76,15 @@ namespace HPEngine.Packaging
         public static Result Prepare(string install, string dataDir)
         {
             List<string> enabled = Enabled(dataDir);
+            var language = GameLanguage.Files(install);
             string work = Path.Combine(dataDir, WorkDirName);
             if (Directory.Exists(work)) Directory.Delete(work, true);   // links and real directories only (see header)
-            if (enabled.Count == 0) return new Result(install, enabled, 0, 0, Array.Empty<string>(), Array.Empty<string>());
+            if (enabled.Count == 0 && language.Count == 0) return new Result(install, enabled, 0, 0, Array.Empty<string>(), Array.Empty<string>());
 
             var ignored = new List<string>();
             var misplaced = new List<string>();
             var mods = Collect(install, dataDir, enabled, ignored, misplaced);
+            mods.Insert(0, language);   // language data first; enabled community mods still win, and keep their save identity
 
             // relative path (lower case, '/') -> path in the working copy, so a mod lands on the install's spelling
             var placed = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -95,19 +98,19 @@ namespace HPEngine.Packaging
                 placed[Key(rel)] = dest;
             }
             int replaced = 0, added = 0;
-            foreach (var mod in mods)
-                foreach (var (file, rel) in mod)
+            for (int m = 0; m < mods.Count; m++)
+                foreach (var (file, rel) in mods[m])
                 {
                     if (placed.TryGetValue(Key(rel), out string dest))
                     {
                         File.Delete(dest);   // the link, not the install's file
-                        replaced++;
+                        if (m > 0) replaced++;   // the language layer is not a community mod
                     }
                     else
                     {
                         dest = Path.Combine(DirIn(work, Path.GetDirectoryName(rel)), Path.GetFileName(rel));
                         placed[Key(rel)] = dest;
-                        added++;
+                        if (m > 0) added++;
                     }
                     Link(dest, file);
                 }
@@ -219,9 +222,17 @@ namespace HPEngine.Packaging
         static void Link(string path, string target)
         {
             if (!OperatingSystem.IsWindows()) { File.CreateSymbolicLink(path, target); return; }
-            if (!CreateHardLinkW(path, target, IntPtr.Zero))
-                throw new ModOverlayException($"cannot link {path} -> {target} (Windows error {Marshal.GetLastWin32Error()}; " +
-                    "the game, its Mods folder and its HPEngineData must be on the same drive)");
+            // CD distributions mark their files read-only. Windows rejects their hard links (error 5), and a
+            // read-only working file could not be replaced by a language/mod or deleted on the next start.
+            if ((File.GetAttributes(target) & FileAttributes.ReadOnly) == 0)
+            {
+                if (CreateHardLinkW(path, target, IntPtr.Zero)) return;
+                int error = Marshal.GetLastWin32Error();
+                if (error is not (1 or 5 or 17 or 50))
+                    throw new ModOverlayException($"cannot link {path} -> {target} (Windows error {error})");
+            }
+            File.Copy(target, path);
+            File.SetAttributes(path, File.GetAttributes(path) & ~FileAttributes.ReadOnly);   // an independent copy only
         }
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]

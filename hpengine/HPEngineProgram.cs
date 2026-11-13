@@ -124,6 +124,8 @@ namespace HPEngine
                     var mods = HPEngine.Packaging.ModOverlay.Prepare(install, HPEngine.Packaging.InstallRoot.DataDir(install));
                     root = mods.GameRoot;
                     activeMods = mods.Active;
+                    if (HPEngine.Packaging.GameLanguage.Selected(install) is string language)
+                        Console.Error.WriteLine("[Language] " + language + " -> " + root);
                     Console.Error.WriteLine(mods.Active.Count == 0 ? "[Mods] none"
                         : $"[Mods] active: {string.Join(", ", mods.Active)} ({mods.Replaced} game files replaced, {mods.Added} added) -> {root}");
                     if (mods.Ignored.Count > 0) Console.Error.WriteLine("[Mods] not game data, not used: " + string.Join(", ", mods.Ignored));
