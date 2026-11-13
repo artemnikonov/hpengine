@@ -11,7 +11,7 @@
 //
 // HOW TO ENABLE. Environment variable HP1_TELEMETRY (headless). Value: comma-separated list of vertical,
 // peeves, flash, light, blackboard, all. Extra actors by name: HP1_WATCH=a,b,c. Without the route log
-// (UEPlaythroughLog.Enabled, opened only by the runtime_poc harness) telemetry writes nothing.
+// (UEPlaythroughLog.Enabled, opened only by the test harness) telemetry writes nothing.
 using System;
 using System.Collections.Generic;
 using System.Globalization;

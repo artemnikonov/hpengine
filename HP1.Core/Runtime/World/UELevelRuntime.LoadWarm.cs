@@ -1,4 +1,4 @@
-// LOAD-TIME WARM-UP OF FIRST-USE DATA CACHES (perf/level-start, audit/perf_core_ceiling_2026-11-03.md).
+// LOAD-TIME WARM-UP OF FIRST-USE DATA CACHES.
 //
 // The first ticks of a level decoded shipped data lazily: skeletal meshes and their animation objects (first pose),
 // the music export index (first song), sprite texture sizes (first frame), the Engine.dll
@@ -7,7 +7,7 @@
 // pure function of the install's bytes (or of the function object) cached by key; nothing here runs script, touches the
 // RNG, writes an actor or emits an event, so filling the same caches at the end of world bring-up (behind the load
 // screen) only moves the decode out of the visible frames. Off unless the host asks (UEGameEngine.Boot for the game): the validation harness
-// keeps the lazy order, and its pinned logs carry the UELib loader prints of the music index.
+// keeps the lazy order, and its logs carry the UELib loader prints of the music index.
 //
 // A warm call that throws is ignored and leaves its cache as it was (none of these caches stores a failure), so the
 // lazy call fails exactly where it failed before. NOT warmed: surface texture flags (SurfTexturePolyFlags) — they read
@@ -23,7 +23,7 @@ namespace HP1.UEScript
     {
         public bool WarmCachesOnLoad;
         static readonly bool LoadWarmDisabled = Environment.GetEnvironmentVariable("HP1_LOAD_WARM") == "0";
-        // Diagnostic only (tools/perf_core_bench prints it): warm calls made, those that threw, the distinct exception kinds.
+        // Diagnostic only: warm calls made, those that threw, the distinct exception kinds.
         public int LoadWarmCalls, LoadWarmExceptions;
         public readonly SortedSet<string> LoadWarmExceptionKinds = new(StringComparer.Ordinal);
 

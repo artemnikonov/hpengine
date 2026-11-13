@@ -8,7 +8,7 @@
 // different level. A map change does not touch Entry; APlayerPawn::GetEntryLevel
 // reads its Actors(0).
 //
-// Observed on the live original 1.53 (tools/origprobe, 39 maps):
+// Observed on the live original 1.53 (39 maps):
 //   * GameInfo1/Mutator1/GameReplicationInfo1 on EVERY map — Entry consumes the
 //     zero UClass::ClassUnique numbers;
 //   * GameReplicationInfo.Timer and GameInfo.Timer run TWICE as often as in a

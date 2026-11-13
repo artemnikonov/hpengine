@@ -106,7 +106,7 @@ public sealed partial class HeadlessBspModel
     public int SurfCount => _surfRec.Length;
     public Vector3 Vector(int i) => _vectors[i];
 
-    // Live tables: for checking the tracker against the shipped translation (HeadlessSmoke --trackeroracle).
+    // Live tables: for checking the tracker against the shipped translation.
     public void LiveNode(int i, out float px, out float py, out float pz, out float pw,
         out int front, out int back, out int collision, out int surf, out int zone0, out int zone1,
         out int leaf0, out int leaf1, out int iPlane, out int vertPool, out int numVertices, out int nodeFlags, out int link)
@@ -646,7 +646,7 @@ public sealed partial class HeadlessBspModel
             if (iCoplanar != -1 && !otherParent)
             {
                 // 0x1038dc07-0x1038dc56: side by sign of (N.z*n.z + N.y*n.y) + N.x*n.x of the chain tail.
-                // Form from disassembly: in campaign data the side is always 0 (V9, mutation indistinguishable).
+                // Form from disassembly: in campaign data the side is always 0, so the data cannot tell the form apart.
                 F d = (F.L((float)M._planes[anchor].Z) * F.L(poly.Nz) + F.L((float)M._planes[anchor].Y) * F.L(poly.Ny))
                       + F.L((float)M._planes[anchor].X) * F.L(poly.Nx);
                 int side = d.Cmp(0.0) < 0 ? 1 : 0;

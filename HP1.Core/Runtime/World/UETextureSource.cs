@@ -1,8 +1,7 @@
 // TEXTURES FROM THE USER'S PACKAGES AT RUNTIME.
 //
 // The build carries no original files, so texture pixels are read here from the user's installation. The rules are
-// EXACTLY those of the editor exporter (se_harness BspDiffRunner --exporttextures, the reference for
-// HeadlessSmoke --texturesource): the same packages (Textures, System, Maps: .utx/.u/.unr) in the same order (file
+// EXACTLY those of the editor exporter: the same packages (Textures, System, Maps: .utx/.u/.unr) in the same order (file
 // name, ordinal; the first path wins), the same class tree (Super from System/*.u), the same states (EXPORTED /
 // PROCEDURAL_NO_PIXELS / NO_MIPS / NON_P8 / NO_PALETTE); mip pixels come from the file by StorageOffset (UELib skips
 // the bytes of legacy lazy arrays); bMasked and LODSet are package tags (LODSet without a tag — class default 1,
@@ -103,6 +102,21 @@ namespace HP1.UEScript
                 throw new InvalidOperationException("textures: class tree from System/*.u not built (no Texture or FractalTexture)");
         }
 
+        // THREADS. The frontend's instance opens and deserializes packages here on the window thread while the Core thread
+        // may do the same inside its tick (hpengine/CoreThread.cs; UETextureMetrics and UETextureAnim likewise). The
+        // UnrealPackage instances are separate; the statics of Eliot.UELib.dll were listed from its IL (every static
+        // field with every method that loads or stores it). Package loading and BeginDeserializing reach:
+        //   UnrealEncoding.s_ANSI — lazy, the same value from either thread;
+        //   UnrealConfig.*, UnrealPackage.Override*Version, LibServices.LogService — read only (no store in the DLL, none in the port);
+        //   UDecompilingState.s_inlinedSubObjects — a plain Dictionary: UDefaultProperty's ObjectProperty branch looks every
+        //     object reference up in it and ADDS only a reference to the owner's own subobject (Outer == the object
+        //     being read), which it then decompiles (UDecompilingState.Tabs, FieldToken.LastField: stored only by the
+        //     decompiler, which nothing else in the port calls).
+        // No shipped object takes the adding branch: the 242 packages of the US install (System, Maps, Textures, Sounds,
+        // Music: 122135 objects, 50782 with properties, 80145 object-reference tags; 16 objects UELib fails to read)
+        // deserialized in one process leave the dictionary empty, so both threads only read an empty dictionary.
+        // A package with such a subobject (a mod) would make it a concurrent write; then BeginDeserializing needs one
+        // lock on both sides.
         UnrealPackage Open(string pkgPath)
         {
             if (_open.TryGetValue(pkgPath, out var pkg)) return pkg;
@@ -260,7 +274,7 @@ namespace HP1.UEScript
             // UPalette::Serialize (Engine.dll.c:133894): for a package of version < 0x42 the alpha of EVERY colour is
             // set to 0xFF on load (`Colors(i).A = 0xff`). Shipped has six such packages of version 61 (Detail, FireEng,
             // GenFX, GreatFire, Liquids, Palettes) — their file stores A = 0. Verified against live original memory
-            // (tools/origprobe/datadump_*: GenFX.Palette44 — A = 0xFF).
+            // (GenFX.Palette44 — A = 0xFF).
             bool alphaFF = tex.Palette.Package.Version < 0x42;
             for (int i = 0; i < 256; i++)
             {

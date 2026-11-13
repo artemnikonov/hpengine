@@ -22,15 +22,21 @@
 // (details at OptionsLoadSettings). Texture Detail and Object Detail are the shipped items, driven by the original
 // bytecode (author decision 2026-10-15: the port's Frame Rate / Smooth Motion items are removed); the Original /
 // Enhanced menu item is removed (author decision 2026-11-08); the Object Detail frame is "Interface Size" (author
-// decision 2026-11-08, not original, D-44): Smaller / Standard / Larger, saved as [OpenHP1] UIScaleStep.
+// decision 2026-11-08, not original, D-44): Smaller / Standard / Larger, saved as [HPEngine] UIScaleStep.
 //
 // FEOptionsPage.LoadAvailableSettings on UK11 (author decision 2026-11-08, NOT ORIGINAL): the same every-mode list,
-// rebuilt after the shipped body because the UK11 bytecode inlines the filter (details at UkResolutions).
+// rebuilt after the shipped body because the UK11 bytecode inlines the filter (details at UkResolutions). The same for
+// any scripts without IsSupportedResolution (a mod's HPMenu.u; author decision 2026-11-13, NOT ORIGINAL).
 //
 // FEOptionsPage.LocalizeStrings (author decision) — fix of original data: Pickup2.int lacks key names
 // 0-9, F1-F10, Unknown5B-5D, MouseWheelUp/Down and None, so the binding button showed the Localize marker
 // "<?int?pickup2.all.localized_keyname_049?>". The original body runs, then missing names are taken from
 // the game's EInputKey enum name without "IK_" (the other .int strings are named that way: F11, NumPad0, Unknown5E).
+// Then (D-75 addition 2026-11-12, NOT ORIGINAL) the pad keys get player names ("Pad A", "D-pad Up"), display only, by
+// the type of the pad last read (UEInput.PadLabelsFor).
+//
+// FEOptionsPage.LoadExistingKeys, ProcessKey, BeforePaint (D-75, author decision 2026-11-13, NOT ORIGINAL): the Controls
+// column shows one device at a time. Details at OptionsLoadKeys.
 //
 // HPMenuOptionHSlider.BeforePaint, HPMenuOptionCheckBox.BeforePaint (IMPROVEMENT, not original; author decision):
 // details at OwnFontBeforePaint below.
@@ -52,6 +58,9 @@
 //
 // SneakNorris.stateJump.HitWall (author decision 2026-11-11, NOT ORIGINAL: the cat climbs at any frame rate; D-81).
 // Details at SneakJumpHitWall.
+//
+// FEBook.ChangePage (author decision 2026-11-12, IMPROVEMENT, NOT ORIGINAL: an open combo list closes on a page
+// change; D-83). Details at ChangePageClosesComboList.
 using System;
 using System.Collections.Generic;
 using UELib.Core;
@@ -74,11 +83,21 @@ namespace HP1.UEScript
             ("FEOptionsPage", "ObjectDetailChanged", OptionsInterfaceSizeChanged),
             ("FEOptionsPage", "LocalizeStrings", OptionsLocalizeKeyNames),
             ("FEOptionsPage", "BeforePaint", OptionsBeforePaint),
+            ("FEOptionsPage", "LoadExistingKeys", OptionsLoadKeys),
+            ("FEOptionsPage", "ProcessKey", OptionsProcessKey),
             ("HPMenuOptionHSlider", "BeforePaint", OwnFontBeforePaint),
             ("HPMenuOptionCheckBox", "BeforePaint", OwnFontBeforePaint),
             ("baseHarry", "KeyDownEvent", (interp, self, args, original) => null),
             ("stateJump", "HitWall", SneakJumpHitWall),
+            ("FEBook", "ChangePage", ChangePageClosesComboList),
         };
+
+        // The replaced functions by name (owner class or state, function), for the binding census of a mod's scripts
+        // (HP1_PROBE_OVERRIDES, audit/mods_saves_e2e.sh).
+        public static IEnumerable<(string Class, string Function)> Targets
+        {
+            get { foreach (var e in Table) yield return (e.Class, e.Function); }
+        }
 
         // FEOptionsPage, "Video" column (author decision). The four list frames and four slider tracks
         // are PAINTED INTO THE PAGE BACKGROUND (HPMenu.Icons.FEOptionsBackTexture1..6); the controls are transparent
@@ -88,15 +107,27 @@ namespace HP1.UEScript
         //   Color Depth   -> "Display Mode": Fullscreen / Windowed — stock ToggleFullscreen (WinDrv.dll.c:5090) and
         //                    StartupFullscreen (startup mode, UEViewportStartup), not a setting of our own.
         //   Object Detail -> "Interface Size" (author decision 2026-11-08, NOT ORIGINAL, D-44): Smaller / Standard /
-        //                    Larger = [OpenHP1] UIScaleStep -1 / 0 / +1 (UEConfig.UIScaleFor). The shipped
+        //                    Larger = [HPEngine] UIScaleStep -1 / 0 / +1 (UEConfig.UIScaleFor). The shipped
         //                    ObjectDetailChanged (writes PlayerPawn.ObjectDetail, no reader in 1.53, D-27/D-33) is
         //                    replaced, not run: the item no longer means Object Detail.
         // Texture Detail is NOT replaced: the shipped bytecode fills and handles it (FEOptionsPage.uc:182-200, 414,
-        // 578-583) -> `set ini:…ViewportManager TextureDetail`, read by the OpenHP1 frame (UETextureLod).
+        // 578-583) -> `set ini:…ViewportManager TextureDetail`, read by the HPEngine frame (UETextureLod).
         // The original LoadAvailableSettings body runs in full (Created calls it, FEOptionsPage.uc:294), the edit
         // follows it (the lists are refilled every time there; it is also called after a resolution change).
         const string DisplayModeText = "Display Mode", InterfaceSizeText = "Interface Size";
         static readonly string[] InterfaceSizes = { "Smaller", "Standard", "Larger" };   // UIScaleStep -1 / 0 / +1
+
+        // The Interface Size steps offered at this screen height (author decision 2026-11-12): only items that change the
+        // scale. The scale is an integer >= 1 (UEConfig.UIScaleFor), so below 960 px (Steam Deck 800, 720p, 768) Smaller
+        // equals Standard and is not offered; Standard is always there. Index in the combo = index in this array.
+        public static int[] InterfaceSizeSteps(int screenHeight)
+        {
+            int standard = UEConfig.UIScaleFor(screenHeight, 0);
+            var steps = new List<int>();
+            foreach (int step in new[] { -1, 0, 1 })
+                if (step == 0 || UEConfig.UIScaleFor(screenHeight, step) != standard) steps.Add(step);
+            return steps.ToArray();
+        }
         const string Fullscreen = "Fullscreen", Windowed = "Windowed";
 
         static UEObject Combo(UEObject page, string name)
@@ -131,13 +162,82 @@ namespace HP1.UEScript
             for (int i = 0; i < names.Count && i < keys.Count; i++)
                 if (names[i] is string n && n.StartsWith("<?", StringComparison.Ordinal) && keys[i].StartsWith("IK_", StringComparison.Ordinal))
                     names[i] = keys[i].Substring(3);
+            PadKeyNames(interp, names);
             return r;
+        }
+
+        // D-75 addition (NOT ORIGINAL): player names of the pad keys, display only (details at UEInput.GamepadKeyNames).
+        static void PadKeyNames(UEInterpreter interp, List<object> names)
+        {
+            foreach (var (key, name) in InputOf(interp)?.GamepadKeyNames() ?? UEInput.GamepadKeyNames(null, null))
+                names[UEConsoleCommand.FindKeyName(key)] = name;
+        }
+
+        static UEInput InputOf(UEInterpreter interp) => (interp.Natives as UEGameEngineNatives)?.Runtime?.Input;
+
+        // The Controls column shows ONE DEVICE AT A TIME (D-75, author decision 2026-11-13, NOT ORIGINAL; the model is at
+        // the top of UEInput.Gamepad.cs). The shipped LoadExistingKeys (uc:440-520) asks KEYBINDING for all 255 keys and
+        // puts the first two that carry a row's alias into BoundKey1/2; it runs unchanged, and for its duration KEYBINDING
+        // answers for the keys of one device (UEInput.ControlsLoad): in the pad view the pad keys' effective bindings
+        // (defaults included), otherwise the original list without the pad keys. The page lives for the whole session, so
+        // BeforePaint reloads the list whenever the player's device differs from the one shown, and keeps the hint lines.
+        static object OptionsLoadKeys(UEInterpreter interp, UEObject self, object[] args, Func<object> original)
+        {
+            UEInput input = InputOf(interp);
+            if (input is null) return original();
+            object r = null;
+            input.ControlsLoad(self, () => r = original());
+            return r;
+        }
+
+        // Key capture takes only the shown device's keys: any other key ends the wait as the keys the shipped body refuses
+        // do (Escape, digits, F1-F10: click sound, nothing bound; uc:787-793).
+        static object OptionsProcessKey(UEInterpreter interp, UEObject self, object[] args, Func<object> original)
+        {
+            UEInput input = InputOf(interp);
+            string key = (self.GetProp("RealKeyName") as List<object>)?[UEInterpreter.ToInt(args[0])] as string;
+            if (input is null || string.IsNullOrEmpty(key) || UEInput.IsPadKey(key) == input.ControlsShowsPad(self)) return original();
+            Call(interp, self, "PlayClick");
+            return null;
+        }
+
+        // Pad view only: two lines naming the pad's fixed, not rebindable buttons (UEInput.GamepadFixedHint), English in
+        // every edition like the pad key names. UWindowLabelControls like the page's other labels (font 0, PurpleColour)
+        // under the left column: the strip between the Sound Volume slider (ends at y 403) and the page's bottom (430)
+        // holds no control (the page's 528x430 units). The page object has no variable for them: kept here per page.
+        const float PadHintX = 0f, PadHintY = 404f, PadHintW = 280f, PadHintH = 13f;
+        static readonly System.Runtime.CompilerServices.ConditionalWeakTable<UEObject, UEObject[]> PadHints = new();
+        internal static UEObject[] PadHintLabels(UEObject page) => PadHints.TryGetValue(page, out UEObject[] h) ? h : null;
+        static void PadHint(UEInterpreter interp, UEObject page, bool pad, string[] lines)
+        {
+            UEObject[] hints = PadHintLabels(page);
+            if (hints is null)
+            {
+                if (!pad) return;
+                UEObject like = page.GetProp("ControlLabel") as UEObject ?? throw new InvalidOperationException("FEOptionsPage: no ControlLabel");
+                hints = new UEObject[lines.Length];
+                for (int i = 0; i < hints.Length; i++)
+                {
+                    hints[i] = Call(interp, page, "CreateControl", like.Class, PadHintX, PadHintY + i * PadHintH, PadHintW, PadHintH) as UEObject
+                        ?? throw new InvalidOperationException("FEOptionsPage: the pad hint label was not created");
+                    Call(interp, hints[i], "SetFont", 0);
+                    hints[i].Props["TextColor"] = page.GetProp("PurpleColour");
+                }
+                PadHints.Add(page, hints);
+            }
+            for (int i = 0; i < hints.Length; i++)
+            {
+                bool shown = UEInterpreter.ToBool(hints[i].GetProp("bWindowVisible"));
+                if (!pad) { if (shown) Call(interp, hints[i], "HideWindow"); continue; }
+                if (hints[i].GetProp("Text") as string != lines[i]) Call(interp, hints[i], "SetText", lines[i]);
+                if (!shown) Call(interp, hints[i], "ShowWindow");
+            }
         }
 
         static object OptionsLoadSettings(UEInterpreter interp, UEObject self, object[] args, Func<object> original)
         {
             object r = original();
-            if ((interp.Natives as UEGameEngineNatives)?.DataSet == UEEdition.DataSet.UK11) Quiet(self, () => UkResolutions(interp, self));
+            if (!Declares(self.Class, "IsSupportedResolution")) Quiet(self, () => UkResolutions(interp, self));
             Quiet(self, () => SelectVideo(interp, self));
             return r;
         }
@@ -146,6 +246,28 @@ namespace HP1.UEScript
         // LoadAvailableSettings inlines the 512x384/640x480/800x600/1024x768 filter — so the US override cannot reach it.
         // After the shipped body the resolution list is rebuilt as the US body builds it with the filter overridden:
         // every GetRes mode in order (AddItem), then SetValue(GetCurrentRes) (FEOptionsPage.uc:371-394).
+        // The same rebuild serves any FEOptionsPage whose scripts have no IsSupportedResolution (author decision 2026-11-13,
+        // NOT ORIGINAL): the Widescreen Mod's HPMenu.u dropped the function and its LoadAvailableSettings adds no resolution
+        // at all, so the page would show an empty list. The condition is the absence of the function in the loaded class
+        // (UK11 included), never an edition, mod or package name.
+        static bool Declares(UClass cls, string function)
+        {
+            foreach (UFunction f in cls.EnumerateFields<UFunction>())
+                if (string.Equals(f.Name.ToString(), function, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        // The override targets whose owner class is loaded but no longer has the function (a mod's scripts): the override
+        // silently does not run there. For the game's log (HPEngineProgram); state-owned targets are not classes and are not
+        // listed.
+        public static List<(string Class, string Function)> AbsentTargets()
+        {
+            var absent = new List<(string, string)>();
+            foreach (var e in Table)
+                if (HP1.Core.UEClassRegistry.Shared?.Find(e.Class) is UClass c && !Declares(c, e.Function)) absent.Add((e.Class, e.Function));
+            return absent;
+        }
+
         static void UkResolutions(UEInterpreter interp, UEObject self)
         {
             UEObject res = Combo(self, "ResolutionCombo");
@@ -164,8 +286,10 @@ namespace HP1.UEScript
             Fill(interp, depth, DisplayModeText, (Fullscreen, Fullscreen), (Windowed, Windowed));
             Call(interp, depth, "SetSelectedIndex", ViewportOf(interp).Fullscreen ? 0 : 1);
             UEObject size = Combo(self, "ObjectDetailCombo");
-            Fill(interp, size, InterfaceSizeText, Array.ConvertAll(InterfaceSizes, s => (s, s)));
-            Call(interp, size, "SetSelectedIndex", (UEConfig.Global?.UIScaleStep ?? 0) + 1);
+            int[] steps = InterfaceSizeSteps(ViewportOf(interp).SizeY);
+            Fill(interp, size, InterfaceSizeText, Array.ConvertAll(steps, st => (InterfaceSizes[st + 1], InterfaceSizes[st + 1])));
+            int at = Array.IndexOf(steps, UEConfig.Global?.UIScaleStep ?? 0);   // a saved step not offered here = Standard
+            Call(interp, size, "SetSelectedIndex", at >= 0 ? at : Array.IndexOf(steps, 0));
         }
 
         // FEOptionsPage.BeforePaint (every frame the page is shown): the page lives for the whole session and fills Display
@@ -173,6 +297,17 @@ namespace HP1.UEScript
         // The shipped body runs; then, if the item disagrees with the device, it is re-selected quietly (no Notify handler).
         static object OptionsBeforePaint(UEInterpreter interp, UEObject self, object[] args, Func<object> original)
         {
+            // D-75 (NOT ORIGINAL): the Controls column follows the device in use (OptionsLoadKeys); before the shipped body,
+            // which writes the key buttons' texts from BoundKey1/2.
+            if (InputOf(interp) is UEInput input)
+            {
+                if (input.PadView != input.ControlsShowsPad(self))
+                {
+                    if (input.PadView && self.GetProp("LocalizedKeyName") is List<object> names) PadKeyNames(interp, names);
+                    Call(interp, self, "LoadExistingKeys");
+                }
+                PadHint(interp, self, input.ControlsShowsPad(self), input.GamepadFixedHint());
+            }
             object r = original();
             if (self.GetProp("ColorDepthCombo") is not UEObject depth || self.GetProp("ResolutionCombo") is not UEObject res) return r;
             IViewportDevice vp = ViewportOf(interp);
@@ -191,8 +326,9 @@ namespace HP1.UEScript
         {
             if (!UEInterpreter.ToBool(self.GetProp("bInitialized"))) return null;
             UEConfig cfg = UEConfig.Global ?? throw new InvalidOperationException("FEOptionsPage: config not initialized");
-            int step = UEInterpreter.ToInt(Call(interp, Combo(self, "ObjectDetailCombo"), "GetSelectedIndex")) - 1;
-            cfg.Set(UEConfig.ScopeSystem, UEConfig.OpenHP1Section, UEConfig.UIScaleStepKey,
+            int[] steps = InterfaceSizeSteps(ViewportOf(interp).SizeY);
+            int step = steps[UEInterpreter.ToInt(Call(interp, Combo(self, "ObjectDetailCombo"), "GetSelectedIndex"))];
+            cfg.Set(UEConfig.ScopeSystem, UEConfig.HPEngineSection, UEConfig.UIScaleStepKey,
                 step.ToString(System.Globalization.CultureInfo.InvariantCulture));
             return null;
         }
@@ -356,6 +492,28 @@ namespace HP1.UEScript
                 return true;
             }
             return false;
+        }
+
+        // FEBook.ChangePage (author decision 2026-11-12, IMPROVEMENT, NOT ORIGINAL; D-83). In the shipped bytecode the
+        // drop-down list is a child of Root, not of the page (HPMenuOptionCombo.CreateComboList:
+        // List = Root.CreateWindow(...)), and ChangePage only hides the old page (HideWindow -> WindowHidden down the
+        // page's own children). The list is closed only by UWindowComboControl.CloseUp (from Close(bByParent),
+        // FocusOtherWindow on a click elsewhere, or the combo button), so in the original a list left open on Options
+        // stays drawn over the next page after Esc, and is drawn again when the book is reopened in game. Before the
+        // shipped body runs, every open list is closed through its own script CloseUp (-> Owner.CloseUp: bListVisible,
+        // EditBox, List.HideWindow; the combo button has no DownSound, so no sound). Then the original body runs.
+        static object ChangePageClosesComboList(UEInterpreter interp, UEObject self, object[] args, Func<object> original)
+        {
+            UEObject w = (self.GetProp(PK.Root) as UEObject)?.GetProp(PK.FirstChildWindow) as UEObject;
+            while (w is not null)
+            {
+                UEObject next = w.GetProp(PK.NextSiblingWindow) as UEObject;   // CloseUp unlinks w from the sibling list
+                if (UEInterpreter.ClassIsA(w.Class, "UWindowComboList") && UEInterpreter.ToBool(w.GetProp(PK.bWindowVisible))
+                    && UEInterpreter.ToBool((w.GetProp(PK.Owner) as UEObject)?.GetProp("bListVisible")))
+                    Call(interp, w, "CloseUp");
+                w = next;
+            }
+            return original();
         }
 
         // Cache keyed by the function itself: the check runs on every script call, so it

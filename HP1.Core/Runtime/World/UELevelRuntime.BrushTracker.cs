@@ -5,7 +5,7 @@
 // SetupActorBrush FUN_1038d500, Update FUN_1038c260, destructor FUN_1038cff0) keeps
 // mover brush fragments in Level->Model->Nodes; world traces, PointCheck and
 // FastLineCheck see a mover as level geometry (D-47).
-// Writes to actors (C4):
+// Writes to actors:
 //   constructor (Engine.dll.c:237883-237923): every Level.Actors actor with Brush (+0x168),
 //     IsA ABrush and without bStatic (+0x28 bit 0) must be an AMover (else GError "Cast of %s
 //     to %s failed"); SetupActorBrush (238149-238197): SavedPos = (-1,-1,-1),
@@ -160,7 +160,8 @@ namespace HP1.UEScript
         // SetupDynamics since it moved) is not listed: its fragments do not describe where it is now.
         // The same object is returned while the tracker and the movers stand still (a reader may compare references).
         // The tick's result (RunEngineFrame, after the tick's DrawWorld): what the frontend draws.
-        public Dictionary<(int MoverId, int Poly), List<Vector3[]>> MoverCoplanarOfTick { get; private set; }
+        Dictionary<(int MoverId, int Poly), List<Vector3[]>> _moverCoplanarOfTick;
+        public Dictionary<(int MoverId, int Poly), List<Vector3[]>> MoverCoplanarOfTick { get { HP1.Core.UECoreOwner.Check("UELevelRuntime.MoverCoplanarOfTick"); return _moverCoplanarOfTick; } private set => _moverCoplanarOfTick = value; }
         public Dictionary<(int MoverId, int Poly), List<Vector3[]>> MoverCoplanarPieces()
         {
             HeadlessBspModel m = Bsp;

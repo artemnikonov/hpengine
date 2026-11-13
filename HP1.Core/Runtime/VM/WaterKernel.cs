@@ -3,7 +3,7 @@
 // self-modifying assembly the decompiler cannot read; the closed form below was
 // derived by sensitivity probing (which input affects which output, table indices
 // with identity RT/WT) and checked byte-for-byte against the real body under unicorn
-// (se_harness/bsp_diff/wet_oracle.py, validate_wet_texture.py: kernel section — random
+// (random
 // fields and tables, sizes 8..256, both parities; plus a full WetTexture tick).
 //
 // src — two W/2 × H fields interleaved by rows. p = parity & 1:

@@ -3,7 +3,7 @@
 // Rules:
 //   * a mover's drawn polygon is the brush FPoly (brush->Polys); its lightmap is addressed by iBrushPoly, not
 //     surf.iLightMap (−1 on mover surfaces, measured on three maps);
-//   * the texel basis comes from the FPoly itself (Base, TextureU, TextureV, Normal: SE Render/RenderLight.cpp:10-13)
+//   * the texel basis comes from the FPoly itself (Base, TextureU, TextureV, Normal: as in SurrealEngine Render/RenderLight.cpp:10-13)
 //     in the BASE position: translate(BasePos+KeyPos[BrushRaytraceKey]) · Rotation(BaseRot+KeyRot[…]) ·
 //     scale(MainScale) · translate(−PrePivot) (RenderLight.cpp:20) — the lightmap is baked there and moves with the door;
 //   * MainScale is only ±1 per axis (mirroring keeps the texel formula); |s| ≠ 1 — loud failure;

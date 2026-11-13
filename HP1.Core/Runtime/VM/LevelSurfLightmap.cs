@@ -7,7 +7,7 @@ namespace HP1.UEScript
     // FLightManager::SetupForSurf (FUN_10b077f0, Render.dll.c:19726-20700).
     //
     // SHIPPED RULE (read from the decompile, disasm verified where
-    // named below; oracle — se_harness/bsp_diff/validate_level_lightmap.py):
+    // named below; checked against the original code under unicorn):
     //
     //   1. SELECTION (R:19871-19893, disasm 0x10b07c6a-0x10b07cbe). For a level surface (the draw record
     //      has no mover actor, or the mover lacks bDynamicLightMover, `+0x2d0 & 0x10`)
@@ -48,7 +48,7 @@ namespace HP1.UEScript
     //      (`+0x28 & 0x1000`, R:7872-7874). In the Engine.dll DECOMPILE bit 0x1000
     //      of +0x28 is written only by AActor::PostEditChange under GIsEditor
     //      (Engine.dll.c:152096, 225380); absence of other writes is NOT
-    //      verified by disasm (V11); the extracted .uc (Engine.u bodies there are stubs) have no
+    //      verified by disasm; the extracted .uc (Engine.u bodies there are stubs) have no
     //      bLightChanged writes.
     //      The port does not rebuild cache 0x18; FMemCache eviction (memory LRU)
     //      is not modelled either.
@@ -179,7 +179,7 @@ namespace HP1.UEScript
         // 24,40,24}, Σ = 320; for each kernel row the sum of weights of
         // set bits is converted to a byte by INTEGER division (s·255)/320, and
         // the bytes of the three rows are added. Edge — the edge bit/row repeats.
-        // Verified texel-for-texel against shipped; single owner of the rule (C7).
+        // Verified texel-for-texel against shipped; single owner of the rule.
         // Output — W×H mask bytes as float.
         static readonly int[] KernelWeights = { 24, 40, 24, 40, 64, 40, 24, 40, 24 };
         const int KernelSum = 320;
@@ -282,7 +282,7 @@ namespace HP1.UEScript
             };
     }
 
-    // PER-FRAME WORLD LIGHTMAPS — owned by Core (C5/C7): the frontend receives
+    // PER-FRAME WORLD LIGHTMAPS — owned by Core: the frontend receives
     // ready tile bytes and only puts them into its atlas.
     //
     // Unit — (lightmap, zone): shipped cache keys 0x18/0x31 contain the
@@ -362,7 +362,7 @@ namespace HP1.UEScript
         public readonly List<int> MultiZoneLightmaps = new List<int>();
         public readonly List<string> Refusals = new List<string>();
         readonly HashSet<int> _refused = new HashSet<int>();
-        // Counters (V8): which branches ran.
+        // Counters: which branches ran.
         public int FrameLightmaps { get; private set; }     // lightmaps with categories 1/2 this frame
         public int RestoredLightmaps { get; private set; }  // returned to cache 0x18 this frame
         public int MissingLights { get; private set; }      // list references with no actor in the frame
@@ -485,7 +485,7 @@ namespace HP1.UEScript
                 // The lists are made in DrawFrame, the snapshot after RenderOverlays/PostRender: a light destroyed by script in
                 // between is not in the frame. Shipped builds the lightmap inside DrawFrame from the live actor (it would
                 // still apply it); the port drops it and counts it (DynamicLightsLost) — the same snapshot timing as the
-                // iLightActors path (D-63).
+                // iLightActors path.
                 var lists = new Dictionary<int, MoverMode3.LightIn[]>();
                 foreach (var kv in surfDyn)
                 {
@@ -570,8 +570,8 @@ namespace HP1.UEScript
                 ? _byExport[export] : (MoverMode3.LightIn?)null;
 
         // Frame body: a list light by export — lightOf (Update builds it
-        // from frame snapshots via MoverMode3.FromSnapshot; the
-        // validate_level_lightmap.py check feeds corpus lights).
+        // from frame snapshots via MoverMode3.FromSnapshot; checks
+        // may feed lights directly).
         public int DynamicLightmaps { get; private set; }   // lightmaps with +0x48 records this frame
         public long DynamicLightsLost;                        // +0x48 lights destroyed between DrawFrame and the snapshot
         public void UpdateLights(Func<int, MoverMode3.LightIn?> lightOf, SurfLightmap.FrameFx fx,

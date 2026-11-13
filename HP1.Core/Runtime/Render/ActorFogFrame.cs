@@ -1,4 +1,4 @@
-// ACTOR VERTEX FOG (C4) — Core's (moved from the frontend 2026-10-29: one owner of the volumetric light records with
+// ACTOR VERTEX FOG (C4) — Core's (one owner of the volumetric light records with
 // LevelFogMaps). Inputs: static volumetric lights, the frame tree's camera bases and records, IsFogZone. The fog body is
 // FogMap.VertexFog
 // (FLightManager::LightAndFog, Render.dll.c:16990-17110: f·=2, a = min(1, f·VolumeFog/255),
@@ -19,8 +19,8 @@
 // (ComputeFromActor scales every record by Level->Brightness, Render.dll.c:19274-19280).
 // The DAT_10b658d8 flag (LightAndFog, Render.dll.c:17011-17058) is global in shipped and per actor here (`int outside`):
 // with the flag set shipped first tests |d|²·R² − (d·v)² <= |d|²·r, the same inequality as the full test multiplied by
-// |d|² > 0, so only rounding at the fog boundary (density -> 0) can differ — a presentation-only number within the §1
-// tolerance. A frame without a camera keeps the previous basis; no frame is drawn without a camera and the next one resets.
+// |d|² > 0, so only rounding at the fog boundary (density -> 0) can differ — a presentation-only number.
+// A frame without a camera keeps the previous basis; no frame is drawn without a camera and the next one resets.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -39,7 +39,7 @@ namespace HP1.UEScript
         public IReadOnlyDictionary<int, FogMap.Light> Records => _records;
 
         // "No fog" reasons are reported, as in the fog journal line. There is no "no mesh" reason
-        // (FogSkipNoMesh) in OpenHP1.
+        // (FogSkipNoMesh) in HPEngine.
         public int FoggedActors, FoggedVertices, SkipNotInZone /* not drawn as a sprite by that frame */, SkipNoBasis, SkipNoLights, SkipNoVolumetric;
 
         // Bind clears the basis and records. fogZones — LevelFogMaps.Zones; g — the level model (leaf volumetric chains).

@@ -31,7 +31,7 @@
 // /= RotOrigin; Origin += PrePivot; /= Rotation; Origin += Location; operator<<(box, C).
 //
 // Precision: the bodies set no control word and are called from the renderer (FDynamicSprite::Setup, PC24 window):
-// every step follows UEWorldFrameProducer.FastMathWindow (D-59; judges skelanim_oracle.py --pc24, meshbox_oracle.py at both FPCWs).
+// every step follows UEWorldFrameProducer.FastMathWindow (D-59; checked against the real bodies at both FPCWs).
 using System;
 using System.Collections.Generic;
 using System.IO;

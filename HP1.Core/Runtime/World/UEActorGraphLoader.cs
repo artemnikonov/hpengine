@@ -94,15 +94,13 @@ namespace HP1.UEScript
                 // Editor-only content — the default brush, every CSG brush, and
                 // UnrealEd's own viewport cameras (Tag="TextureBrowser") — is
                 // flagged RF_NotForClient|RF_NotForServer and never enters a
-                // running game. This replaces the old `className == "Brush"`
-                // exclusion, which was a name-keyed special case that happened to
-                // cover the brushes and missed the cameras.
+                // running game. The flag is the rule, not a class-name match.
                 if ((export.ObjectFlags & GameLoadContext) == 0) continue;
                 string className = export.Class?.ObjectName?.ToString() ?? "";
                 UClass cls = ResolveExportClass(export, className);
                 if (cls is null)
                 {
-                    // LOUD (§8). Shipped has no such outcome: the actor class is a map import and the
+                    // LOUD. Shipped has no such outcome: the actor class is a map import and the
                     // linker loads its package. A silent skip here lost 435 placed actors on 30 maps
                     // (InvisibleHarry, SneakFilch, QuidGoal, Snail, fluffy, BossQuirrel…).
                     HP1.Core.UETrace.Warn("STOP/unknown: actor "
@@ -160,12 +158,12 @@ namespace HP1.UEScript
             // saved value for the current one. Brush polygon numbers
             // (iLink = index, 0x103be599-0x103be5c0) live in the render mirror —
             // RenderWorldMirror.ApplyMoverPostLoad.
-            // SHAPE FROM SOURCE, NOT PROVEN (V9). The tracker constructor
+            // SHAPE FROM SOURCE, NOT PROVEN. The tracker constructor
             // (GNewBrushTracker: SetupActorBrush, then Update(0)) overwrites SavedPos/SavedRot of
             // every non-bStatic brush BEFORE any read, and never reads bStatic brushes. Measured
-            // (--occludeprobe over all maps, "no markers" mutation): for no non-bStatic campaign
+            // (--occludeprobe over all maps): for no non-bStatic campaign
             // mover do serialized SavedPos/SavedRot equal Location/Rotation, so the tracker accepts
-            // each one even without markers — the mutation is indistinguishable.
+            // each one even without markers.
             foreach (var entry in result.Distinct())
                 if (UEInterpreter.ClassIsA(entry.Runtime.Class, "Mover"))
                 {
@@ -197,8 +195,7 @@ namespace HP1.UEScript
             // Identity matters: e.g. the "move hit the WORLD" check compares hitActor with
             // GetLevelInfo() by reference (APawn::Mount on climbable walls), as do the emitter
             // load prime (`Level.TimeSeconds == 0` gate), Trigger ReTriggerDelay and level-base
-            // clearing in attach_base. Fixture spawn_region_levelinfo_until_after_beginplay
-            // holds this behaviour.
+            // clearing in attach_base.
             UEObject bootstrapLevel = interp.GetLevelInfo();
             levelInfo.Runtime.Props["Game"] = bootstrapLevel.GetProp(PK.Game);
             levelInfo.Runtime.Props["Level"] = levelInfo.Runtime;
@@ -407,7 +404,7 @@ namespace HP1.UEScript
                     return DecodeStruct(tag.StructName?.ToString(), raw, package, byExport, ownerClass);
                 default:
                     // Dynamic arrays and delegates require their own raw layout. None are
-                    // needed by the current placed-actor lifecycle gate; keep them loud.
+                    // needed by the placed-actor lifecycle; keep them loud.
                     throw new NotSupportedException($"instance property {ownerClass.Name}.{tag.Name}: {tag.Type}");
             }
         }
@@ -467,6 +464,22 @@ namespace HP1.UEScript
         // pick same-named HPModels/HProps classes arbitrarily.
         public static UClass ResolveSavedClass(string packageName, string className, string mapPath)
         {
+            UnrealPackage home = SavedPackage(packageName, mapPath);
+            if (home is not null)
+                foreach (var e in home.Exports)
+                    if (e.Object is UClass c && e.OuterIndex == 0
+                        && string.Equals(c.Name, className, StringComparison.OrdinalIgnoreCase)
+                        && c.Super is not null)
+                        return c;
+            // Shipped linker: the class is not in the import package — VerifyImport refuses; a short-name
+            // lookup would pick a same-named class from another package. No campaign map (39) reaches this.
+            throw new InvalidDataException($"save: class {packageName}.{className} not found in the import package (VerifyImport)");
+        }
+
+        // The package a save names (class import or script record), raised the linker way like ResolveSavedClass; null
+        // when the game has no such script package.
+        public static UnrealPackage SavedPackage(string packageName, string mapPath)
+        {
             var registry = HP1.Core.UEClassRegistry.Shared;
             if (!string.IsNullOrEmpty(packageName) && !registry.HasPackage(packageName))
             {
@@ -475,16 +488,7 @@ namespace HP1.UEScript
                 if (path is not null)
                     LoadImportedScriptPackages(registry.GetOrLoadPackage(path), mapPath);
             }
-            UnrealPackage home = registry.FindPackage(packageName);
-            if (home is not null)
-                foreach (var e in home.Exports)
-                    if (e.Object is UClass c && e.OuterIndex == 0
-                        && string.Equals(c.Name, className, StringComparison.OrdinalIgnoreCase)
-                        && c.Super is not null)
-                        return c;
-            // Shipped linker: the class is not in the import package — VerifyImport refuses (D-14 item 23); a short-name
-            // lookup would pick a same-named class from another package. No campaign map (39) reaches this.
-            throw new InvalidDataException($"save: class {packageName}.{className} not found in the import package (VerifyImport)");
+            return registry.FindPackage(packageName);
         }
 
         // Export class by the import PACKAGE, not the short name: the shipped data has same-named
@@ -529,8 +533,8 @@ namespace HP1.UEScript
                     return new UEModelRef(exportRef.ObjectName.ToString(), index);
                 // Any other export of the map package: shipped hands the property the loaded object
                 // itself (the linker resolves the export), never None. Kept as a resource reference
-                // with its full export path, like an import (D-14 item 22). Campaign census
-                // 2026-10-30: the only such reference is LevelInfo.Summary -> <map>.LevelSummary.
+                // with its full export path, like an import. Campaign census:
+                // the only such reference is LevelInfo.Summary -> <map>.LevelSummary.
                 return new Hp1ExactResourceRef(exportRef.Class?.ObjectName?.ToString() ?? "Object",
                     exportRef.ObjectName.ToString(), UETextureSource.FullPathOf(package.PackageName, exportRef));
             }
@@ -581,7 +585,7 @@ namespace HP1.UEScript
                 // FPlane = FVector(12) + float W(4): UStruct::SerializeBin
                 // (Core.dll.c:45567-45628) reads all four fields. Sharing the vector case would lose
                 // W of placed actors (ZoneInfo.ViewFog/ViewFlash, PlayerPawn.FlashFog…) and mismatch
-                // the type of class defaults (UEObject.DecodeStructDefault returns UEPlane). D-14 WORLD.
+                // the type of class defaults (UEObject.DecodeStructDefault returns UEPlane).
                 case "plane":
                 {
                     float px = ReadSingle(raw, ref pos), py = ReadSingle(raw, ref pos), pz = ReadSingle(raw, ref pos);
@@ -607,7 +611,7 @@ namespace HP1.UEScript
                                                    ("B", ReadByte(raw, ref pos)), ("A", ReadByte(raw, ref pos)))));
                 case "pointregion":
                 {
-                    // Review #21 P2: the ONE Core Region constructor.
+                    // The ONE Core Region constructor.
                     int zone = ReadCompactIndex(raw, ref pos);
                     return UEObject.MakeRegion(
                         zone > 0 && byExport.TryGetValue(zone, out var z) ? z.Runtime : null,
@@ -695,7 +699,7 @@ namespace HP1.UEScript
         // SaveNum >= 0 — BYTES, each widened to TCHAR (`movzx cx, byte`, i.e. ISO-8859-1),
         // SaveNum < 0 — UTF-16 words. The string runs to the first zero (TCHAR array with
         // terminator); the position advances by ALL elements. Matches RawReader.FString and
-        // UEObject.ReadAtomicFString. D-14 WORLD.
+        // UEObject.ReadAtomicFString.
         internal static string ReadString(byte[] bytes, ref int pos)
         {
             int saveNum = ReadCompactIndex(bytes, ref pos);
@@ -710,7 +714,7 @@ namespace HP1.UEScript
             return new string(chars, 0, len < 0 ? num : len);
         }
 
-        // Deliberately NOT a positional record: Unity's netstandard2.1 profile has
+        // Deliberately NOT a positional record: the netstandard2.1 profile has
         // no IsExternalInit, so init-only setters do not compile there. Same reason
         // as UEValueTypes and the mesh hash fields.
         public sealed class ActorEntry

@@ -1,10 +1,10 @@
-// VERIFY MODE OF THE PERFORMANCE CACHES (perf/frame-caches, 2026-11-05).
+// VERIFY MODE OF THE PERFORMANCE CACHES.
 //
 // Every cache that skips a recomputation (catalog resolution memo on UEResourceRef, per-actor frame projection,
 // render-bound root pose) recomputes on EVERY hit when HP1_FRAME_CACHE_VERIFY=1 and compares with what it served.
 // A mismatch is a stale cache: counted per cache, the first ones named. Off in production (one bool test per hit).
-// Reported by tools/perf_core_bench (`frame_cache_verify ...` line); the red mutations in
-// audit/completeness_mutations.txt (frame_cache_*) drop one key field and must make the mismatch count non-zero.
+// Reported as a `frame_cache_verify ...` line by the performance bench; dropping one key field of a cache must
+// make its mismatch count non-zero.
 using System.Collections.Generic;
 
 namespace HP1.UEScript

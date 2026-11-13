@@ -14,7 +14,7 @@
 // CPU that runs the game it is 1, so layer II takes the integer path FUN_10456190: dequantisation
 // FUN_10455780, synthesis FUN_104579f0 (window) + FUN_10459070 (matrix).
 // Semantics come from symbolic execution of these bodies (disasm) and are confirmed by running the
-// real code under unicorn: se_harness/bsp_diff/mp2_engine_oracle.py — the MP2SoundStream
+// real code under unicorn — the MP2SoundStream
 // (FUN_1037e550) stream against Core byte-for-byte, over every shipped mp2, two loops in a row.
 // This path has no x87 instruction at all — the FPU control word does not affect the output.
 //   * int16 subband sample: ungrouped ((c + off)·Q(2/(2^b-1), sf)) >> 12, grouped
@@ -178,7 +178,7 @@ namespace HP1.UEScript
     //     layer II 0x3c2, else 0 (0x10452a80-0x10452a9e). The unit is BYTES of interleaved int16 output
     //     (decoder frame +0x248c = channels·0x900), independent of channel count: mono — 481 samples,
     //     stereo — 240 frames plus ONE sample, i.e. the stereo stream is shifted by half a frame
-    //     (the RIGHT sample of frame 240 comes first — confirmed by execution, mp2_engine_oracle.py);
+    //     (the RIGHT sample of frame 240 comes first — confirmed by execution under unicorn);
     //   * a loop is exactly iEndPosn bytes (+0x4c: USound — tail word v76, 0x1038018e; UMusic —
     //     Data.mUncompressedLength, Engine.dll.c:80303/80311). 0 in shipped means up to the end of decoder
     //     data (for a loop — assert "!(iEndPosn==0 && IsLooping)", 0x1037e5dc); here a refusal (see below);
@@ -275,7 +275,7 @@ namespace HP1.UEScript
             return c;
         }
 
-        // Sound PCM for a voice that repeats data itself (OpenHP1 mixer): no loop — loop 1; looping —
+        // Sound PCM for a voice that repeats data itself (HPEngine mixer): no loop — loop 1; looping —
         // loop 1 plus the repeated part from frame LoopStart. Loops k ≥ 2 equal loop 2 (see above), so a
         // loop is loop 1, then loop 2 repeated; if loop 2 equals loop 1 (mono), one loop remains. Stereo
         // with an odd sample count per loop: the per-frame layout repeats every TWO loops (each loop
@@ -514,7 +514,7 @@ namespace HP1.UEScript
         }
 
         // Derived tables are built in the static constructor: field initialisers run in text order, and
-        // the standard tables are declared below. Checked against Engine.dll by selftest mp2_engine_tables
+        // the standard tables are declared below. Checked against Engine.dll by a self-check
         // (module bytes from the install) and the stream oracle.
         static readonly int[] QuantUngrouped;       // [bits·64 + sf], bits 3..16 (DAT_10480fc8 rows 3..16)
         static readonly int[][] QuantGrouped;       // [L][digit·64 + sf], L = 3/5/9

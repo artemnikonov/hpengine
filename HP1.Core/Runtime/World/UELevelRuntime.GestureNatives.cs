@@ -91,7 +91,7 @@ namespace HP1.UEScript
         // 8 bytes AHEAD of the last written one — whatever the process history left
         // in that memory. In general the result is not a function of the arguments.
         //
-        // WHAT THIS MEANS FOR THE PORT — AND WHAT IS NOT PROVEN HERE (§8 STOP).
+        // WHAT THIS MEANS FOR THE PORT — AND WHAT IS NOT PROVEN HERE (STOP).
         //
         // The port DECLARES an assumption: the slot under the write cursor matches no
         // candidate, i.e. the discard branch never fires. This is an ASSUMPTION, not a
@@ -107,7 +107,7 @@ namespace HP1.UEScript
         // (:757), and only then Judge.Tick starts calling native(427) (:705). The first
         // 426 of an attempt has no 427 before it.
         //
-        // MEASURED (validate_gesture.py, 144 cases, none excluded): under a
+        // MEASURED (against the original body, 144 cases, none excluded): under a
         // CONSTRUCTED IMMEDIATE-REPEAT RESIDUE — a second call of the same body on an
         // uncleared frame — shipped's answer changes in 48 cases, 23 of them real
         // campaign patterns.

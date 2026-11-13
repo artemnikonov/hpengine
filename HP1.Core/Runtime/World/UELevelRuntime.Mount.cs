@@ -20,7 +20,7 @@ namespace HP1.UEScript
         // The shipped body is eight consecutive gates, and "false" at the exit says
         // nothing: a refusal on the normal band and one on the ledge probe are
         // different news. Written on every exit and read by a fixture; nothing goes
-        // to the log, so pins are unaffected.
+        // to the log, so logs are unaffected.
         public string LastMountReject;
 
         // Test seam: the record from the _lastMove* publication of the last full move

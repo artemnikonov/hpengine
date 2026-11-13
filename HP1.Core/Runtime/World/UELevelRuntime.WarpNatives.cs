@@ -83,7 +83,7 @@ namespace HP1.UEScript
         // |X.xy| = appSqrt (bare fsqrt, result kept in the register, fstp qword as the argument) of X.y·X.y + X.x·X.x in the
         // register, fstp qword; pitch = appAtan2(X.z, |X.xy|); the identity coords /= (pitch, yaw, 0) give S = their Y axis;
         // roll = appAtan2(S·Z, S·Y), each dot (S.z·A.z + S.y·A.y) + S.x·A.x in the register, fstp qword (0x1014edca..0x1014ee03).
-        // Judge: se_harness/bsp_diff/ortho_rotation_oracle.py (the real body at FPCW 0x037F), SelfTest ortho_rotation_pc64.
+        // Checked against the real body at FPCW 0x037F.
         internal static UERotator OrthoRotation(in BrushCoords c)
         {
             static HP1.Core.X87Ext X(float v) => HP1.Core.X87Ext.From(v);

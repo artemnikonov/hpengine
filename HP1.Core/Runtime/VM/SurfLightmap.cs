@@ -8,7 +8,7 @@ namespace HP1.UEScript
     // slot 3 of SetupForSurf (Render.dll.c:19726-20700) and its fillers
     // FUN_10b037c0 (:17298-17439, LightRadiusInner = 0) / FUN_10b0ca70
     // (:21639-21766, otherwise). Proven texel-for-texel against shipped under unicorn
-    // (replica se_harness/bsp_diff/lm_filler_replica.py). Single owner of the formula (C7):
+    // (against a replica of the original filler). Single owner of the formula:
     // the level atlas bake and the per-frame rebuild of mode-3 mover lightmaps
     // (`bDynamicLightMover`) both call here.
     //
@@ -380,7 +380,7 @@ namespace HP1.UEScript
         }
 
         [ThreadStatic] static byte[] _illum;
-        // Executed-branch counters for fixtures (V8): texels that went through
+        // Executed-branch counters for tests: texels that went through
         // merge per-texel modulation, and texels of own fillers
         // 5/16, and lit texels of the spatial fillers Spot (8/12), NonIncidence (13), Cylinder (17).
         // Not game state; not accessible to the frontend (internal). Each body counts locally and adds once
@@ -582,7 +582,7 @@ namespace HP1.UEScript
 
         // Interference angle, 0x10b05602..0x10b05626: fstp qword of FastSqrt(y² + x²) and of z, appAtan2 (fpatan,
         // D-71) leaves its 64-bit result in the register; fmul qword 11.0, fadd tf, fmul 65536f, fmul 1/2π each round at
-        // PC24, then fstp dword (the fistp operand). Judge: x87_size_oracle.py kind lfxatan (SelfTest x87_size_corpus).
+        // PC24, then fstp dword (the fistp operand). Checked against the original under unicorn.
         internal static float InterferenceAngle(float sq, float pz, float tf)
         {
             HP1.Core.X87Ext at = HP1.Core.UEX87Transcendental.Fpatan(HP1.Core.X87Ext.From((double)sq), HP1.Core.X87Ext.From((double)pz));

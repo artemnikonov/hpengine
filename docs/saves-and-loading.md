@@ -2,7 +2,7 @@
 
 The original saves the whole live level as an Unreal package and loads it back through the same `UGameEngine::LoadMap` it
 uses for every map change. Slot pages, autosaves and level travel are driven by UnrealScript (`HPConsole`, `FESlotPage`,
-`LevelInfo.ServerTravel`) around a few engine natives. OpenHP1 runs those scripts unchanged and ports the engine half in
+`LevelInfo.ServerTravel`) around a few engine natives. HPEngine runs those scripts unchanged and ports the engine half in
 Core. The one deliberate difference is the file: the port writes its own save format and does not read the original's
 `.usa` files.
 
@@ -95,11 +95,20 @@ not established. The port also draws the loading parchment at the menu's full br
 - **Original saves are not shown (2026-11-01, not original).** A slot that has only the original's `GameSaveInfo` and
   `.usa` reads as empty, so the menu can never send `open save<N>.usa`. A port save to that slot overwrites the shared
   `GameSaveInfo` name.
-- **Compatibility across port builds.** The body carries a version (4 now); every older version has a read branch. Version 3
+- **Compatibility across port builds.** The body carries a version (5 now); every older version has a read branch. Version 3
   introduced state-frame positions as bytecode offsets and latent actions by name; version 4 writes class values with
-  their package so a fresh process can load any slot.
-- A damaged file, or one written by a newer build, is validated end to end **before** the old world is torn down and then
-  takes the same "Failed launching URL" route as a missing file.
+  their package so a fresh process can load any slot; version 5 puts the enabled mods' names right after the version (the
+  Launchers read them without the engine) and appends the GUID of every script package the save depends on and the
+  level-entry travel set (what travel carried into the level).
+- A damaged file, one written by a newer build, or one that does not fit the current scripts (mods turned on or off: a
+  package GUID differs, or a class, state, state-code position or class value it names is missing) is checked **before**
+  the old world is torn down. A damaged or newer file takes the same "Failed launching URL" route as a missing file. A
+  file that only does not fit the scripts restarts its level from the beginning with the progress the level was entered
+  with (D-82, not original; like the death reload): the saved level-entry travel set is decoded against the current
+  classes and the map is entered as a level travel enters it; a version 1..4 file has no such set and is refused. The
+  reason ("saved without mods", "saved with mods: X", "saved with different game scripts", or the missing name) and any
+  dropped value go to the run log, and the game tells the player after the load with the tutorial warning popup at the
+  top of the screen (not original); a refused version 1..4 file is announced the same way while mods are on.
 - `.usa` writing is not planned; read-only `.usa` support is the stated option if ever wanted (D-01).
 - Load-time warm-up of lazily decoded caches (meshes, music index, locals layouts) runs behind the loading screen and
   touches no script, RNG or actor (`../HP1.Core/Runtime/World/UELevelRuntime.LoadWarm.cs`).

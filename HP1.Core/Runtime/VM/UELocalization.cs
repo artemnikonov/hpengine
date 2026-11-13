@@ -1,6 +1,5 @@
 // Shipped UObject::execLocalize / ::Localize port — reads the ORIGINAL .int
-// localization files (review #5 P0: Localize must live in the Core, not the
-// Unity dialog-bank bridge, so headless subtitles/warnings resolve from data).
+// localization files (Localize lives in Core, so subtitles/warnings resolve from data).
 //
 // Sources (shipped Core.dll, decompile + literals read from the image):
 //   execLocalize  Core.dll.c:10463 — three FString args (section, key,
@@ -19,7 +18,7 @@
 // Language: GLanguage is config-loaded (appInit reads [Engine.Engine]
 // Language, see UELevelRuntime.AppInit); the worker's retry loop re-queries
 // with "int" and gives up once lang was already "int". This body is the ONE
-// Localize of both frontends (C7): headless and Unity register the same
+// Localize of every frontend: all register the same
 // Core group (UENativesCore.RegisterLocalizationOps).
 //
 // .int parsing — FConfigFile::Read (Engine 0x103cfad0..0x103cfec0, disasm):
@@ -181,8 +180,7 @@ namespace HP1.UEScript
                     c[i] = le ? (char)(b[2 * i + 2] | b[2 * i + 3] << 8) : (char)(b[2 * i + 2] << 8 | b[2 * i + 3]);
                 return new string(c);
             }
-            // ISO-8859-1 (codepage 28591); Encoding.Latin1 is .NET5+ only
-            // and absent from Unity's netstandard2.1 profile.
+            // ISO-8859-1 (codepage 28591).
             return System.Text.Encoding.GetEncoding(28591).GetString(b);
         }
 

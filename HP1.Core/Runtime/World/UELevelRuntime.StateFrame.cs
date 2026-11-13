@@ -9,7 +9,7 @@ namespace HP1.UEScript
     {
         // Diagnostic probe for movement-latent completion: (interp, actor, kind).
         // An observation, not a decision; a frontend may print a journal line
-        // (stage4_latent_done) from it. Optional; Core does not depend on it.
+        // from it. Optional; Core does not depend on it.
         public Action<UEInterpreter, UEObject, string> LatentCompletedProbe;
 
         // One-time warning about an UNPORTED member of the shipped gate.
@@ -39,7 +39,7 @@ namespace HP1.UEScript
         //       *(uint *)(actor + 0x28) |= 0x200;
         // before ConditionalDestroy. The port uses the same point: DestroyActor
         // sets `Destroyed` and the script-visible `bDeleteMe`
-        // (UELevelRuntime.cs:545-546).
+        // (see DestroyActor).
         //
         // So the entry gate reads literally: a destroyed actor's state does NOT
         // run — no latent poll, not a single token.
@@ -124,7 +124,7 @@ namespace HP1.UEScript
                 case LatentRunState.Stop:
                     return;
                 default:
-                    // §8: a latent whose poll is not ported
+                    // A latent whose poll is not ported
                     // (StrafeTo/StrafeFacing/WaitForLanding). Silently switching the
                     // frame to Stop would silently kill the actor's state.
                     throw new NotSupportedException(

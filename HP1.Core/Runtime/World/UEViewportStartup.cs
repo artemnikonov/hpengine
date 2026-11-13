@@ -42,8 +42,8 @@ namespace HP1.UEScript
     //   * the applied size is saved into the key pair matching the CURRENT mode, not always into Windowed*.
     //
     // WHY THIS SHOWS ONLY ON OTHER DATA. In the shipped config both sizes are equal (640x480), so a fixture on shipped
-    // numbers does NOT distinguish "reads Fullscreen*" from "reads Windowed*" (V9). Only a config with DIFFERENT
-    // pairs does — fixtures and red mutations are built on it.
+    // numbers does NOT distinguish "reads Fullscreen*" from "reads Windowed*". Only a config with DIFFERENT
+    // pairs does — checks are built on it.
     //
     // BOUNDARY. The decision (which key, which mode, what to do on refusal) is a shipped rule and lives here. The
     // platform action (actually switching the mode) belongs to the frontend and arrives here as a transaction outcome,
@@ -82,7 +82,7 @@ namespace HP1.UEScript
         // ONE VIEWPORT PER PROCESS. Shipped opens the window ONCE — in UGameEngine::Init; a map change reuses the
         // window and issues no resize. The port brings the world up for EVERY scene (travel, -hp1level), so "once"
         // must be a property of the process, not of the call. The decision (which key to read) and this latch have a
-        // single owner (C7).
+        // single owner.
         public static UEViewportStartup Process { get; private set; } = new UEViewportStartup();
 
         // A new process (or a new Play entry in an editor host) starts from a clean state: otherwise a second run
@@ -141,8 +141,7 @@ namespace HP1.UEScript
 
         // UBoolProperty::ImportText (Core.dll.c:33202) knows SIX spellings: "1"/"True"/GTrue and "0"/"False"/GFalse,
         // case-insensitive; on any other text it returns NULL and the property keeps its CLASS DEFAULT. The port does
-        // not carry UWindowsClient class defaults, so neither a missing key nor garbage in it is silently tolerated
-        // (§8).
+        // not carry UWindowsClient class defaults, so neither a missing key nor garbage in it is silently tolerated.
         // UClient.NoLighting (Client+0x48) comes from the same client section; read by the actor light gate
         // (UEActorLighting.ViewLit).
         public static bool ClientNoLighting(UEConfig config)

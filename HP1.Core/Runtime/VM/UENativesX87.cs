@@ -20,8 +20,8 @@
 // input runs its chain in X87Ext (RW: the window's rounding), which carries NaN sign and payload as the FPU does.
 //
 // Oracle for all bodies: the real exec natives under unicorn,
-// se_harness/bsp_diff/validate_core_math_natives.py (port side via registration, headless --natbatch; `--pc24`:
-// FPCW 0x007F against the port with the window open). Addresses are given at each body.
+// compared against the port registered as natives, also with FPCW 0x007F against the port with the
+// window open (PC24). Addresses are given at each body.
 using System;
 using HP1.Core;
 using Vector3 = HP1.UEScript.UEVector;
@@ -45,7 +45,7 @@ namespace HP1.UEScript
         // One x87 operation on two floats and one fstp dword (execAdd/Subtract/Multiply/Divide_FloatFloat, their
         // *Equal forms, the component loops of the vector natives): the C# float result is that value in both windows
         // (a single + - * / of floats rounds alike at 24, 53 or 64 bits then 24), except a NaN, whose sign and payload
-        // follow the x87 rules (X87Ext). Judge: validate_core_math_natives.py, special operands crossed.
+        // follow the x87 rules (X87Ext). Checked against the real natives under unicorn, special operands crossed.
         public static float Add(float a, float b) { float r = a + b; return float.IsNaN(r) ? (E(a) + E(b)).ToFloat() : r; }
         public static float Sub(float a, float b) { float r = a - b; return float.IsNaN(r) ? (E(a) - E(b)).ToFloat() : r; }
         public static float Mul(float a, float b) { float r = a * b; return float.IsNaN(r) ? (E(a) * E(b)).ToFloat() : r; }

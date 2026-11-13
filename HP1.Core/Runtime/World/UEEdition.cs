@@ -1,15 +1,14 @@
-// EDITION OF THE PLAYER'S INSTALL — which release of HP1 a root holds, from SHA-1 of its files (author 2026-11-08: run
-// every English edition, not only US 1.53). The port never runs HP.exe; it identifies the release so that Core can
+// EDITION OF THE PLAYER'S INSTALL — which release of HP1 a root holds, from SHA-1 of its files (every English edition runs, not only US 1.53). The port never runs HP.exe; it identifies the release so that Core can
 // select the native behaviour of that release's DLLs and the launcher can name (or refuse) what it found.
 //   native set  System/Engine.dll + System/Render.dll (the bodies Core ports);
 //   script set  System/HPBase.u (the .u build; Engine.u/HarryPotter.u differ together with it in every known release);
 //   exe         System/HP.exe or one of the long names some releases use (Flipendo docs/engine-hooks.md, patch 0001):
 //               only the protection (SafeDisc retail / community No-CD) — it carries no game code the port runs.
-// Sources: the project's release inventory (hashes of R1..R5, 2026-11-03) and Flipendo's HP.exe table
-// (src/surreal-patches/0001-game-detection.patch, 2026-11-08). The data set of the exe-only rows (EU, IT, disc #18) is
+// Sources: the project's release inventory (hashes of R1..R5) and Flipendo's HP.exe table
+// (src/surreal-patches/0001-game-detection.patch). The data set of the exe-only rows (EU, IT, disc #18) is
 // not on hand: such a root identifies as Unknown (Tier Unverified: installed and run with a warning) unless its DLLs/.u
 // match a known set.
-// Native differences between the sets: audit/editions_uk_2026-11-08.md. A parallel RU branch may keep its own table;
+// A parallel RU branch may keep its own table;
 // this file is the one owner for the editions it lists.
 using System;
 using System.Collections.Generic;
@@ -27,7 +26,7 @@ namespace HP1.UEScript
         public enum DataSet { Unknown, US153, UK11, RU_EA, CITY_PL, MODDED_EN }
 
         // Which DLL bodies Core ports for a root: the Render.dll build (the only DLL whose ported behaviour differs
-        // between US153 and UK11, audit/editions_uk_2026-11-08.md). Unknown runs the US bodies.
+        // between US153 and UK11). Unknown runs the US bodies.
         public enum RenderSet { Unknown, US153, UK11, RU_EA }
 
         public readonly record struct ExeInfo(bool NoCD, string Note);
@@ -44,11 +43,10 @@ namespace HP1.UEScript
             public Support Tier => Data != DataSet.Unknown ? TierOf(Data)
                 : Array.Exists(Sets, s => s.Engine == EngineSha1 && s.Render == RenderSha1) ? Support.Modified : Support.Unverified;
 
-            // For an Unverified or Modified root: the warning HP1Setup and OpenHP1 print (author decisions 2026-11-09 and
-            // 2026-11-10: run it, loudly).
+            // For an Unverified or Modified root: the warning HP1Setup and HPEngine print (the root is run anyway, loudly).
             public string Warning => Tier switch
             {
-                Support.Unverified => "This release of the game is not recognised by OpenHP1 and has not been verified: the "
+                Support.Unverified => "This release of the game is not recognised by HPEngine and has not been verified: the "
                     + "game may not work correctly. Please report it with these hashes: " + Hashes,
                 Support.Modified => ModifiedWarning,
                 _ => null,
@@ -59,10 +57,10 @@ namespace HP1.UEScript
                 + $"System/HPBase.u {HPBaseSha1 ?? "(not found)"} — {Issues}";
         }
 
-        // The game scripts or data differ from the release OpenHP1 is verified against (a patch, a mod such as the
+        // The game scripts or data differ from the release HPEngine is verified against (a patch, a mod such as the
         // unofficial 1.55, a modded re-release, or a damaged copy).
         public const string ModifiedWarning = "This copy of the game is modified (a patch, a mod such as the unofficial 1.55, "
-            + "or a modded re-release): OpenHP1 is verified only against the unmodified game, so the game may not work "
+            + "or a modded re-release): HPEngine is verified only against the unmodified game, so the game may not work "
             + "correctly. Before reporting a bug, please check it with the unmodified game.";
 
         // Exact: the reference the port is proven against. Supported: runs, not proven exact. Unverified: not
@@ -77,7 +75,7 @@ namespace HP1.UEScript
             _ => Support.Modified,
         };
 
-        public const string Issues = "https://github.com/artemnikonov/openhp1/issues";
+        public const string Issues = "https://github.com/artemnikonov/hpengine/issues";
 
         // System/<name> of the game executable, first match wins (Flipendo: some releases rename HP.exe).
         public static readonly string[] ExeNames =
@@ -172,8 +170,7 @@ namespace HP1.UEScript
             return new Info(Classify(data, exe), data, exeName, exeSha, exe, engine, render, hpbase);
         }
 
-        // The x87 evaluation order Core follows where the builds' bodies differ only in it (audit/editions_ru_judge_2026-11-08.md,
-        // "Float association"; author 2026-11-08: match RU bit for bit). RU_EA: its Engine/Core/Render reassociate the
+        // The x87 evaluation order Core follows where the builds' bodies differ only in it (matched bit for bit for RU). RU_EA: its Engine/Core/Render reassociate the
         // three-term sums of TwoWallAdjust, FBox(FBox, FCoords), operator<<(FBox, FCoords), BoundVisible, DrawLodMesh and
         // execAttachDecal; every other set runs the US 1.53 order (UK11 = US in these bodies). GetFrame skinning is NOT
         // switched: the RU order from the disasm made the RU engine judge worse (STOP, report). One install

@@ -16,8 +16,7 @@
 //   Fluc = float(e2·Fluc), then Fluc += dt·FlucVel (x — extended, y/z — float)
 // RNG: ≥3 appFrand per tick, so the game RNG stream depends on this on maps with
 // WindFluctuation ≠ 0.
-// Oracle: se_harness/bsp_diff/validate_wind_tick.py (the real body under unicorn),
-// corpus se_harness/bsp_diff/data/wind_tick_corpus.tsv, fixture wind_tick_matches_shipped_oracle.
+// Checked against the real body under unicorn.
 using System;
 using HP1.Core;
 using Vector3 = HP1.UEScript.UEVector;

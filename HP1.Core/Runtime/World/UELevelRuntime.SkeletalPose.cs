@@ -43,8 +43,7 @@
 //    (RenderLevelPass.DrawMeshSprite).
 //
 // ORACLE: the real ApplyAnim/GetRootMovement/AdjustRootMovement/
-// GetBoneCoords/GetMeshCoords under unicorn (se_harness/bsp_diff/
-// skelanim_oracle.py, fixture skelanim_matches_shipped_oracle).
+// GetBoneCoords/GetMeshCoords under unicorn.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -79,7 +78,7 @@ namespace HP1.UEScript
         // disasm 0x1041bb8c-0x1041bc33):
         //   +0x08 Frame, +0x0c Alpha  — memoisation, −1.0 on creation;
         //   +0x10 Seq                 — FName, 0 (= None) on creation;
-        //   +0x14 HasPose             — "pose exists" (tween gate);
+        //   +0x14 HasPose             — "pose exists" (tween condition);
         //   +0x1c Places              — LOCAL bone places, a single buffer:
         //                               base after tween AND channel overlay;
         //   +0x20 MeshCoords          — the actor's GetMeshCoords on this call;
@@ -87,7 +86,7 @@ namespace HP1.UEScript
         //   +0x88 Adjust, +0x94 RootInit — root motion.
         // ASSUMPTION, STATED OUT LOUD: the body does NOT write +0x94 on creation
         // (disasm above) — it holds FMemCache leftover memory. The port takes false.
-        // The oracle (skelanim_oracle.py) measures sensitivity: it exists ONLY for
+        // The comparison with the original measures sensitivity: it exists ONLY for
         // the first GetRootMovement of a fresh cache with no full call before it.
         internal sealed class SkelCache
         {
@@ -567,12 +566,12 @@ namespace HP1.UEScript
         //     with p = LocalPoints[k]: s.x stays in the register, s.y and s.z are stored; acc.x += float(s.x·w),
         //     acc.y += float(s.y·w), acc.z += w·s.z (the product in the register), each sum stored.
         // The body sets no control word: inside the render window (DrawMeshActor, EmitParticles) every step rounds to 24
-        // bits (float steps); outside it the PC64 register chain. Judge: skelanim_oracle.py getframe_vertices (the real
-        // GetFrame at FPCW 0x037F and 0x007F), SelfTest skelanim_*matches_shipped_oracle.
+        // bits (float steps); outside it the PC64 register chain. Checked against the real
+        // GetFrame at FPCW 0x037F and 0x007F.
         // Vertex count n = min(LODRequest, FrameVerts) (0x1041df93..0x1041dfa5); the result has n vertices. Core's frame
         // poses are built once per tick at full LOD (lodRequest = FrameVerts) while DrawLodMesh asks for the frame's LOD
         // count; on the shipped data the two agree on every vertex below that count (every group's records are in
-        // ascending point order and FrameVerts == Points: SelfTest skeletal_skin_records_make_lod_count_invisible).
+        // ascending point order and FrameVerts == Points).
         [ThreadStatic] static BrushCoords[] _poseBones;
         internal Vector3[] PosePointsFromCache(Hp1SkeletalMesh mesh, SkelCache cache, int lodRequest = int.MaxValue)
         {
@@ -784,8 +783,8 @@ namespace HP1.UEScript
         // ── PAWN WEAPON POINT: WeaponLoc / WeaponRot ────────────────────────
         //
         // Shipped writes them IN THE RENDERER, in the camera frame of the drawing FSceneNode, at PC24 (the render window;
-        // every operation rounds to float). The oracle se_harness/bsp_diff/weapon_oracle.py runs the real fragment and
-        // the real Core bodies at FPCW 0x007F; validate_weapon.py compares bit for bit.
+        // every operation rounds to float). Checked bit for bit against the real fragment and
+        // the real Core bodies at FPCW 0x007F.
         //  1. USkeletalMesh::GetFrame (Engine 0x1041df50) with Coords = Frame->Coords: root = header MeshCoords (+0x20)
         //     /= Inverse(Coords) (0x1041dfff..0x1041e02c); bone 0 = FCoords(place 0) /= root, bone i = FCoords(place i)
         //     /= bone[parent] (0x1041e05f..0x1041e10e), i.e. the bones in the CAMERA frame;
@@ -975,7 +974,7 @@ namespace HP1.UEScript
         //     DAT_10b65a08 ≠ 0 — WeaponRot (+0x328) and WeaponLoc (+0x31c) =
         //     OrthoRotation/Origin of Inverse(mesh +0x27c) /= Frame->Coords
         //     (0x10b32ef0-0x10b32f82) in the camera frame of the drawing FSceneNode
-        //     (WeaponCoordsFromCameraBone, bit for bit against this chain: validate_weapon.py);
+        //     (WeaponCoordsFromCameraBone, bit for bit against this chain);
         //  3. Pawn.Weapon ≠ NULL, Weapon.ThirdPersonMesh ≠ NULL and !Weapon.bHidden
         //     (0x10b32f85-0x10b32f9d) — third-person weapon:
         //       Mesh <-> ThirdPersonMesh, DrawScale <-> ThirdPersonScale,
@@ -993,12 +992,12 @@ namespace HP1.UEScript
         //
         // One body for the direct frame path (UEWorldFrameProducer.DirectRenderStep) and
         // the translated pass (RenderLevelPass.DrawMeshSprite, fixtures only).
-        // identity — the DrawLodMesh gate 0x10b10136-0x10b10167: URender+0x3c ≠ 0 or
+        // identity — the DrawLodMesh condition 0x10b10136-0x10b10167: URender+0x3c ≠ 0 or
         // RendMap ∈ {13,14,15,1}. URender+0x3c (allocated zeroed, no native properties) is toggled only by the console
         // command REND WIRE (URender::Exec 0x10b1f240, entered with this = the FExec base at +0x28: `xor`ed at 0x10b1f5aa..0x10b1f5b4;
         // REND BLEND toggles +0x40 (0x10b1f612), REND BONE +0x44 (0x10b1f5de)) besides the copy constructor / operator=. Core owns no
-        // REND state (D-76: the console REND debug views are not ported), so the gate reduces to RendMap.
-        public int WeaponThirdPersonDraws;   // how many times the third-person weapon branch ran (V8)
+        // REND state (D-76: the console REND debug views are not ported), so the condition reduces to RendMap.
+        public int WeaponThirdPersonDraws;   // how many times the third-person weapon branch ran
         //
         // poses — frame vertices (WorldFrame.MeshPoses) from the same GetFrame: a skeletal mesh from the header
         // this ApplyAnim filled (no second call), a vertex mesh from ULodMesh::GetFrame. A third-person
@@ -1202,8 +1201,8 @@ namespace HP1.UEScript
         //   |n² − 1| > 9.9999997e-6f (0x1017d764; C0|C3 skips) -> n²f < tol ? (0, 0, 0.1, 0) : r·(1.5 − n²f·0.5) with the
         //     factor in the register, one fstp dword per component.
         // Every register step is rounded to the window's precision; float*float products are exact before it.
-        // TRANSCENDENTALS: UEX87Transcendental (fsin correctly rounded, _CIacos = msvcrt 6.00.8337.0; D-71, judged by
-        // HeadlessSmoke --x87ref on the Steam Deck table).
+        // TRANSCENDENTALS: UEX87Transcendental (fsin correctly rounded, _CIacos = msvcrt 6.00.8337.0; D-71, checked against the x87 table
+        // measured on a Steam Deck).
         public static void SlerpQuat(float ax, float ay, float az, float aw,
             float bx, float by, float bz, float bw, float t,
             out float rx, out float ry, out float rz, out float rw)

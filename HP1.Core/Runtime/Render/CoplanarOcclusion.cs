@@ -13,7 +13,7 @@
 // one wins. Shipped data has such pairs (Lev3_Troll, nodes 6608/6609 of one
 // brush polygon: the second has a lightmap without sources, which would show as
 // a black wall patch by the troll's door). Here the later node loses the parts
-// occluded by earlier chain nodes visible from the same side in the same zone. This is not per-frame buffer emulation (§4a): for nodes of ONE
+// occluded by earlier chain nodes visible from the same side in the same zone. This is not per-frame buffer emulation: for nodes of ONE
 // chain the outcome does not depend on the viewpoint — they lie on one plane
 // and are visited in one order.
 using System;

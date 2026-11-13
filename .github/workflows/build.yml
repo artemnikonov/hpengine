@@ -12,25 +12,35 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the style check diffs against the PR base / previous push
 
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
 
-      - name: Build OpenHP1
-        run: dotnet build openhp1/OpenHP1.csproj -c Release
+      - name: C# whitespace style of changed files does not get worse (.editorconfig)
+        run: |
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          case "$BASE" in ""|0000000000000000000000000000000000000000) echo "no base commit: style check skipped"; exit 0 ;; esac
+          # a force-pushed (amended) history may not contain the previous push
+          git cat-file -e "$BASE^{commit}" 2>/dev/null || { echo "base $BASE not in history: style check skipped"; exit 0; }
+          sh hpengine/tests/style_check.sh "$BASE"
+
+      - name: Build HPEngine
+        run: dotnet build hpengine/HPEngine.csproj -c Release
 
       - name: Tests without game files
-        run: sh openhp1/tests/run_all.sh
+        run: sh hpengine/tests/run_all.sh
 
-      - name: Packages win-x64 linux-x64 osx-arm64
-        run: sh openhp1/packaging/publish.sh --out "$RUNNER_TEMP/pkg"
+      - name: Packages win-x64 linux-x64 osx-arm64 osx-x64
+        run: sh hpengine/packaging/publish.sh --out "$RUNNER_TEMP/pkg"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: OpenHP1-packages
+          name: HPEngine-packages
           path: |
-            ${{ runner.temp }}/pkg/OpenHP1-win-x64.zip
-            ${{ runner.temp }}/pkg/OpenHP1-linux-x64.tar.gz
-            ${{ runner.temp }}/pkg/OpenHP1-osx-arm64.tar.gz
+            ${{ runner.temp }}/pkg/HPEngine-win-x64.zip
+            ${{ runner.temp }}/pkg/HPEngine-linux-x64.tar.gz
+            ${{ runner.temp }}/pkg/HPEngine-osx-arm64.tar.gz
           if-no-files-found: error

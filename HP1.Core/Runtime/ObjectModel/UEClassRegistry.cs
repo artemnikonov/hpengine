@@ -7,7 +7,7 @@ using UELib.Core;
 namespace HP1.Core
 {
     // Pure package/object-model slice shared by every frontend. It intentionally
-    // has no UnityEngine dependency.
+    // has no frontend dependency.
     public sealed class UEClassRegistry
     {
         // The process-wide registry the Core object model resolves classes
@@ -203,8 +203,10 @@ namespace HP1.Core
         }
 
         public UClass Find(string name)
-            => string.IsNullOrEmpty(name) ? null
-             : (_classByName.TryGetValue(name, out UClass cls) ? cls : null);
+        {
+            UECoreOwner.Check("UEClassRegistry.Find");
+            return string.IsNullOrEmpty(name) ? null : (_classByName.TryGetValue(name, out UClass cls) ? cls : null);
+        }
 
         // Class by PACKAGE and name, as the linker resolves an import (ULinkerLoad by Outer
         // package and name). A short name is ambiguous: HagridHutRock, LevShadow,
@@ -608,7 +610,7 @@ namespace HP1.Core
         // bodies (PlaneV, PlaneC, PlaneF, Plane operators) were unreachable by virtual dispatch
         // ("Virtual function 'PlaneV' not found on Harry"). Natives were unaffected (they go
         // by index).
-        // ── THE PORT'S CLASS LOAD ORDER (DrawFrame sprite sort key, UESpriteSort; author decision A 2026-11-03) ──
+        // ── THE PORT'S CLASS LOAD ORDER (DrawFrame sprite sort key, UESpriteSort; NOT ORIGINAL) ──
         //
         // The original keys the sort by the UClass address — heap order, run-dependent. The port ranks a heap class by
         // the moment it first materialises defaults (UEObject.LoadDefaults: map actors in Level.Actors order, then spawns),

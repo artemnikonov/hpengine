@@ -47,7 +47,21 @@ namespace HP1.UEScript
         //    import `Class <Package>.<Name>` of the save package, and the linker loads that package whatever the process
         //    loaded before. Versions 1..3 wrote the short name (tag Class), resolved among the loaded packages only — a
         //    Lev3_Intro save loaded from the menu in a fresh process stopped on Trigger.ClassProximityType = Doxie1.
-        const int SaveVersion = 4;
+        // 5: the SCRIPT RECORD and the LEVEL-ENTRY TRAVEL SET. Layout (BinaryWriter: string = 7-bit length + UTF-8):
+        //      "HP1SAV", int32 version, int32 N, N × string mod name      <- header: the enabled HPEngine mods in order
+        //      string map, int64 clock, int32 levelIndex, int32 actors, int32 objects, objects...
+        //      int32 M, M × (string package, string GUID)                  <- script packages the save depends on
+        //      int32 K, K × entry-travel record set (WriteEntryTravel)     <- ULevel::TravelInfo of the level
+        //    The mod names come first so a small reader (the launchers: which slots were saved with other mods) needs no
+        //    engine. The packages are those of the saved objects' classes with the super chains, of the state frames'
+        //    code and of class values, with the package GUID (FPackageFileSummary.Guid: UE1 gives a package a new one each
+        //    time it is compiled, so it names the exact bytecode a state frame's code offset points into); read by
+        //    SaveScriptMismatch before the old world is torn down. The travel set is LevelEntryTravel: what the engine's
+        //    travel carried into the level (a port record, D-82, NOT ORIGINAL; it is not LevelTravelInfo, whose fate
+        //    across a shipped save load is not established, so the game's own ?RESTART/travel base stays untouched). A
+        //    load restores it, and a save that does not fit the scripts restarts its level with it. Versions 1..4 have
+        //    neither: written before mods existed — "saved without mods", GUIDs and entry set unknown.
+        const int SaveVersion = 5;
         // COMPATIBILITY ACROSS BUILDS (author decision): a save of ANY earlier format
         // version must load. Game bytecode and map data are immutable, so only this
         // record can break the format: every change to it bumps SaveVersion and adds a
@@ -91,7 +105,8 @@ namespace HP1.UEScript
         }
 
         // ── SAVE ───────────────────────────────────────────────────────────
-        public byte[] SaveGame(UEInterpreter interp)
+        // mods: the enabled HPEngine mods (UEGameEngine.Boot), written into the script record; null = none.
+        public byte[] SaveGame(UEInterpreter interp, IReadOnlyList<string> mods = null)
         {
             if (interp is null) throw new ArgumentNullException(nameof(interp));
             if (string.IsNullOrEmpty(LoadedMapPath))
@@ -121,7 +136,7 @@ namespace HP1.UEScript
                 // AFTER the progress frame and BEFORE SavePackage.
                 CleanupDestroyed();
                 FirstDeletedCount = 0;   // bForce: the list is freed entirely
-                byte[] saved = SerializeWorld(interp, level);
+                byte[] saved = SerializeWorld(interp, level, mods);
                 // 0x103a256e-0x103a2610: AFTER SavePackage (does not reach the file)
                 // every Mover in the actor list gets SavedPos = (-1,-1,-1).
                 foreach (UEObject a in Actors)
@@ -289,7 +304,19 @@ namespace HP1.UEScript
         // How many times the world was serialised (observer of the "frame -> package" order for fixtures).
         public int SaveSerializations { get; private set; }
 
-        byte[] SerializeWorld(UEInterpreter interp, UEObject level)
+        // Script package -> GUID of everything the save being written depends on (SerializeWorld, format 5).
+        SortedDictionary<string, string> _saveDeps;
+
+        void AddSaveDeps(UClass c)
+        {
+            for (; c is not null; c = UEInterpreter.CanonicalSuper(c))
+            {
+                UClass real = UEClassRegistry.IsImportStub(c) ? UEClassRegistry.Shared.FindForStub(c) ?? c : c;
+                if (real.Package is { } pkg) _saveDeps[pkg.PackageName] = pkg.GUID;
+            }
+        }
+
+        byte[] SerializeWorld(UEInterpreter interp, UEObject level, IReadOnlyList<string> mods)
         {
             SaveSerializations++;
 
@@ -310,13 +337,25 @@ namespace HP1.UEScript
             using var w = new BinaryWriter(ms, Encoding.UTF8);
             w.Write(SaveMagic);
             w.Write(SaveVersion);
+            w.Write(mods?.Count ?? 0);                                   // format 5 header: the mod names
+            if (mods is not null) foreach (string m in mods) w.Write(m);
             w.Write(Path.GetFileNameWithoutExtension(LoadedMapPath));
             w.Write(_clockFixed);
             w.Write(index.TryGetValue(level, out int li) ? li : -1);
             w.Write(actorCount);
             w.Write(table.Count);
-            for (int i = 0; i < table.Count; i++) WriteObject(w, table[i], index, interp);
+            _saveDeps = new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                for (int i = 0; i < table.Count; i++) WriteObject(w, table[i], index, interp);
+                // Script packages (format 5).
+                w.Write(_saveDeps.Count);
+                foreach (var kv in _saveDeps) { w.Write(kv.Key); w.Write(kv.Value); }
+            }
+            finally { _saveDeps = null; }
+            WriteEntryTravel(w, LevelEntryTravel);
             w.Flush();
+            Log($"savegame_entry_travel {EntryTravelText(LevelEntryTravel)}");
             Log($"savegame map={Path.GetFileName(LoadedMapPath)} actors={actorCount} objects={table.Count} bytes={ms.Length} "
                 + $"clock={_clockFixed} time={UEInterpreter.AsFloat(level.GetProp(PK.TimeSeconds))} "
                 + $"player={PlayerPawn?.GetProp(PK.Name)} at={PlayerPawn?.GetProp(PK.Location)} state={PlayerPawn?.CurrentStateName}");
@@ -365,6 +404,7 @@ namespace HP1.UEScript
 
         void WriteObject(BinaryWriter w, UEObject o, Dictionary<UEObject, int> index, UEInterpreter interp)
         {
+            AddSaveDeps(o.Class);
             w.Write(o.Class?.Name?.ToString() ?? "");
             w.Write(o.Class?.Package?.PackageName ?? "");
             w.Write(o.Destroyed);
@@ -386,6 +426,7 @@ namespace HP1.UEScript
                     throw new NotSupportedException(
                         $"SaveGame: {o.GetProp(PK.Name)} has an open iterator inside latent state code {st.Name} — UE1 does not allow that, nothing to save");
                 w.Write(true);
+                AddSaveDeps(st.Outer as UClass);
                 // The state is EXACT: the frame may run state code of a
                 // PARENT class (ResolveStateLabel follows the label
                 // up through Super and switches Func), so the owner class is
@@ -465,6 +506,7 @@ namespace HP1.UEScript
                 {
                     // An import stub (a class literal of another package) stands for the class of its import's package.
                     UClass real = UEClassRegistry.IsImportStub(c) ? UEClassRegistry.Shared.FindForStub(c) ?? c : c;
+                    AddSaveDeps(real);
                     w.Write((byte)V.ClassIn); w.Write(real.Package?.PackageName ?? ""); w.Write(real.Name.ToString()); return;
                 }
                 case UEModelRef mr: w.Write((byte)V.ModelRef); w.Write(mr.Name ?? ""); w.Write(mr.ExportIndex); return;
@@ -500,17 +542,74 @@ namespace HP1.UEScript
         // ends exactly at the last byte. Returns the map name from the header.
         // Every way a damaged file can trip the reader (EndOfStream, a bad 7-bit length, …) comes out as
         // InvalidDataException: the tick turns that into the player-facing load failure (LoadMapBadSave).
-        public static string ValidateSavedGame(byte[] data)
+        public static string ValidateSavedGame(byte[] data) => ScanSavedGame(data, null).Map;
+
+        // What a body scan returns: the header map and the script record (Deps null: format 1..4, no record).
+        sealed class SaveScan
         {
-            try { return ValidateSavedGameBody(data); }
+            public string Map; public List<string> Mods = new(); public List<(string Pkg, string Guid)> Deps;
+            public long EntryTravelAt = -1;   // stream offset of the level-entry travel set (format 5), -1: none
+        }
+        // With a script check the scan also resolves, without creating anything, everything LoadSavedWorld resolves
+        // against the current scripts: each object's class (the linker route, ResolveSavedClass — it may raise the
+        // class's package, as the load itself would), its state node, its state frame (RestoreStateFrame on a scratch
+        // object: state of the owner class, code offset at a token start), class values and package objects.
+        sealed class ScriptCheck { public string MapPath; public UEInterpreter Interp; }
+
+        static SaveScan ScanSavedGame(byte[] data, ScriptCheck sc)
+        {
+            try { return ValidateSavedGameBody(data, sc); }
             catch (Exception e) when (e is IOException or FormatException or ArgumentException or OverflowException)
             { throw new InvalidDataException($"damaged save: {e.Message}", e); }
         }
 
-        static string ValidateSavedGameBody(byte[] data)
+        // SAVE AGAINST THE CURRENT SCRIPTS — before the old world is torn down (UEGameEngineNatives.TryReadSave). null:
+        // the save fits; else the reason (LoadMapBadSave). The script record decides first (format 5: a package GUID
+        // differs; formats 1..4: mods are on now), worded by the mod names; then the per-object resolution, which
+        // also covers 1..4 saves loaded without mods on an install whose own packages changed.
+        public static string SaveScriptMismatch(byte[] data, string mapPath, UEInterpreter interp, IReadOnlyList<string> mods)
+        {
+            mods ??= Array.Empty<string>();
+            try
+            {
+                SaveScan scan = ScanSavedGame(data, null);
+                string cur = mods.Count == 0 ? "none" : string.Join(", ", mods);
+                string differs = null;
+                if (scan.Deps is null) { if (mods.Count > 0) differs = "the save predates the mod record"; }
+                else
+                    foreach (var (pkg, guid) in scan.Deps)
+                    {
+                        UELib.UnrealPackage now = UEActorGraphLoader.SavedPackage(pkg, mapPath);
+                        if (now is null) { differs = $"script package {pkg} is not in the game"; break; }
+                        if (now.GUID != guid) { differs = $"script package {pkg} differs"; break; }
+                    }
+                if (differs is not null)
+                {
+                    string head = ModsHead(scan.Mods, mods) ?? "saved with different game scripts";
+                    return $"{head} (active mods: {cur}; {differs})";
+                }
+                ScanSavedGame(data, new ScriptCheck { MapPath = mapPath, Interp = interp });
+                return null;
+            }
+            catch (InvalidDataException e) { return e.Message; }
+        }
+
+        // How the save's mod names differ from the current ones; null: the same names (or none on both sides).
+        static string ModsHead(List<string> saved, IReadOnlyList<string> mods)
+            => saved.Count == 0 && mods.Count > 0 ? "saved without mods"
+                : saved.Count > 0 && !System.Linq.Enumerable.SequenceEqual(saved, mods, StringComparer.OrdinalIgnoreCase)
+                    ? $"saved with mods: {string.Join(", ", saved)}"
+                : null;
+
+        // The load notice's wording of a validated save's mod names (UEGameEngineNatives), capitalised.
+        public static string SavedWithMods(byte[] data, IReadOnlyList<string> mods)
+            => ModsHead(ScanSavedGame(data, null).Mods, mods ?? Array.Empty<string>()) is { } h ? "S" + h[1..] : null;
+
+        static SaveScan ValidateSavedGameBody(byte[] data, ScriptCheck sc)
         {
             using var r = new BinaryReader(new MemoryStream(data ?? Array.Empty<byte>()), Encoding.UTF8);
             int ver = ReadVersion(r);
+            List<string> headerMods = ReadHeaderMods(r, ver);
             string map = r.ReadString();
             r.ReadInt64();
             int levelIndex = r.ReadInt32();
@@ -522,8 +621,11 @@ namespace HP1.UEScript
             if (levelIndex < 0) throw new InvalidDataException("the save has no LevelInfo");
             for (int i = 0; i < total; i++)
             {
-                r.ReadString(); r.ReadString(); r.ReadBoolean(); r.ReadString();
+                string clsName = r.ReadString(), pkg = r.ReadString(); r.ReadBoolean(); string state = r.ReadString();
                 r.ReadSingle(); r.ReadSingle(); r.ReadBoolean();
+                UClass cls = sc is null ? null : UEActorGraphLoader.ResolveSavedClass(pkg, clsName, sc.MapPath);
+                if (cls is not null && state.Length > 0 && sc.Interp.FindState(cls, state) is null)
+                    throw new InvalidDataException($"save: {clsName}#{i} is in state {state}, which class {pkg}.{clsName} does not have");
                 int dis = r.ReadInt32();
                 if (dis < 0) throw new InvalidDataException($"#{i}: disabled events < 0");
                 for (int d = 0; d < dis; d++)
@@ -534,26 +636,58 @@ namespace HP1.UEScript
                 }
                 if (r.ReadBoolean())
                 {
-                    r.ReadString(); r.ReadString(); r.ReadInt32(); r.ReadUInt64();
-                    if (ver >= 3) LatentFromName(r.ReadString()); else LatentFromV2(r.ReadInt32());
+                    string stName = r.ReadString(), stOwner = r.ReadString(); int cursor = r.ReadInt32(); r.ReadUInt64();
+                    LatentRunState latent = ver >= 3 ? LatentFromName(r.ReadString()) : LatentFromV2(r.ReadInt32());
                     r.ReadSingle();
-                    SkipProps(r, total, i);
+                    // The same lookup LoadSavedWorld makes, on a scratch object (the frame lands there, not in a world).
+                    if (cls is not null)
+                        sc.Interp.RestoreStateFrame(new UEObject { Class = cls, Interp = sc.Interp }, stName, stOwner, cursor, 0,
+                            latent, 0f, null, cursorIsCodeOffset: ver >= 3);
+                    SkipProps(r, total, i, sc);
                 }
-                SkipProps(r, total, i);
+                SkipProps(r, total, i, sc);
+            }
+            var scan = new SaveScan { Map = map, Mods = headerMods };
+            if (ver >= 5)
+            {
+                scan.Deps = ReadDeps(r);
+                scan.EntryTravelAt = r.BaseStream.Position;
+                SkipEntryTravel(r);
             }
             if (r.BaseStream.Position != r.BaseStream.Length)
-                throw new InvalidDataException($"{r.BaseStream.Length - r.BaseStream.Position} extra bytes after the object table");
-            return map;
+                throw new InvalidDataException($"{r.BaseStream.Length - r.BaseStream.Position} extra bytes after the "
+                    + (ver >= 5 ? "level-entry travel set" : "object table"));
+            return scan;
         }
 
-        static void SkipProps(BinaryReader r, int total, int owner)
+        // Format 5 header: the mod names right after the version (none for 1..4).
+        static List<string> ReadHeaderMods(BinaryReader r, int ver)
+        {
+            var mods = new List<string>();
+            if (ver < 5) return mods;
+            int n = r.ReadInt32();
+            if (n < 0) throw new InvalidDataException("mod count < 0");
+            for (int i = 0; i < n; i++) mods.Add(r.ReadString());
+            return mods;
+        }
+
+        static List<(string, string)> ReadDeps(BinaryReader r)
+        {
+            int deps = r.ReadInt32();
+            if (deps < 0) throw new InvalidDataException("script package count < 0");
+            var list = new List<(string, string)>(deps);
+            for (int i = 0; i < deps; i++) list.Add((r.ReadString(), r.ReadString()));
+            return list;
+        }
+
+        static void SkipProps(BinaryReader r, int total, int owner, ScriptCheck sc)
         {
             int n = r.ReadInt32();
             if (n < 0) throw new InvalidDataException($"#{owner}: properties < 0");
-            for (int i = 0; i < n; i++) { r.ReadString(); SkipValue(r, total, owner); }
+            for (int i = 0; i < n; i++) { r.ReadString(); SkipValue(r, total, owner, sc); }
         }
 
-        static void SkipValue(BinaryReader r, int total, int owner)
+        static void SkipValue(BinaryReader r, int total, int owner, ScriptCheck sc)
         {
             var tag = (V)r.ReadByte();
             switch (tag)
@@ -565,14 +699,33 @@ namespace HP1.UEScript
                 case V.Float: r.ReadSingle(); return;
                 case V.Double: r.ReadDouble(); return;
                 case V.Long: r.ReadInt64(); return;
-                case V.String: case V.Name: case V.Class: case V.PackageObject: r.ReadString(); return;
-                case V.ClassIn: r.ReadString(); r.ReadString(); return;
+                case V.String: case V.Name: r.ReadString(); return;
+                case V.Class:
+                {
+                    string name = r.ReadString();
+                    if (sc is not null && UEClassRegistry.Shared.Find(name) is null)
+                        throw new InvalidDataException($"save: #{owner}: class {name} not found");
+                    return;
+                }
+                case V.PackageObject:
+                {
+                    string path = r.ReadString();
+                    if (sc is not null && UEClassRegistry.Shared.FindExport(path) is null)
+                        throw new InvalidDataException($"save: #{owner}: package object {path} not found");
+                    return;
+                }
+                case V.ClassIn:
+                {
+                    string pkg = r.ReadString(), name = r.ReadString();
+                    if (sc is not null) UEActorGraphLoader.ResolveSavedClass(pkg, name, sc.MapPath);
+                    return;
+                }
                 case V.Vector: r.ReadSingle(); r.ReadSingle(); r.ReadSingle(); return;
                 case V.Rotator: r.ReadInt32(); r.ReadInt32(); r.ReadInt32(); return;
                 case V.Plane: r.ReadSingle(); r.ReadSingle(); r.ReadSingle(); r.ReadSingle(); return;
                 case V.Resource: r.ReadString(); r.ReadString(); r.ReadString(); r.ReadString(); return;
                 case V.ModelRef: r.ReadString(); r.ReadInt32(); return;
-                case V.Struct: r.ReadString(); SkipProps(r, total, owner); return;
+                case V.Struct: r.ReadString(); SkipProps(r, total, owner, sc); return;
                 case V.ObjRef:
                 {
                     int id = r.ReadInt32();
@@ -597,7 +750,7 @@ namespace HP1.UEScript
                 {
                     int n = r.ReadInt32();
                     if (n < 0) throw new InvalidDataException($"#{owner}: list length < 0");
-                    for (int i = 0; i < n; i++) SkipValue(r, total, owner);
+                    for (int i = 0; i < n; i++) SkipValue(r, total, owner, sc);
                     return;
                 }
             }
@@ -613,6 +766,7 @@ namespace HP1.UEScript
             _loadingSaveMapPath = mapPath;
             using var r = new BinaryReader(new MemoryStream(data), Encoding.UTF8);
             int ver = ReadVersion(r);
+            ReadHeaderMods(r, ver);
             string map = r.ReadString();
             if (!string.Equals(map, Path.GetFileNameWithoutExtension(mapPath), StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException($"the save was made on {map}, but {Path.GetFileName(mapPath)} is being loaded");
@@ -685,6 +839,14 @@ namespace HP1.UEScript
                     }
                     var props = ReadProps(r, table, interp, $"{clsName}#{i}");
                     foreach (var kv in props) table[i].Props[kv.Key] = kv.Value;
+                }
+                // Format 5 trailer: the script packages (checked before teardown) and the level-entry travel set, which
+                // BootstrapLoadedWorld makes this level's TravelInfo again. 1..4: unknown, the level carries none.
+                _loadedEntryTravel = null;
+                if (ver >= 5)
+                {
+                    ReadDeps(r);
+                    _loadedEntryTravel = ReadEntryTravel(r, interp, mapPath, null);
                 }
                 // Which packages the load ITSELF brought up (the catalog only grows):
                 // witness that the "package not yet in the process" branch ran.
@@ -804,12 +966,14 @@ namespace HP1.UEScript
                 case V.ClassIn:
                 {
                     string pkg = r.ReadString(), name = r.ReadString();
-                    return UEActorGraphLoader.ResolveSavedClass(pkg, name, _loadingSaveMapPath);
+                    try { return UEActorGraphLoader.ResolveSavedClass(pkg, name, _loadingSaveMapPath); }
+                    catch (InvalidDataException) when (_tolerantRead) { return new SaveUnresolved($"class {pkg}.{name}"); }
                 }
                 case V.Class:   // versions 1..3
                 {
                     string name = r.ReadString();
-                    return UEClassRegistry.Shared.Find(name)
+                    return (object)UEClassRegistry.Shared.Find(name)
+                        ?? (_tolerantRead ? new SaveUnresolved($"class {name}") : null)
                         ?? throw new InvalidDataException($"LoadSavedWorld: {where}: class {name} not found");
                 }
                 case V.ModelRef: { string n = r.ReadString(); return new UEModelRef(n, r.ReadInt32()); }
@@ -831,7 +995,8 @@ namespace HP1.UEScript
                 case V.PackageObject:
                 {
                     string path = r.ReadString();
-                    return UEClassRegistry.Shared.FindExport(path)
+                    return (object)UEClassRegistry.Shared.FindExport(path)
+                        ?? (_tolerantRead ? new SaveUnresolved($"package object {path}") : null)
                         ?? throw new InvalidDataException($"LoadSavedWorld: {where}: package object {path} not found");
                 }
                 case V.ObjArray:
@@ -857,6 +1022,253 @@ namespace HP1.UEScript
             throw new InvalidDataException($"LoadSavedWorld: {where}: unknown tag {tag}");
         }
 
+        // ── RESTART WITH PROGRESS — IMPROVEMENT, NOT ORIGINAL (author decisions 2026-11-12) ─────────────────────────────
+        // A save that does not fit the current scripts (mods turned on/off, SaveScriptMismatch) is not refused: the saved
+        // map is entered from its beginning the way a level travel enters it, with the travel set THE LEVEL WAS ENTERED
+        // WITH (LevelEntryTravel, format 5 trailer) — not the values as of the save, which would let the restarted level's
+        // pickups be collected twice. That is the death reload's semantics (slot 99, saved at level entry). HP1 carries
+        // campaign progress between levels only through travel (baseHarry: house points, beans, stars, WizardCards,
+        // lifePotions, bHas*; Pawn.Health/Weapon/SelectedItem; the travel inventory). Mid-level state is lost by design.
+        // The set is decoded against the CURRENT classes: a record whose class is gone, or a property that is no travel
+        // property of the current class or whose value does not fit its type, is dropped and listed (dropped).
+        // null: the save has no entry set (format 1..4).
+        public Dictionary<string, List<TravelActor>> TravelInfoFromSave(byte[] data, string mapPath, UEInterpreter interp,
+            List<string> dropped)
+        {
+            SaveScan scan = ScanSavedGame(data, null);
+            if (scan.EntryTravelAt < 0) return null;
+            using var r = new BinaryReader(new MemoryStream(data), Encoding.UTF8);
+            r.BaseStream.Position = scan.EntryTravelAt;
+            return ReadEntryTravel(r, interp, mapPath, dropped);
+        }
+
+        // The level-entry travel set (D-82): what the engine's travel carried into this level (AdoptLoadedUrl); a save
+        // load restores the saved one (BootstrapLoadedWorld). Saved by SaveGame, read by TravelInfoFromSave.
+        internal Dictionary<string, List<TravelActor>> LevelEntryTravel { get; set; } = new(UEPropNameComparer.Instance);
+        Dictionary<string, List<TravelActor>> _loadedEntryTravel;
+
+        // Record set layout: int32 keys; per key: string key, int32 records; per record: string class package, string
+        // class name, string actor name, int32 props; per prop: string key, byte kind (0 value: the save's value
+        // encoding, object references none; 1 actor reference: bool + name; 2 struct delta: int32 fields, per field string
+        // name + value).
+        void WriteEntryTravel(BinaryWriter w, Dictionary<string, List<TravelActor>> set)
+        {
+            var noIndex = new Dictionary<UEObject, int>(UERefComparer<UEObject>.Instance);
+            w.Write(set.Count);
+            foreach (var kv in set)
+            {
+                w.Write(kv.Key ?? "");
+                w.Write(kv.Value.Count);
+                foreach (TravelActor rec in kv.Value)
+                {
+                    UClass c = UEClassRegistry.IsImportStub(rec.Class) ? UEClassRegistry.Shared.FindForStub(rec.Class) ?? rec.Class : rec.Class;
+                    w.Write(c?.Package?.PackageName ?? ""); w.Write(c?.Name?.ToString() ?? ""); w.Write(rec.Name ?? "");
+                    w.Write(rec.Props.Count);
+                    foreach (var p in rec.Props)
+                    {
+                        w.Write(p.Key);
+                        switch (p.Value)
+                        {
+                            case TravelActorRef a: w.Write((byte)1); w.Write(a.Name is not null); w.Write(a.Name ?? ""); break;
+                            case TravelStructDelta d:
+                                w.Write((byte)2); w.Write(d.Fields.Count);
+                                foreach (var f in d.Fields) { w.Write(f.Key); WriteValue(w, f.Value, noIndex, null, p.Key); }
+                                break;
+                            default: w.Write((byte)0); WriteValue(w, p.Value, noIndex, null, p.Key); break;
+                        }
+                    }
+                }
+            }
+        }
+
+        static void SkipEntryTravel(BinaryReader r)
+        {
+            for (int k = Count(r, "travel keys"); k > 0; k--)
+            {
+                r.ReadString();
+                for (int n = Count(r, "travel records"); n > 0; n--)
+                {
+                    r.ReadString(); r.ReadString(); r.ReadString();
+                    for (int p = Count(r, "travel props"); p > 0; p--)
+                    {
+                        r.ReadString();
+                        switch (r.ReadByte())
+                        {
+                            case 0: SkipValue(r, 0, -1, null); break;
+                            case 1: r.ReadBoolean(); r.ReadString(); break;
+                            case 2: for (int f = Count(r, "struct fields"); f > 0; f--) { r.ReadString(); SkipValue(r, 0, -1, null); } break;
+                            default: throw new InvalidDataException("travel: unknown property kind");
+                        }
+                    }
+                }
+            }
+        }
+
+        static int Count(BinaryReader r, string what)
+        {
+            int n = r.ReadInt32();
+            return n >= 0 ? n : throw new InvalidDataException($"{what} < 0");
+        }
+
+        // dropped == null: strict (a save that fits the scripts: every class resolves, values are taken as written);
+        // otherwise tolerant against the current classes, every drop listed.
+        Dictionary<string, List<TravelActor>> ReadEntryTravel(BinaryReader r, UEInterpreter interp, string mapPath, List<string> dropped)
+        {
+            var set = new Dictionary<string, List<TravelActor>>(UEPropNameComparer.Instance);
+            var noTable = Array.Empty<UEObject>();
+            _loadingSaveMapPath = mapPath;
+            _tolerantRead = dropped is not null;
+            try
+            {
+                for (int k = Count(r, "travel keys"); k > 0; k--)
+                {
+                    string key = r.ReadString();
+                    var records = new List<TravelActor>();
+                    for (int n = Count(r, "travel records"); n > 0; n--)
+                    {
+                        string pkg = r.ReadString(), cls = r.ReadString(), name = r.ReadString();
+                        UClass c = null;
+                        if (dropped is null) c = UEActorGraphLoader.ResolveSavedClass(pkg, cls, mapPath);
+                        else
+                        {
+                            try { c = UEActorGraphLoader.ResolveSavedClass(pkg, cls, mapPath); }
+                            catch (InvalidDataException) { dropped.Add($"{name}: class {pkg}.{cls} is not in the current scripts"); }
+                        }
+                        var rec = new TravelActor { Class = c, Name = name };
+                        for (int p = Count(r, "travel props"); p > 0; p--)
+                        {
+                            string pk = r.ReadString();
+                            object v;
+                            switch (r.ReadByte())
+                            {
+                                case 0: v = ReadValue(r, noTable, interp, "travel." + pk); break;
+                                case 1: { bool has = r.ReadBoolean(); string an = r.ReadString(); v = new TravelActorRef(has ? an : null); break; }
+                                case 2:
+                                {
+                                    var d = new TravelStructDelta();
+                                    for (int f = Count(r, "struct fields"); f > 0; f--)
+                                    { string fk = r.ReadString(); d.Fields[fk] = ReadValue(r, noTable, interp, "travel." + pk + "." + fk); }
+                                    v = d; break;
+                                }
+                                default: throw new InvalidDataException("travel: unknown property kind");
+                            }
+                            if (c is null) continue;
+                            if (dropped is not null && TravelMisfit(c, pk, v) is string why) { dropped.Add($"{name}.{pk}: {why}"); continue; }
+                            rec.Props[pk] = v;
+                        }
+                        if (c is not null) records.Add(rec);
+                    }
+                    set[key] = records;
+                }
+                return set;
+            }
+            finally { _tolerantRead = false; }
+        }
+
+        // Why a saved travel value cannot go into the current class (null: it fits): the key names a CPF_Travel property
+        // of the class chain (nearest first, as ExportTravelActor), "Name[i]" an element of a static array; a struct delta
+        // names fields of that struct; an actor reference needs an actor reference property.
+        static string TravelMisfit(UClass cls, string key, object v)
+        {
+            int br = key.IndexOf('[');
+            string name = br > 0 ? key.Substring(0, br) : key;
+            UProperty prop = null;
+            for (UClass c = cls; c is not null && prop is null; c = UEClassRegistry.Shared.CanonicalSuper(c))
+                foreach (UProperty p in c.EnumerateFields<UProperty>())
+                    if (string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase)) { prop = p; break; }
+            if (prop is null || !prop.PropertyFlags.HasFlag(UELib.Flags.PropertyFlag.Travel)) return "no such travel property now";
+            if (br > 0 && !(int.TryParse(key.AsSpan(br + 1, key.Length - br - 2), out int idx) && idx >= 0 && idx < prop.ArrayDim))
+                return $"no element {key} now";
+            if (br < 0 && prop.ArrayDim > 1) return "now a static array";
+            switch (v)
+            {
+                case TravelActorRef: return IsActorReferenceProperty(prop) ? null : "not an actor reference now";
+                case TravelStructDelta d:
+                    if (prop is not UStructProperty sp) return "not a struct now";
+                    foreach (var f in d.Fields)
+                    {
+                        UProperty fp = null;
+                        for (UStruct s = sp.Struct; s is not null && fp is null; s = s.Super as UStruct)
+                            foreach (UProperty x in s.EnumerateFields<UProperty>())
+                                if (string.Equals(x.Name, f.Key, StringComparison.OrdinalIgnoreCase)) { fp = x; break; }
+                        if (fp is null || !TravelValueFits(fp, f.Value, false)) return $"struct field {f.Key} does not fit";
+                    }
+                    return null;
+                default:
+                    return TravelValueFits(prop, v, true) ? null : $"saved {v?.GetType().Name ?? "None"} does not fit {prop.GetType().Name}";
+            }
+        }
+
+        // Deterministic text of a travel set (journal: savegame_entry_travel / loadgame_entry_travel).
+        static string EntryTravelText(Dictionary<string, List<TravelActor>> set)
+        {
+            var sb = new StringBuilder();
+            foreach (var kv in set)
+            {
+                sb.Append('[').Append(kv.Key).Append(']');
+                foreach (TravelActor rec in kv.Value)
+                {
+                    sb.Append(' ').Append(rec.Class?.Name).Append(':').Append(rec.Name).Append('{');
+                    foreach (var p in rec.Props)
+                    {
+                        sb.Append(p.Key).Append('=');
+                        if (p.Value is TravelStructDelta d)
+                        {
+                            sb.Append('(');
+                            foreach (var f in d.Fields) sb.Append(f.Key).Append(':').Append(f.Value).Append(',');
+                            sb.Append(')');
+                        }
+                        else sb.Append(p.Value is float fl ? fl.ToString("R", System.Globalization.CultureInfo.InvariantCulture) : p.Value);
+                        sb.Append(';');
+                    }
+                    sb.Append('}');
+                }
+            }
+            return sb.Length == 0 ? "-" : sb.ToString();
+        }
+
+        // Restart with progress: the taken `open saveN.usa` request now names the saved map, so the level is entered as a
+        // travel to it (URL.Map -> empty LevelEnterText, level package name), not as a save package.
+        internal void RetargetTravelToMap(string map)
+        {
+            if (_capturedUrl is not null) _capturedUrl.Map = map;
+            _pendingLevelPackage = map;
+        }
+
+        static bool TravelValueFits(UProperty p, object v, bool element)
+        {
+            if (v is null) return true;   // never set: the zero value, the same in any layout
+            if (!element && p.ArrayDim > 1)
+            {
+                if (v is not System.Collections.IList l || l.Count != p.ArrayDim) return false;
+                foreach (object e in l) if (!TravelValueFits(p, e, true)) return false;
+                return true;
+            }
+            switch (p)
+            {
+                case UBoolProperty: return v is bool;
+                case UFloatProperty: return v is float;
+                case UIntProperty: return v is int;
+                case UByteProperty: return v is byte;
+                case UStrProperty: return v is string;
+                case UNameProperty: return v is UEName;
+                case UClassProperty: return v is UClass;
+                case UObjectProperty: return v is UEObject { IsStruct: false };
+                case UStructProperty sp:
+                    if (v is not UEObject { IsStruct: true } bag) return false;
+                    for (UStruct s = sp.Struct; s is not null; s = s.Super as UStruct)
+                        foreach (UProperty f in s.EnumerateFields<UProperty>())
+                            if (!bag.Props.TryGetValue(f.Name, out object fv) || !TravelValueFits(f, fv, false)) return false;
+                    return true;
+            }
+            return false;
+        }
+
+        // Read side of ReadEntryTravel (tolerant): a class value or package object the current scripts do not have reads as this
+        // marker instead of stopping the read; no travel property type accepts it (TravelValueFits).
+        bool _tolerantRead;
+        sealed class SaveUnresolved { public readonly string What; public SaveUnresolved(string what) { What = what; } }
+
         // Bootstrap of a LOADED world — the bBegunPlay branch of UGameEngine::LoadMap:
         // no InitGameInfo/InitExecution/InitGame/BeginPlay/Attach; only the
         // viewport and the player login (GameInfo.Login finds the saved pawn).
@@ -868,6 +1280,10 @@ namespace HP1.UEScript
             cfg.TravelInfo = null;
             WriteLoadMapComputerName(interp);                      // 246880..246917
             AdoptLoadedUrl(cfg);
+            // The loaded level keeps the entry set it was saved with (format 5), not the empty one of this load (D-82).
+            LevelEntryTravel = _loadedEntryTravel ?? new Dictionary<string, List<TravelActor>>(UEPropNameComparer.Instance);
+            _loadedEntryTravel = null;
+            Log($"loadgame_entry_travel {EntryTravelText(LevelEntryTravel)}");
             BuildLoadMapZoneDist();                                // 247117..247188
             // LoadMap for a level with bBegunPlay: the BeginPlay branch is skipped, but
             // bHighDetailMode (247315..247322), Actors rebuild (247511..247590,

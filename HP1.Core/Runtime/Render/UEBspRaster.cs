@@ -11,7 +11,7 @@
 //     dx = dX*65536/dY, X0 = fistp((IntY_top - ScreenY_top)*dx + ScreenX_top*65536 - 0.5), step = fistp(dx - 0.5);
 //     per row X += step, then store X >> 16 (the edge's first row is already stepped); descending edge -> slot 1,
 //     ascending -> 0.
-// Render window is PC24: all arithmetic in float. Judge: se_harness/bsp_diff/bspraster_oracle.py.
+// Render window is PC24: all arithmetic in float. Checked against the original body.
 using System;
 using System.Collections.Generic;
 using Vector3 = HP1.UEScript.UEVector;

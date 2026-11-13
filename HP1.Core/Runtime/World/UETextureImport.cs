@@ -29,7 +29,7 @@
 //     Palette->Colors(0) == FColor(255,0,255,255) and at least one mip pixel 0 -> PolyFlags |= PF_Masked,
 //     else &= ~PF_Masked.
 //
-// NOT PORTED (loud, §8) because campaign data never reaches it: 24-bit BMP (all 30 shipped snapshots are 8-bit),
+// NOT PORTED (loud) because campaign data never reaches it: 24-bit BMP (all 30 shipped snapshots are 8-bit),
 // PCX (scripts call only .bmp), "_A##" frame linking (names are "save<N>"), -COMPRESSDXT.
 //
 // Result: a VM object of class Texture in package SavePics with the fields scripts read

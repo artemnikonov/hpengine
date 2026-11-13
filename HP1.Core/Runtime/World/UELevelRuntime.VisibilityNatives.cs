@@ -16,8 +16,8 @@
 //     - bIgnoreHidden || !bHidden;
 //     - UModel::FastLineCheck(candidate.Location, query Location);
 //
-// This is gameplay state/query logic, not presentation.  Unity and headless
-// register this same method; neither frontend is allowed to substitute its
+// This is gameplay state/query logic, not presentation.  Every frontend
+// registers this same method; none may substitute its own
 // collider set or transform positions.
 using System;
 using System.Collections.Generic;
@@ -206,7 +206,7 @@ namespace HP1.UEScript
         // An omitted optional bTraceActors comes from the tracer's OWN
         // bCollideActors bit (:156096 `pFStack_9c = *(this+0x1dc) & 1`
         // — the same bit execSetCollision :10663 reads as the default),
-        // NOT a constant false: SE NActor.cpp:643 uses false, but by source
+        // NOT a constant false: SurrealEngine's NActor.cpp:643 uses false, but by source
         // order shipped wins.
         //
         // The out parameter Location is COPIED from the result (:156122-156125), not

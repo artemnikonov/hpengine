@@ -15,12 +15,8 @@ namespace HP1.UEScript
     //     — the mover, not the surface), record category and merge ORDER: first
     //     all category-0 records (loop :20433), then 1 and 2 (:20579) — list order
     //     within each; fill without a shadow map (NoShadowMask).
-    //     Selection and texels proven by executing shipped under unicorn:
-    //     validate_mover_light_branch.py (what is selected),
-    //     validate_mover_mode3_fill.py (which texels) and
-    //     validate_lightmap_effects.py (categories 1/2: frame effects, brightness
-    //     types, Level.Brightness, LightType 0 rejection; fixtures
-    //     lightmap_effects_match_shipped / lightmap_globallighting_matches_shipped).
+    //     Selection and texels proven by executing shipped under unicorn: what is selected, which texels, and
+    //     categories 1/2 (frame effects, brightness types, Level.Brightness, LightType 0 rejection).
     //   * HERE: the draw record's `+0x48` list = URender::SurfLights[iSurf]
     //     (DrawWorld, Render.dll.c:686-689) — the frame's dynamic lights, built by the SetupDynamics light gate and
     //     the BSP filter FUN_10b31c70 in Core's occlusion (UEOcclusion.SetupLight/FilterLight); in the mover branch
@@ -169,7 +165,7 @@ namespace HP1.UEScript
         // UELevelRuntime.BrushToWorldCoords); point — TransformPointBy, vector —
         // TransformVectorBy of those coords. A nonzero shear after quantisation is
         // rejected loudly by BrushCoords.MulScale (NotSupportedException): the shear
-        // matrix is not ported and must not be silently skipped (§8).
+        // matrix is not ported and must not be silently skipped.
         public struct Pose
         {
             public BrushCoords Coords;

@@ -58,7 +58,7 @@ namespace HP1.UEScript
             public IEnumerable<(string, string, string, string)> Load() => _seed;
         }
 
-        // In-memory store whose "saved" overlay is `seed`: a snapshot or probe launched with chosen settings (OpenHP1
+        // In-memory store whose "saved" overlay is `seed`: a snapshot or probe launched with chosen settings (HPEngine
         // --visual); nothing reaches disk.
         public static IStore SeededMemory(params (string Scope, string Section, string Key, string Value)[] seed)
             => new MemoryStore(seed);
@@ -166,15 +166,14 @@ namespace HP1.UEScript
         // (FEOptionsPage.uc:526/583) are frontend quantities, not gameplay, so Core STORES them and exposes them
         // typed, but does nothing with them itself.
         //
-        // CONSUMER — the OpenHP1 frontend: `Brightness` is read every frame (OpenHP1Program.FrameDraws ->
-        // Renderer.GammaExponent) and applied as the D3DDrv device gamma ramp on the whole output frame — OpenHP1
+        // CONSUMER — the HPEngine frontend: `Brightness` is read every frame (HPEngineProgram.FrameDraws ->
+        // Renderer.GammaExponent) and applied as the D3DDrv device gamma ramp on the whole output frame — HPEngine
         // behaves as the first-run hardware device (selectHardwareRenderDevice). Formula: UD3DRenderDevice::Flush,
         // disasm 0x10002f42..0x10002fd6: ramp[i] = fistp(pow(i/255, 1/(Brightness·2.5))·65535)
-        // (openhp1/Hud/ScreenEffects.GammaExponent). Retail SoftDrv instead multiplies the pixel by
-        // (Brightness+0.5) (InitMMXFlashes 0x10d09fc6..0x10d0a02f, se_harness/bsp_diff/softdrv_scale_oracle.py);
-        // that path does NOT apply to OpenHP1. The former
-        // consumer `_HP1Gain` lived in the Unity frontend and was removed with it.
-        // `TextureDetail` is read by the OpenHP1 frame: the first mip per UTexture::Lock and the Render skin rule —
+        // (hpengine/Hud/ScreenEffects.GammaExponent). Retail SoftDrv instead multiplies the pixel by
+        // (Brightness+0.5) (InitMMXFlashes 0x10d09fc6..0x10d0a02f);
+        // that path does NOT apply to HPEngine.
+        // `TextureDetail` is read by the HPEngine frame: the first mip per UTexture::Lock and the Render skin rule —
         // the formula lives in UETextureLod, the frontend does not repeat it.
         public const string ViewportRef = "Engine.Engine.ViewportManager";
 
@@ -248,12 +247,12 @@ namespace HP1.UEScript
         // indirection as the command — in shipped data `MusicVolume=128` sits in both [Audio.GenericAudioSubsystem]
         // and [Galaxy.GalaxyAudioSubsystem], and `[Engine.Engine] AudioDevice` chooses between them.
         //
-        // BYTE TO MULTIPLIER is byte/255, proven by disasm. SurrealEngine additionally multiplies sound by 0.5
+        // BYTE TO MULTIPLIER is byte/255, proven by disasm. SurrealEngine's reimplementation additionally multiplies sound by 0.5
         // (USubsystem.cpp:247), but the HP1 Galaxy path has NO such operand: SetVolumes (Galaxy.dll .text
         // 0x10606664-0x106066c9) does `fild SoundVolume; fmul (1/255); fmul 127.0; ftol` for glxSetSampleVolume, where
         // 0x1063a400 = 1/255 (double), 0x1063a3e8 = 127.0 (float) — Galaxy's own range; the clamp to [0, 1] between
         // them applies to MusicVolume (+0x69), not SoundVolume. So the linear master = byte/255 (integer level:
-        // openhp1 GalaxyMixGain.MasterLevel); SE's 0.5 is a choice of its OpenAL layer.
+        // hpengine GalaxyMixGain.MasterLevel); SE's 0.5 is a choice of its OpenAL layer.
         public const string AudioDeviceRef = "Engine.Engine.AudioDevice";
 
         public float MusicMaster => ByteSetting("MusicVolume", 128f);
@@ -282,6 +281,7 @@ namespace HP1.UEScript
         // rather than substitute its own.
         public string Get(string scope, string section, string key)
         {
+            HP1.Core.UECoreOwner.Check("UEConfig.Get");
             if (_overlay.TryGetValue(Key(scope, section, key), out string v)) return v;
             string fromIni = Source(scope)?.Get(section, key);
             if (fromIni is not null) return fromIni;
@@ -341,44 +341,44 @@ namespace HP1.UEScript
         public static UEConfig Global { get; internal set; }
         internal string InstallSystemDir;
 
-        // OpenHP1's own settings — the original has no such section.
-        public const string OpenHP1Section = "OpenHP1";
+        // HPEngine's own settings — the original has no such section.
+        public const string HPEngineSection = "HPEngine";
 
-        // IMPROVEMENT, not original (author decision 2026-10-15): frame interpolation between 60 Hz logic ticks, always on
-        // (draw rate and its 120 cap — openhp1/FramePacing.cs FramePacer.DrawHz). No menu item; an explicit "False"
+        // NOT ORIGINAL (improvement): frame interpolation between 60 Hz logic ticks, always on
+        // (draw rate and its 120 cap — hpengine FramePacer.DrawHz). No menu item; an explicit "False"
         // turns it off (one frame per logic tick).
         public const string SmoothMotionKey = "SmoothMotion";
-        public bool SmoothMotion => !string.Equals(Get(ScopeSystem, OpenHP1Section, SmoothMotionKey), "False", StringComparison.OrdinalIgnoreCase);
+        public bool SmoothMotion => !string.Equals(Get(ScopeSystem, HPEngineSection, SmoothMotionKey), "False", StringComparison.OrdinalIgnoreCase);
 
-        // IMPROVEMENT, not original (author decision, registry D-53): anisotropic filtering of 3D-world textures.
+        // NOT ORIGINAL (D-53): anisotropic filtering of 3D-world textures.
         // D3DDrv does not set MAXANISOTROPY. Missing key or not a number — 16; 0 and 1 — off; above 16 — 16. No menu item.
         public const string AnisotropyKey = "Anisotropy";
         public int Anisotropy
         {
             get
             {
-                string raw = Get(ScopeSystem, OpenHP1Section, AnisotropyKey);
+                string raw = Get(ScopeSystem, HPEngineSection, AnisotropyKey);
                 if (!int.TryParse(raw, out int v)) return 16;
                 return v <= 1 ? 0 : Math.Min(v, 16);
             }
         }
 
-        // IMPROVEMENT, not original (D-44; menu item: author decision 2026-11-08): the interface scale. Standard = the
+        // NOT ORIGINAL (D-44): the interface scale. Standard = the
         // integer max(1, H/480) (640x480 proportions); the Options item "Interface Size" (the Object Detail frame,
         // UEPortScriptOverrides) saves a step: Smaller -1 / Standard 0 / Larger +1, never below 1 — integer only, pixels
         // stay crisp. Missing or any other value = 0. Core owns the choice and the formula; the frontend only reads the scale.
         public const string UIScaleStepKey = "UIScaleStep";
         public int UIScaleStep
-            => Get(ScopeSystem, OpenHP1Section, UIScaleStepKey) switch { "-1" => -1, "1" => 1, _ => 0 };
+            => Get(ScopeSystem, HPEngineSection, UIScaleStepKey) switch { "-1" => -1, "1" => 1, _ => 0 };
         public static int UIScaleFor(int screenHeight, int step) => Math.Max(1, Math.Max(1, screenHeight / 480) + step);
 
-        // NOT ORIGINAL (author decisions 2026-10-15, 2026-11-08): the one source of the Original / Enhanced presentation
+        // NOT ORIGINAL: the one source of the Original / Enhanced presentation
         // (UEWorldFrameProducer.EnhancedVisuals). No menu item: the player always gets Enhanced; only "Original" in
-        // [OpenHP1] VisualMode (ini, or OpenHP1 --visual for snapshots, judges and the campaign sweep) selects Original.
+        // [HPEngine] VisualMode (ini, or HPEngine --visual for snapshots, judges and the campaign sweep) selects Original.
         public const string VisualModeKey = "VisualMode";
         public const string VisualModeOriginal = "Original";
         public bool VisualModeIsOriginal
-            => string.Equals(Get(ScopeSystem, OpenHP1Section, VisualModeKey), VisualModeOriginal, StringComparison.OrdinalIgnoreCase);
+            => string.Equals(Get(ScopeSystem, HPEngineSection, VisualModeKey), VisualModeOriginal, StringComparison.OrdinalIgnoreCase);
 
         // Steps 1-3 of shipped GlobalSetProperty: live value, then save RIGHT HERE. The order matters — consumers
         // read the state immediately.

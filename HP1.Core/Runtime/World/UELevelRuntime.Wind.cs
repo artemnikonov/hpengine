@@ -18,7 +18,7 @@
 // +0x260 WindRadius, +0x261 WindRadiusInner, +0x262 WindFluctuation, +0x264
 // WindSource, +0x268 bit0 bPermeating, +0x26c Fluc.
 //
-// OMITTED PER §4a (author decision, D06 — only particles read the wind):
+// OMITTED (D06 — only particles read the wind):
 //  * FLUCTUATION (WindFluctuation != 0): shipped adds lattice noise
 //    FUN_104315d0 (32-unit cell, permutation table 0x105f7c18 that the first
 //    call shuffles with 256 appRand). Table indices are a signed remainder:
@@ -35,8 +35,7 @@
 //    — within that radius shipped would dereference a null pointer). The port
 //    walks the level's live actors in Actors order; class defaults do not take part.
 //
-// Oracle: se_harness/bsp_diff/wind_oracle.py (the real GetWind under unicorn),
-// validator validate_wind.py, red test audit/wind_redtest.sh.
+// Checked against the real GetWind under unicorn.
 using System;
 using Vector3 = HP1.UEScript.UEVector;
 
@@ -205,8 +204,8 @@ namespace HP1.UEScript
                     if (!_windFluctuationReported)
                     {
                         _windFluctuationReported = true;
-                        // §4a: only particles read the wind, the noise is
-                        // presentation; registry decision D06.
+                        // Only particles read the wind, the noise is
+                        // presentation (D06).
                         HP1.Core.UETrace.Warn("wind §4a: '" + w.GetProp(PK.Name) + "' WindFluctuation="
                             + w.GetProp(PK.WindFluctuation) + " — fluctuation noise (Engine.dll FUN_104315d0, reads process memory "
                             + "before the table) omitted: wind affects only particles (presentation); "

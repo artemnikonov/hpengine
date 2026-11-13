@@ -23,9 +23,9 @@
 // window (PC24): all body arithmetic here is C# float, which under PC24 matches x87
 // operation for operation (including gates 7-8 with x87 comparison semantics for NaN).
 // LineCheck is Core's model body, which takes the precision of the caller's window (PC24 here: every
-// operation to float; HeadlessBspModel.Pc24); FindCoplanarSurface is the PC24 body (validate_decal.py, unicorn at FPCW = PC24):
+// operation to float; HeadlessBspModel.Pc24); FindCoplanarSurface is the PC24 body (checked under unicorn at FPCW = PC24):
 // in the render window shipped rounds every operation to 24 bits.
-// Checked against the translation in the PC24 window (HeadlessSmoke --decalcore, HP1_DECAL_NOTRACKER=1):
+// Checked against the translation in the PC24 window:
 // bit-exact, Tut1/Tut3/Tut1b 60 cases each, 0 divergences.
 // Outside the PC24 window (game tick, PC64) the campaign never calls the native (Scorch/ectoMark
 // are not spawned); a call there is a loud failure, not a silent PC24.
@@ -293,7 +293,7 @@ namespace HP1.UEScript
         {
             float g7 = (xAxis.x * n2.x + xAxis.z * n2.z) + xAxis.y * n2.y;          // 0x10410d29-0x10410d52
             // C3 after fcomp: zero or NaN — reject. Shape from the listing; the check corpus never
-            // meets NaN here, so this branch specifically is not proven by comparison (V9).
+            // meets NaN here, so this branch specifically is not proven by comparison.
             if (!(g7 < 0f || g7 > 0f)) return false;
             var off = new Vector3(base2.x - point2.x, base2.y - point2.y, base2.z - point2.z);
             float g8 = (off.x * n2.x + off.z * n2.z) + off.y * n2.y;                // 0x10410d5e-0x10410dc7

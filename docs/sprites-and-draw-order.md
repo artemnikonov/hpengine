@@ -1,6 +1,6 @@
 # Sprites and draw order
 
-Three different orderings matter when the original draws a frame: the order of the frame's sprite list, the order `DrawFrame` hands sprites to `DrawActorSprite` on the Direct3D driver, and the order of faces inside one translucent mesh in `DrawLodMesh`. None of them is a plain back-to-front depth sort of actors, and the middle one is not by depth at all. This note records what the shipped Render.dll 1.53 does and where OpenHP1 follows it. Core decides the order; the frontend emits what it is given.
+Three different orderings matter when the original draws a frame: the order of the frame's sprite list, the order `DrawFrame` hands sprites to `DrawActorSprite` on the Direct3D driver, and the order of faces inside one translucent mesh in `DrawLodMesh`. None of them is a plain back-to-front depth sort of actors, and the middle one is not by depth at all. This note records what the shipped Render.dll 1.53 does and where HPEngine follows it. Core decides the order; the frontend emits what it is given.
 
 ## Sprite list of a frame
 
@@ -18,7 +18,7 @@ The retail install selects the Direct3D driver (`RenDev->SpanBased` at +0x48 is 
 - The original's class addresses vary between runs. A capture of 8000 sorts in the original showed no stable order. NOT ORIGINAL (author decision, 2026-11-03): the port uses the order in which it loads classes (script classes) times 0x4fc, followed by the DLL-native classes ordered by their static class address in Engine.dll. That matched all 8000 logged sorts. This is the only place where the port differs, and only because the original itself is run-dependent.
 - Passes (0x10b2666a..0x10b26734): pass 1 draws sprites whose Actor is NULL, or whose Style (+0x155) is not 3 (Translucent) and whose Opacity (+0x194) is at least 1.0. Pass 2 draws everything else. Each pass walks the sorted array in order. A NaN opacity fails the `>= 1.0` test (the original's compare leaves C0 clear for unordered) and goes to pass 2. The frame carries the pass as `ActorSnapshot.LatePass` and the frontend groups by it.
 - Sprites are not interleaved into surface list 2. Only the call order between emitters depends on the sort, because it fixes the order of draws from the render random stream.
-- A mesh runs `DrawActorSprite` once per frame whose list holds it, with that frame's `FDynamicSprite`; `GetFrame` is not idempotent across draws within a tick (vertex-cache count, tween refill, channel overlay). Port: `DirectRenderStep` in [`HP1.Core/Runtime/VM/UEWorldFrameProducer.cs`](../HP1.Core/Runtime/VM/UEWorldFrameProducer.cs).
+- A mesh runs `DrawActorSprite` once per frame whose list holds it, with that frame's `FDynamicSprite`; `GetFrame` is not idempotent across draws within a tick (vertex-cache count, tween refill, channel overlay). Port: `DirectRenderStep` in [`HP1.Core/Runtime/VM/UEWorldFrameProducer.Views.cs`](../HP1.Core/Runtime/VM/UEWorldFrameProducer.Views.cs).
 
 ## Face order inside one mesh (`DrawLodMesh`)
 

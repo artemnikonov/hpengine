@@ -1,6 +1,5 @@
-// The VM object model, extracted from the Unity frontend (plan step 2 slice
-// "UEObject core"): identical semantics, zero Unity dependencies. The single
-// class seam is `Interp` — the owning interpreter (typed since slice 4c).
+// The VM object model: the UE1 object (actor, struct value, class default) as the VM sees it.
+// Free of any frontend dependency. The single class seam is `Interp` — the owning interpreter.
 using System;
 using System.Collections.Generic;
 using UELib.Core;
@@ -13,11 +12,10 @@ namespace HP1.UEScript
     // (UEProps.cs), the counterpart of UObject memory addressed by UProperty.Offset
     // (execInstanceVariable: GPropAddr = this + Offset, Core.dll.c:61661).
     // Frontend state (the
-    // Unity GameObject/host/physics binding) lives OUTSIDE this type — see the
-    // frontend's UEObjectUnityExt side-table.
+    // frontend's proxy/host binding) lives OUTSIDE this type, in a frontend side-table.
     public class UEObject
     {
-        // Stable identity for the frontend proxy (stage 8): actor names are not
+        // Stable identity for the frontend proxy: actor names are not
         // unique enough to key a proxy's lifecycle (spawns reuse names, structs
         // have none), so every UEObject gets a process-monotonic id at
         // construction. Deterministic because object creation order is
@@ -44,9 +42,7 @@ namespace HP1.UEScript
         public UEObject() { Props = new UEProps(UEPropLayout.Loose); }
         // Struct bag with a known layout (UEPropLayout.ForStruct/ForStructName).
         public UEObject(UEPropLayout layout) { Props = new UEProps(layout); }
-        // The driving interpreter. Typed object here: the interpreter class
-        // still compiles in the frontend assembly; frontends read it back via
-        // a typed extension (UEObjectUnityExt.Vm / the headless Vm shim).
+        // The driving interpreter.
         public UEInterpreter Interp;
         // Frontend fallback for objects materialised during default loading
         // (gesture bags); set once at runtime bootstrap alongside
@@ -58,9 +54,7 @@ namespace HP1.UEScript
         // calls on a corpse DO execute (ContextToken likewise); object properties of live
         // actors pointing to a corpse are cleared by ULevel::CleanupDestroyed
         // (UELevelRuntime.SaveGame.cs, CleanupDestroyed). A corpse is not ticked. We also null
-        // UnityActor on destroy so C# `?.` (which ignores Unity's fake-null ==)
-        // can't deref a destroyed GameObject and throw (frontend nulls its
-        // side-table binding on destroy).
+        // The frontend nulls its side-table binding on destroy.
         public bool Destroyed;
         // Engine timer (Actor.SetTimer/Timer). TimerRate>0 means active: TimerCounter
         // counts down each tick; at 0 the Timer() event fires and, if TimerLoop,
@@ -96,8 +90,7 @@ namespace HP1.UEScript
             return a;
         }
         // The engine-side touch link/unlink semantics live in UELifecycle
-        // (shipped BeginTouch/TouchTo/EndTouch port) — the former SE-model
-        // TouchListAdd/TouchListRemove pair is gone: shipped links the sides
+        // (shipped BeginTouch/TouchTo/EndTouch port) — shipped links the sides
         // SEQUENTIALLY with per-side events interleaved, which cannot be
         // expressed as a bookkeeping-only helper.
         // Persistent, suspendable state-body frame — FStateFrame (Core.dll.c:52914:
@@ -112,7 +105,7 @@ namespace HP1.UEScript
         public bool InSingularFunction;
 
         // Bridge methods — C# handlers for objects whose behaviour is genuinely
-        // engine-side in this Unity port (for example PlayerHarry transform/input
+        // engine-side in this port (for example PlayerHarry transform/input
         // bridge hooks). When a context-call resolves to no UFunction/native, the
         // VirtualFunctionToken handler consults this map.
         // Null for ordinary VM objects.
@@ -134,11 +127,11 @@ namespace HP1.UEScript
         // Members are values: structs and arrays (static array, array<>) are copied recursively (UEValue.CopyValue).
         static readonly Func<object, object> CloneMember = UEValue.CopyValue;
 
-        public object GetProp(string n) => Props.Get(n);
-        public void   SetProp(string n, object v) => Props[n] = v;
+        public object GetProp(string n) { HP1.Core.UECoreOwner.Check("UEObject.GetProp"); return Props.Get(n); }
+        public void   SetProp(string n, object v) { HP1.Core.UECoreOwner.Check("UEObject.SetProp"); Props[n] = v; }
         // By key id (UEPropKeys.Id), for hot paths that keep the id in a static.
-        public object GetProp(int keyId) => Props.Get(keyId);
-        public void   SetProp(int keyId, object v) => Props.Set(keyId, v);
+        public object GetProp(int keyId) { HP1.Core.UECoreOwner.Check("UEObject.GetProp"); return Props.Get(keyId); }
+        public void   SetProp(int keyId, object v) { HP1.Core.UECoreOwner.Check("UEObject.SetProp"); Props.Set(keyId, v); }
 
         // Declaring class of the property (UProperty.Outer; for a property from another package
         // this is the import stub, same name).
@@ -150,7 +143,7 @@ namespace HP1.UEScript
         // UnrealScript lets a subclass declare a property with an ancestor's property name
         // (Mover.AttachTag over Actor.AttachTag, baseSpell.Target over Actor.Target). In
         // shipped these are DIFFERENT object fields: a live probe of the original
-        // (tools/origprobe/hp1setbase.c, Lev2_HogFront) showed movers with the map's AttachTag
+        // (Lev2_HogFront) showed movers with the map's AttachTag
         // at +0x2f8 (Mover.AttachTag) and None at +0xac (Actor.AttachTag), and the AttachTag
         // pass in LoadMap (disasm 0x1039e00c, reads +0xac) does not touch them. A by-name
         // dictionary merged both slots into one.
@@ -221,8 +214,8 @@ namespace HP1.UEScript
             return null;
         }
 
-        // The ONE Region constructor (review #20): every frontend builds the
-        // PointRegion struct in this Core shape — a value-struct UEObject with
+        // The ONE Region constructor: the
+        // PointRegion struct is built in this Core shape — a value-struct UEObject with
         // Zone/iLeaf/ZoneNumber — so WorldFrame projection and the particle
         // zone-gravity read one form everywhere (the shipped FPointRegion:
         // ZoneInfo* Zone, INT iLeaf, BYTE ZoneNumber).
@@ -260,11 +253,11 @@ namespace HP1.UEScript
             // STRUCT props get the same treatment: UE1 zero-fills the default
             // object's memory, so every declared struct EXISTS (zeroed) even
             // with no defaultproperty tag. Materialising them as zero bags lets
-            // `Obj.SomeStruct.Member = x` land (the no-tag case previously read
-            // a null parent and dropped the write — e.g. ParticleFX.Period,
+            // `Obj.SomeStruct.Member = x` land (without it a no-tag struct reads
+            // a null parent and drops the write — e.g. ParticleFX.Period,
             // written by SpellLearnFX.DrawSpell but tagged in no class).
             // Structs are NOT object refs, so this cannot flip `!= None` paths
-            // (the documented reason the blanket SCALAR zero-init was reverted).
+            // (which is why scalars are not blanket zero-initialised).
             foreach (var cls in chain) PreallocDeclaredProps(cls);
             // CONFIG AND LOCALIZATION: THE SAME LAYER AS IN SHIPPED. UClass::Serialize
             // (Core.dll.c:4230-4240) builds class defaults as "ancestor defaults + own package
@@ -291,9 +284,9 @@ namespace HP1.UEScript
             // NOTE: scalar props absent from BOTH the JSON and the defaultproperties block
             // stay ABSENT (GetProp → null); the VM coerces null→zero on read (ToInt/ToBool/
             // AsFloat), matching UE1's type-zero default. A blanket zero-init of every
-            // declared scalar was tried + REVERTED: it activated dormant code paths (e.g.
-            // PotCam camera-collision → unimplemented natives 277/309/533) that we can't yet
-            // honour. So the generic loader relies on null-coercion for absent defaults.
+            // declared scalar is NOT done: it would activate dormant code paths (e.g.
+            // PotCam camera-collision → unimplemented natives 277/309/533) that are not
+            // ported. So the generic loader relies on null-coercion for absent defaults.
             //
             // ── THE CLASS C++ CONSTRUCTOR RUNS AFTER THE DEFAULTS COPY ───────
             // Order proven from the binary: StaticConstructObject = StaticAllocateObject (copy
@@ -355,7 +348,7 @@ namespace HP1.UEScript
         // STATIC ARRAY: ArrayDim elements, and in an array of STRUCTS every element is ITS OWN
         // zeroed struct. UE1 holds the whole property memory (ElementSize x ArrayDim,
         // UStructProperty), so `Arr[i].Member = x` and `Arr[i].Inner[k] = x` are always
-        // addressable. With null elements a nested array read empty and the write was lost:
+        // addressable. With null elements a nested array reads empty and the write is lost:
         // "Accessed None in FESavePage.Created at pos 631"
         // (FEFilePage.uc:71-72, SaveFileDetails[xx].Details[k]).
         internal static List<object> ZeroStaticArray(UELib.Core.UProperty prop)
@@ -435,12 +428,12 @@ namespace HP1.UEScript
 
         // The class-default-object read shipped SpawnActor performs BEFORE any
         // actor exists (Engine.dll.c:20085-20113 reads the template's
-        // collision gate/extent): resolve one SCALAR defaultproperty by
+        // collision flags/extent): resolve one SCALAR defaultproperty by
         // walking the canonical super chain most-derived-first (within a
         // class the LAST tag wins, matching ApplyClassDefaults' overwrite
         // order). Deliberately scalar-only — struct/object defaults would
         // materialize prototype bags (observable ObjectId consumption), and
-        // the spawn gate needs none of them. Absent → null (the VM's
+        // the spawn check needs none of them. Absent → null (the VM's
         // null-coerce zero, same as an instance without the tag).
         // Same for a VECTOR default (struct Vector). A vector is a UEVector value: no bag is
         // created and no ObjectId is spent (the prototype cache is per-tag, as in
@@ -935,7 +928,7 @@ namespace HP1.UEScript
         }
 
         // StrProperty default: strip the outer quote pair AND reverse UELib's
-        // FormatLiteral escaping (PropertyDisplay.cs:15-39 escapes inner \" \\ \n \r).
+        // FormatLiteral escaping (UELib's PropertyDisplay escapes inner \" \\ \n \r).
         // Single left-to-right pass so `\\` (literal backslash) isn't re-interpreted.
         // No-op for Tut1 (no string default contains an escape), correct for any
         // escaped default on later levels.

@@ -11,10 +11,9 @@
 //     (prev.BitMask & 0x7fffffff) != 0, otherwise a new word with mask 1;
 //   Struct (34695): size = the struct's PropertiesSize, alignment 2 for
 //     size 2, 1 for size < 4, otherwise 4.
-// An unknown property type throws (§8) instead of guessing a size.
+// An unknown property type throws instead of guessing a size.
 //
-// Independent oracle of the same rules: audit/prop_offsets.py (from the
-// --dumpprops dump); check over all campaign classes: HeadlessSmoke --layoutcheck.
+// Checked against an independent dump of the shipped layout over all campaign classes.
 using System;
 using System.Collections.Generic;
 using UELib;

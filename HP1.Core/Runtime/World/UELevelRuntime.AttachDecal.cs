@@ -39,7 +39,7 @@
 // `Location + (-XAxis)*Distance` takes the trace DOWN — under the owner's
 // feet, as drawn.
 //
-// WHO CALLS `Update` AND WHAT `L` IS — READ FROM THE DISASSEMBLY (V11).
+// WHO CALLS `Update` AND WHAT `L` IS — READ FROM THE DISASSEMBLY.
 // No campaign `.uc` calls `Update`, and the Engine.dll decompile shows only
 // TWO mentions of the name, both FName table initialisers. A negative conclusion
 // from the decompile is not allowed, and it would be wrong: the call lives in
@@ -47,8 +47,8 @@
 // wrapper, so the images contain neither an import nor a `call` to its body
 // (0x1033e3a0) or export thunk (0x10304b01) — checked by scanning both addresses:
 //
-//     mov  eax, [ebx+0x258]      ; Actor->Shadow   (field offset proven by
-//     test eax, eax              ;  the --dumpprops oracle + prop_offsets.py)
+//     mov  eax, [ebx+0x258]      ; Actor->Shadow   (field offset checked against
+//     test eax, eax              ;  the shipped class layout)
 //     je   ...
 //     ...
 //     mov  edi, [ebx+0x258]
@@ -72,7 +72,7 @@ namespace HP1.UEScript
         //
         // The whole body (gates, record, FUN_104127c0 nodes, MultiDecalLevel wrap,
         // detach) is Core's own code (UELevelRuntime.DecalStore.cs), bit-checked
-        // against the translated body in the PC24 window (HeadlessSmoke --decalcore).
+        // against the translated body in the PC24 window.
         // Surf->Decals lives in Core. The translation remains only as the check reference.
         //
         // Shadows on mover brushes use the surfaces the FMovingBrushTracker inserted
@@ -80,7 +80,7 @@ namespace HP1.UEScript
         public const bool DecalWrapPorted = true;
         public const bool SurfDecalListPorted = true;
 
-        // Activation counters (V8): native calls and successful attachments.
+        // Activation counters: native calls and successful attachments.
         public int DecalAttachCalls;
         public int DecalAttachOk;
         public int DecalDetachCalls;

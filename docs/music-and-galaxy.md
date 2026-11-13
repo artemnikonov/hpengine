@@ -2,9 +2,9 @@
 
 The game's audio runs through `Galaxy.dll` (a Miles-style mixer, `UGalaxyAudioSubsystem`) driven by `Engine.dll`. Almost
 everything the scripts can observe about sound lives in Galaxy's per-frame `Update` (body `FUN_106081f0`): the 16-entry
-channel table, `bSongFinished`, the music fade and the moment a sound ends. OpenHP1 ports those bodies into Core
+channel table, `bSongFinished`, the music fade and the moment a sound ends. HPEngine ports those bodies into Core
 (`../HP1.Core/Runtime/World/UEGalaxyAudio.cs`, `UEGalaxyVoiceMix.cs`) and leaves only mixing to the frontend
-(`../openhp1/Audio/`). This note records how the original behaves and where the port deliberately differs.
+(`../hpengine/Audio/`). This note records how the original behaves and where the port deliberately differs.
 
 ## Formats and catalogs
 
@@ -100,7 +100,7 @@ channel table, `bSongFinished`, the music fade and the moment a sound ends. Open
   The port holds those voices and resumes them (D-52, not original).
 - Zone reverb is a send bus: voice send level 0x7f, parameters from `UpdateReverb` (0x106095c4) over the viewer's zone:
   wet gain `MasterGain/255`, cutoff clamped to 0..44100 Hz, six delay/gain pairs (delay = byte * 0.002 s clamped to
-  0.001..0.34, gain = byte/255 clamped to 0.001..0.999). The frontend DSP (`../openhp1/Audio/ZoneReverb.cs`) matches the
+  0.001..0.34, gain = byte/255 clamped to 0.001..0.999). The frontend DSP (`../hpengine/Audio/ZoneReverb.cs`) matches the
   original callback `FUN_106206f3` and setup `FUN_1060e2a0` bit for bit at 22050 and 44100 Hz.
 
 ## Mixer rate
@@ -108,8 +108,8 @@ channel table, `bSongFinished`, the music fade and the moment a sound ends. Open
 - The shipped `Default.ini` sets `OutputRate=22050Hz`; the setting is a byte over the list 8000, 11025, 16000, 22050,
   32000, 44100, 48000 Hz and `glxStartOutput` (`FUN_10610c80`) accepts 8000..48000. Voice steps, envelope ticks (every
   1 ms) and sequencer ticks derive from it. The mixer proper is an SSE 16.16 linear-interpolation kernel that cuts calls at
-  0x200 frames and at tick boundaries (`../openhp1/Audio/AudioMixer.cs`, `GalaxyMixKernel.cs`).
-- OpenHP1 mixes at 44100 Hz by default (D-50, not original: shipped music is 22050/44100 Hz and most sounds too (some are 16000 Hz), so 44100 gives exact steps
+  0x200 frames and at tick boundaries (`../hpengine/Audio/AudioMixer.cs`, `GalaxyMixKernel.cs`).
+- HPEngine mixes at 44100 Hz by default (D-50, not original: shipped music is 22050/44100 Hz and most sounds too (some are 16000 Hz), so 44100 gives exact steps
   and no unfiltered decimation). Key `OutputRate` in the user ini restores any value of the list. The rate that Core uses
   for the script-visible song end stays the shipped one.
 - Open: the mixer's pan smoothing and master-gain truncations are tied to the device block, and the music stream sample

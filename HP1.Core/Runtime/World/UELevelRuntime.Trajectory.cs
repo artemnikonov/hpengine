@@ -11,8 +11,7 @@
 // Operation order and float rounding points follow the x87 disasm (values
 // stored with fstp dword are rounded; those kept on the stack are not).
 //
-// Oracle: se_harness/bsp_diff/traj_oracle.py (the real body under unicorn, the world
-// is an answer tape), validator validate_trajectory.py.
+// Checked against the real body under unicorn (the world is an answer tape).
 using System;
 using Vector3 = HP1.UEScript.UEVector;
 

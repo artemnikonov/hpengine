@@ -1,7 +1,7 @@
 // TEXTURE METRICS FROM THE USER'S PACKAGES.
 //
 // A surface's diffuse UV is normalized by (DrawScale · texture size), and the render state mixes in the texture's own
-// flags. `BspDiffRunner --texturemetrics` serializes this Core result (texture_metrics.tsv format).
+// flags. The validation tooling serializes this Core result as a table.
 //
 // Exporter rules: packages Textures/System/Maps (*.utx, *.u, *.unr) in file-name order (ordinal); a texture object is
 // a class whose name ends in "Texture"; the first path wins. Values are UELib tag strings; a missing tag is "-" (the

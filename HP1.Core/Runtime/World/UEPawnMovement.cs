@@ -40,7 +40,7 @@ namespace HP1.UEScript
         // suspended body simply never resumes because the tick loops skip
         // bDeleteMe actors. Frontends therefore must NOT null StateFrame on
         // destroy — a missing frame here is a modelling error on ANY pawn,
-        // destroyed or live (§8, no invented fallback).
+        // destroyed or live (no invented fallback).
         static void InstallLatent(UEObject self, UEFrame frame, LatentRunState latent)
         {
             UEFrame sf = self?.StateFrame;
@@ -195,7 +195,7 @@ namespace HP1.UEScript
             //   Velocity.Z (+0x134) >= 0.0 -> 0; Location.Z + 100.0 < Point.Z -> 1
             //   (sum in x87 without rounding to float — here double, exact); else 0.
             //   The branch is BEFORE the inventory target, the arrival test and MoveTimer.
-            // Offsets checked by audit/prop_offsets.py (Actor.Region/Velocity/
+            // Offsets checked against the shipped class layout (Actor.Region/Velocity/
             // Acceleration, Pawn.AccelRate, ZoneInfo.ZoneGravity).
             if (physics == 2)
             {
@@ -288,8 +288,8 @@ namespace HP1.UEScript
             return false;
         }
 
-        // ── moveToward's x87 chains (disasm 0x103d9716..0x103d9cb3), one helper per chain; judge
-        // se_harness/bsp_diff/x87_size_oracle.py (kinds mt*). PC64: a value rounds to float only at fst/fstp dword. ──
+        // ── moveToward's x87 chains (disasm 0x103d9716..0x103d9cb3), one helper per chain; checked
+        // against the original under unicorn. PC64: a value rounds to float only at fst/fstp dword. ──
 
         // fmul / fsubr of a float and a register value, fstp dword (X87Ext keeps the IEEE sign of a zero).
         static float MulF(float c, HP1.Core.X87Ext m) => R64(X(c) * m).ToFloat();

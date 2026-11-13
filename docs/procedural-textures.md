@@ -10,7 +10,7 @@ Torch flames on walls, water surfaces and the spell-book background are not stor
 
 ## 60 Hz step (port difference)
 
-In the original the step rate follows the frame rate (one step per drawn frame). The port draws at the monitor rate, so steps are metered by wall clock to 60 per second, with a quarter-period tolerance for jitter; a longer lag is not caught up with a queue of steps. **Not original (author decision D-35):** it keeps fire and water looking as at the original's usual 60 fps on any monitor. (port: [`RenderCadence.cs`](../HP1.Core/Runtime/VM/RenderCadence.cs), used by `UETextureAnim.CurrentFrame` and by [`openhp1/ProcTex/ProcTextures.cs`](../openhp1/ProcTex/ProcTextures.cs).) Only textures drawn this or the previous frame are stepped.
+In the original the step rate follows the frame rate (one step per drawn frame). The port draws at the monitor rate, so steps are metered by wall clock to 60 per second, with a quarter-period tolerance for jitter; a longer lag is not caught up with a queue of steps. **Not original (author decision D-35):** it keeps fire and water looking as at the original's usual 60 fps on any monitor. (port: [`RenderCadence.cs`](../HP1.Core/Runtime/VM/RenderCadence.cs), used by `UETextureAnim.CurrentFrame` and by [`hpengine/ProcTex/ProcTextures.cs`](../hpengine/ProcTex/ProcTextures.cs).) Only textures drawn this or the previous frame are stepped.
 
 ## Fire (`UFireTexture`)
 
@@ -29,7 +29,7 @@ In the original the step rate follows the frame rate (one step per drawn frame).
 
 ## Random byte ring (`FractalRandom`)
 
-All fractal textures share one ring of 0x200 bytes (Fire.dll `0x10518450`, index at `0x10518650`), seeded once per process by the first `UFractalTexture` constructor (`0x10501050`) with 0x200 values of `(BYTE)appRand()`, before any gameplay `FRand`. A step reads `ring32[(idx + 0x80) & 0xfc]`, advances `idx = (idx + 4) & 0xfc` and xors the value into the new slot. Because fire and water draw from the same ring, the order in which textures are stepped changes their bytes (look only, not gameplay). The port seeds its ring once from the render random stream, so ring contents differ from a given original run; ice never touches the ring. (port: [`FractalRandom.cs`](../HP1.Core/Runtime/VM/FractalRandom.cs).) Open: the original's order is the order of `Lock` calls at draw time; the port steps fire before water, in creation order (`openhp1/ProcTex/README.md`, discrepancy 5).
+All fractal textures share one ring of 0x200 bytes (Fire.dll `0x10518450`, index at `0x10518650`), seeded once per process by the first `UFractalTexture` constructor (`0x10501050`) with 0x200 values of `(BYTE)appRand()`, before any gameplay `FRand`. A step reads `ring32[(idx + 0x80) & 0xfc]`, advances `idx = (idx + 4) & 0xfc` and xors the value into the new slot. Because fire and water draw from the same ring, the order in which textures are stepped changes their bytes (look only, not gameplay). The port seeds its ring once from the render random stream, so ring contents differ from a given original run; ice never touches the ring. (port: [`FractalRandom.cs`](../HP1.Core/Runtime/VM/FractalRandom.cs).) Open: the original's order is the order of `Lock` calls at draw time; the port steps fire before water, in creation order (`hpengine/ProcTex/README.md`, discrepancy 5).
 
 ## Ice (`UIceTexture`)
 

@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- HPEngine Launcher for Windows and Linux (Avalonia): the player-facing behaviour of launcher/Launcher.swift (macOS).
+       Published self-contained, single file (make_launcher.sh), NOT trimmed: Avalonia trimming could not be verified on
+       the target systems. Window icon: ShieldIcon.cs (drawn in code). -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>HPEngineLauncher</AssemblyName>
+    <RootNamespace>HPEngine.Launcher</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../VERSION').Trim())</Version>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="*.cs" />
+    <!-- The engine's own rule for "this folder is a game" (Logic.cs DataDir.OwnGame): one recogniser, not two. -->
+    <Compile Include="../../hpengine/packaging/InstallRoot.cs" Link="InstallRoot.cs" />
+    <!-- The engine's own mod placement rule (Logic.cs StartMap: the maps the enabled mods add). -->
+    <Compile Include="../../hpengine/packaging/ModOverlay.cs" Link="ModOverlay.cs" />
+    <PackageReference Include="Avalonia" Version="11.3.23" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.23" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.23" />
+  </ItemGroup>
+</Project>

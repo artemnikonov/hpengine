@@ -37,10 +37,10 @@ namespace HP1.UEScript
         // PF_AutoUPan (0x200) | PF_AutoVPan (0x400) — literal 0x600 from
         // ADecal::execAttachDecal (`test ah, 6` at 0x10410dd0).
         //
-        // The name is PROVEN BY HP1's OWN DATA, not taken from SurrealEngine. The
+        // The name is established by HP1's OWN DATA (not taken from SurrealEngine). The
         // PolyFlags word is the bool properties of class Engine.Texture in
         // declaration order (the same layout is pinned in UETextureFacts.PolyBits),
-        // and `--dumpprops Texture` prints them: bInvisible(0), bMasked(1),
+        // and dumping the Texture properties prints them: bInvisible(0), bMasked(1),
         // bTransparent(2), bNotSolid(3), bEnvironment(4), bSemisolid(5),
         // bModulate(6), bFakeBackdrop(7), bTwoSided(8), bAutoUPan(9),
         // bAutoVPan(10). So 0x600 is the TWO texture auto-panning bits,
@@ -82,7 +82,7 @@ namespace HP1.UEScript
         //
         // THE ARGUMENTS ARE THE SAME THREE AS SHIPPED: decal location, its rotation
         // axis and the trace distance. A (start, end) pair would be one quantity
-        // instead of two, and gate 7 compares EXACTLY the axis — recovering it from
+        // instead of two, and the shipped gate 7 compares EXACTLY the axis — recovering it from
         // the ray ends would substitute arithmetic for the source.
         public DecalSurfaceHit TraceDecalSurface(Vector3 location, Vector3 axis, float distance)
         {

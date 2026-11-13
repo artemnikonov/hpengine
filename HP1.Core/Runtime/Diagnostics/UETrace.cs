@@ -19,20 +19,18 @@ namespace HP1.Core
             if (Enabled) Console.Error.WriteLine($"trace tick={Tick} {line}");
         }
 
-        // Warning sink for Core code that previously logged through
-        // UnityEngine.Debug. Frontends reassign at bootstrap (Unity →
-        // Debug.LogWarning); the default keeps warnings loud on stderr.
+        // Warning sink for Core code. Frontends may reassign it at bootstrap;
+        // the default keeps warnings loud on stderr.
         public static Action<string> Warn = msg => Console.Error.WriteLine(msg);
 
-        // Error/info sinks for the interpreter's diagnostics (previously
-        // Debug.LogError / Debug.Log). Same contract as Warn: frontends
-        // reassign at bootstrap, defaults stay on stderr so the SHA-pinned
+        // Error/info sinks for the interpreter's diagnostics. Same contract as Warn:
+        // frontends may reassign them at bootstrap, defaults stay on stderr so
         // stdout journals are untouched.
         public static Action<string> Error = msg => Console.Error.WriteLine(msg);
         public static Action<string> Info  = msg => Console.Error.WriteLine(msg);
 
         // Playthrough diagnostics (ClientMessage text with time and place): off by default, so headless runs and their
-        // pinned journals are untouched; the OpenHP1 window points it at its log.
+        // pinned journals are untouched; the HPEngine window points it at its log.
         public static Action<string> Playthrough;
     }
 }

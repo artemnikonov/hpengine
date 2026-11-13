@@ -1,18 +1,18 @@
 #!/bin/sh
 # Third-party tools HP1Setup runs to unpack a game installer: innoextract 1.9 (zlib license; Inno Setup installers,
-# Setup.exe + Setup-1.bin). Used by openhp1/packaging/make_launcher.sh; licenses in public/THIRD_PARTY_NOTICES.md.
+# Setup.exe + Setup-1.bin). Used by hpengine/packaging/make_launcher.sh; licenses in public/THIRD_PARTY_NOTICES.md.
 #
-#   sh launcher/third_party.sh <RID> <package dir>      RID: osx-arm64 | win-x64 | linux-x64
+#   sh launcher/third_party.sh <RID> <package dir>      RID: osx-arm64 | osx-x64 | win-x64 | linux-x64
 #
 # Puts <package dir>/tools/innoextract (win: innoextract.exe) and the license texts of everything inside it in
 # <package dir>/tools/licenses/. Every download is pinned below by SHA-256 and checked before use; a mismatch stops.
 #   win-x64, linux-x64: the official innoextract 1.9 release binaries (Linux: needs only glibc; signed by the author, GPG key
 #     ADE9653703D4ADE0E997758128555A66D7E1DEC9 — the pins are of the files whose signatures verified).
-#   osx-arm64 (no official macOS binary): built here from the official sources — innoextract 1.9 with the three
+#   osx-arm64, osx-x64 (no official macOS binary): built here for the RID's architecture from the official sources — innoextract 1.9 with the three
 #     upstream commits Homebrew applies for current CMake/Boost, Boost 1.86.0 (iostreams filesystem date_time
 #     program_options, static) and xz 5.6.3 (liblzma, static); zlib and bzip2 from macOS. Needs cmake and Xcode
 #     Command Line Tools. Deployment target macOS 13.0, like the Launcher.
-# Downloads and builds are cached in OPENHP1_TOOLS_CACHE (default <repo>/.artifacts/tools-cache).
+# Downloads and builds are cached in HPENGINE_TOOLS_CACHE (default <repo>/.artifacts/tools-cache).
 # The installer itself is never run: innoextract only reads it.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -21,7 +21,7 @@ fail() { echo "third_party: FAILED: $*" >&2; exit 1; }
 [ $# -eq 2 ] || fail "usage: third_party.sh <RID> <package dir>"
 RID=$1 PKG=$2
 [ -d "$PKG" ] || fail "no package directory $PKG"
-CACHE=${OPENHP1_TOOLS_CACHE:-$REPO/.artifacts/tools-cache}
+CACHE=${HPENGINE_TOOLS_CACHE:-$REPO/.artifacts/tools-cache}
 mkdir -p "$CACHE"; CACHE=$(cd "$CACHE" && pwd)
 
 IE=https://constexpr.org/innoextract/files
@@ -47,7 +47,8 @@ case "$RID" in
         L="$CACHE/linux"; rm -rf "$L"; mkdir -p "$L"; tar -xJf "$CACHE/innoextract-1.9-linux.tar.xz" -C "$L"
         cp "$L/innoextract-1.9-linux/bin/amd64/innoextract" "$T/innoextract"; chmod 755 "$T/innoextract"
         for l in "$L"/innoextract-1.9-linux/license/*; do cp "$l" "$T/licenses/$(basename "$l").txt"; done ;;
-    osx-arm64)
+    osx-arm64|osx-x64)
+        case "$RID" in osx-arm64) ARCH=arm64 BARCH=arm ;; *) ARCH=x86_64 BARCH=x86 ;; esac
         get innoextract-1.9.tar.gz "$IE/innoextract-1.9.tar.gz" \
             6344a69fc1ed847d4ed3e272e0da5998948c6b828cb7af39c6321aba6cf88126
         get ie-cmake4.patch "$GH/83d0bf4365b09ddd17dddb400ba5d262ddf16fb8.patch?full_index=1" \
@@ -60,7 +61,7 @@ case "$RID" in
             1bed88e40401b2cb7a1f76d4bab499e352fa4d0c5f31c0dbae64e24d34d7513b
         get xz-5.6.3.tar.gz https://github.com/tukaani-project/xz/releases/download/v5.6.3/xz-5.6.3.tar.gz \
             b1d45295d3f71f25a4c9101bd7c8d16cb56348bbef3bbc738da0351e17c73317
-        B="$CACHE/osx-arm64"; P="$B/prefix"; BIN="$B/innoextract-1.9/build/innoextract"
+        B="$CACHE/$RID"; P="$B/prefix"; BIN="$B/innoextract-1.9/build/innoextract"
         export MACOSX_DEPLOYMENT_TARGET=13.0
         if [ ! -x "$BIN" ]; then
             mkdir -p "$B" "$P"
@@ -68,23 +69,25 @@ case "$RID" in
             [ -f "$P/lib/liblzma.a" ] || { rm -rf "$B/xz-5.6.3"; tar -xzf "$CACHE/xz-5.6.3.tar.gz" -C "$B"
             (cd "$B/xz-5.6.3" && ./configure -q --prefix="$P" --disable-shared --enable-static --disable-xz \
                 --disable-xzdec --disable-lzmadec --disable-lzmainfo --disable-scripts --disable-doc --disable-nls \
-                CFLAGS="-O2 -arch arm64" && make -s -j8 && make -s install) > "$B/xz.log" 2>&1 || fail "xz (see $B/xz.log)"; }
+                CFLAGS="-O2 -arch $ARCH" && make -s -j8 && make -s install) > "$B/xz.log" 2>&1 || fail "xz (see $B/xz.log)"; }
             [ -f "$P/lib/libboost_iostreams.a" ] || { rm -rf "$B/boost_1_86_0"; tar -xjf "$CACHE/boost_1_86_0.tar.bz2" -C "$B"
             (cd "$B/boost_1_86_0" && ./bootstrap.sh --with-libraries=iostreams,filesystem,date_time,program_options \
-                && ./b2 -q -j8 --prefix="$P" link=static variant=release threading=multi architecture=arm \
-                    address-model=64 -sNO_LZMA=1 -sNO_ZSTD=1 cxxflags="-mmacosx-version-min=13.0" \
-                    cflags="-mmacosx-version-min=13.0" install) > "$B/boost.log" 2>&1 || fail "Boost (see $B/boost.log)"; }
+                && ./b2 -q -j8 --prefix="$P" link=static variant=release threading=multi architecture=$BARCH \
+                    address-model=64 -sNO_LZMA=1 -sNO_ZSTD=1 cxxflags="-arch $ARCH -mmacosx-version-min=13.0" \
+                    cflags="-arch $ARCH -mmacosx-version-min=13.0" linkflags="-arch $ARCH" install) > "$B/boost.log" 2>&1 || fail "Boost (see $B/boost.log)"; }
             rm -rf "$B/innoextract-1.9"; tar -xzf "$CACHE/innoextract-1.9.tar.gz" -C "$B"
             for p in ie-cmake4 ie-boost185 ie-boost189; do
                 (cd "$B/innoextract-1.9" && patch -s -p1 < "$CACHE/$p.patch") || fail "patch $p"
             done
-            (cd "$B/innoextract-1.9" && PKG_CONFIG_LIBDIR="$P/lib/pkgconfig" cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            (cd "$B/innoextract-1.9" && PKG_CONFIG_LIBDIR="$P/lib/pkgconfig" cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=$ARCH \
                 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 -DCMAKE_PREFIX_PATH="$P" \
                 -DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew\;/usr/local -DBoost_NO_SYSTEM_PATHS=ON -DBOOST_ROOT="$P" \
                 -DBoost_USE_STATIC_LIBS=ON -DLZMA_USE_STATIC_LIBS=ON -DZLIB_USE_STATIC_LIBS=OFF \
                 -DBZip2_USE_STATIC_LIBS=OFF -Diconv_USE_STATIC_LIBS=OFF \
                 && cmake --build build -j8) > "$B/innoextract.log" 2>&1 || fail "innoextract (see $B/innoextract.log)"
         fi
+        # The binary is of the RID's architecture only (a host-architecture build would pass every other check).
+        [ "$(lipo -archs "$BIN")" = "$ARCH" ] || fail "innoextract is $(lipo -archs "$BIN"), expected $ARCH"
         # Only macOS system libraries may remain dynamic.
         other=$(otool -L "$BIN" | tail -n +2 | awk '{print $1}' | grep -vE '^/usr/lib/|^/System/' || true)
         [ -z "$other" ] || fail "innoextract links outside macOS: $other"

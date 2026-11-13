@@ -4,8 +4,7 @@
 //
 // The three are ported together because they only make sense together: the
 // first invents a velocity, the second flies the arc and LEAVES THE PAWN where
-// it lands, and the third owns the decision and the restore. Splitting them
-// produced the STOP this file replaces.
+// it lands, and the third owns the decision and the restore.
 //
 // Semantics that a "plausible" port silently gets wrong, each read out of the
 // shipped machine code and each load-bearing:
@@ -41,8 +40,7 @@
 //   * the horizontal length is a double (appSqrt returns one, stored with
 //     fstp qword), and so are 1/len, len/time and the |velocity|² cutoff sum.
 // `double` in those places is faithfulness, not convenience —
-// se_harness/bsp_diff/jump_oracle.py executes the real bodies under the
-// emulator and validate_jump.py diffs this port against them.
+// the real bodies were executed under the emulator and diffed against this port.
 using System;
 using System.Collections.Generic;
 using Vector3 = HP1.UEScript.UEVector;
@@ -406,8 +404,7 @@ namespace HP1.UEScript
             // DIFFERENT fields: pain from FootRegion, water from Region. The
             // shipped order is gate first, distances second.
             // Read eagerly where shipped short-circuits. Every one of the four is
-            // a dictionary lookup with no side effect, so the ledger (C4) is
-            // unchanged; the recorder needs all four to replay the gate.
+            // a dictionary lookup with no side effect; the recorder needs all four to replay the gate.
             UEObject footZone = ZoneOrStop(self, "FootRegion", "FindBestJump gate");
             bool pain = UEInterpreter.ToBool(footZone.GetProp(PK.bPainZone));
             bool sameDamage = SameDamageType(footZone, self);

@@ -44,8 +44,8 @@ namespace HP1.UEScript
     }
 
     // Animation bank in store basis: MIRROR X+Y (position (-x, -y, z), quaternion (-x, -y, z, w)),
-    // which the frontend reader (HP1SkinnedBank.FlattenTracks) removes for every bank. Measured with
-    // validate_animseqs.py: the whole store is in this basis; the raw basis was a frontend data defect
+    // which the frontend reader (HP1SkinnedBank.FlattenTracks) removes for every bank. Measured:
+    // the whole store is in this basis; the raw basis was a frontend data defect
     // (the cauldron fell through the floor).
     public sealed class UEAnimBank
     {
@@ -144,7 +144,7 @@ namespace HP1.UEScript
             }
         }
 
-        // ORIGINAL VISUALS (D-62): the faces URender::DrawLodMesh draws at the LOD level `verts` (WorldFrame MeshPose.LodParts,
+        // ORIGINAL VISUAL MODE (D-62): the faces URender::DrawLodMesh draws at the LOD level `verts` (WorldFrame MeshPose.LodParts,
         // UEMeshLod.CollapsedFaces) over the frontend mesh `raw` of `path` (skeletal, or a vertex mesh in the same shape): kept
         // faces in source order, wedges collapsed. Cached per (raw, verts).
         readonly Dictionary<(UERawSkeletalMesh, int), UERawSkeletalMesh> _lod = new();
@@ -185,7 +185,7 @@ namespace HP1.UEScript
             }
         }
 
-        // ── export bodies (moved unchanged from HeadlessSmoke) ─────────
+        // ── export bodies ─────────
 
         public static UERawSkeletalMesh BuildRaw(string objectPath, string pkgName, string leaf, Hp1SkeletalMesh m)
         {

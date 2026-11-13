@@ -1,7 +1,7 @@
 // PHYS_Interpolating (8) — AInterpolationManager::performPhysics and both
 // AInterpolationPoint bodies that read the path: GetInterpolatedPosition (cubic
 // Bezier + rotation) and GetDesiredRotationAtPosition/AtPause (rotation smoothing
-// over neighbouring points). A KnowWonder class, absent from SurrealEngine;
+// over neighbouring points). A KnowWonder class (absent from stock UE1);
 // the only source is Engine.dll:
 //
 //   AInterpolationManager::performPhysics   Engine.dll.c:38729-39578, body 0x103f7a00..0x103f945d
@@ -9,7 +9,7 @@
 //   AInterpolationPoint::GetDesiredRotationAtPosition  83797-83875 (thunk 0x10302f27)
 //   AInterpolationPoint::GetDesiredRotationAtPause     77903-77964
 //
-// Field offsets resolved by the `--dumpprops` oracle + audit/prop_offsets.py:
+// Field offsets checked against the shipped class layout:
 // manager — Dest 0x25c, PhysAlpha 0x260, PhysRate 0x264,
 // RemainingPause 0x268, StartPause 0x26c, PauseNum 0x270, TurnRateX 0x298,
 // TurnRateZ 0x2a4, OldDesiredX 0x2b0, OldDesiredZ 0x2bc, bInstantMove 0x2c8&1;

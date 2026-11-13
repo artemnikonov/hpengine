@@ -3,13 +3,13 @@
 // What shipped executes (Core.dll disasm): appSin 0x101035df -> 0x101260a0 `fld qword; fsin; ret`, appCos 0x101260b0
 // `fcos`, appAtan2 0x10102ab8 -> 0x101260f0 `fld qword y; fld qword x; fpatan; ret`, appSqrt 0x10126100 `fsqrt`;
 // appAcos 0x10101361 -> 0x101260c0 `fld qword; jmp [MSVCRT!_CIacos]` (import 0x1025050c). The DLLs ship no msvcrt:
-// _CIacos is the system MSVCRT.dll; the reference is Microsoft msvcrt 6.00.8337.0 (author decision 2026-10-30).
+// _CIacos is the system MSVCRT.dll; the reference is Microsoft msvcrt 6.00.8337.0.
 //
-// MODEL (author decision 2026-10-30): fsin, fcos and fpatan return the exact function value CORRECTLY ROUNDED to the
+// MODEL: fsin, fcos and fpatan return the exact function value CORRECTLY ROUNDED to the
 // 64-bit mantissa (nearest even), whatever the precision control (the hardware table shows PC does not round them).
 // fsin / fcos / fptan first reduce with the x87's own π/2: P66 = 0xC90FDAA22168C234C·2^-67, π/2 to 66 significant
 // bits (Intel SDM vol. 1 §8.3.10): r = x − k·P66 EXACTLY, k nearest, then the correctly rounded sin / cos / tan of r
-// in quadrant k. Measured 2026-11-01 on the Deck (Zen 2; 168386 inputs incl. negatives, k·π/2 neighbours, the closest
+// in quadrant k. Measured on a Steam Deck (Zen 2; 168386 inputs incl. negatives, k·π/2 neighbours, the closest
 // double to a multiple of π/2 in every binade up to 2^63): every row matches this model to <= 1 ulp of 80 bits; the
 // true-π/2 reduction misses 2 ulps already at x ≈ −π and 2^-13 relative at 2^55.
 // Evaluated here in arbitrary precision with a rigorous error bound and a Ziv loop: the value is computed to P bits
@@ -20,7 +20,7 @@
 //
 // _CIacos is the instruction sequence of msvcrt 6.00.8337.0 (0x78028905..) on top of that model — see CIacos.
 //
-// Judge: HeadlessSmoke --x87ref <table> (tools/x87_reference, a Steam Deck / Zen 2 run with the genuine msvcrt).
+// Judge: a table measured on a Steam Deck / Zen 2 run with the genuine msvcrt.
 using System;
 using System.Collections.Concurrent;
 using System.Numerics;
@@ -29,14 +29,14 @@ namespace HP1.Core
 {
     public static class UEX87Transcendental
     {
-        // SelfTest: false compares the fixed-point fast path with the arbitrary-precision path on a corpus.
+        // Test seam: false compares the fixed-point fast path with the arbitrary-precision path on a corpus.
         [ThreadStatic] internal static bool NoFastPath;
         // How often the fast path left a fsin / fcos / fpatan to the arbitrary-precision path (differential test only).
         [ThreadStatic] internal static long SlowCount;
 
-        // SelfTest seam (headless only): every finite nonzero fsin / fcos / fpatan result moves by this many units of its
+        // Test seam (headless only): every finite nonzero fsin / fcos / fpatan result moves by this many units of its
         // 64th mantissa bit — the class by which x87 hardware may differ from the model (Zen 2: 1 ulp of 80 bits on 950 of
-        // 64054 table rows). SelfTest st0_consumers_ignore_one_ulp re-runs the consumer judges with ±1.
+        // 64054 table rows). Consumers must not depend on a ±1 nudge.
         [ThreadStatic] internal static int UlpNudge;
 
         static X87Ext Nudge(X87Ext v)
@@ -455,7 +455,7 @@ namespace HP1.Core
             return new Approx(q, num / den + 2, a.Exp - b.Exp - sh);
         }
 
-        // appExp (Core 0x10126060, C5 2026-11-01): fldl2e; fmul qword [esp+4]; fld st0; frndint; fxch st1; fsub st,st1;
+        // appExp (Core 0x10126060): fldl2e; fmul qword [esp+4]; fld st0; frndint; fxch st1; fsub st,st1;
         // f2xm1; fld1; faddp st1,st; fscale; fstp st1. fmul, fsub and fadd round at the caller's precision control (PC24
         // inside the render window, PC64 outside); fldl2e (RC nearest: 0x3FFF:B8AA3B295C17F0BC), frndint (nearest even)
         // and fscale (exact) do not depend on PC; f2xm1 by the model (F2xm1). Operands that would make fscale overflow,
@@ -491,7 +491,7 @@ namespace HP1.Core
             return X87Ext.FromScaled(sm, se + (int)n);
         }
 
-        // f2xm1: 2^x − 1 CORRECTLY ROUNDED to the 64-bit mantissa (the author's rule for fsin/fpatan, 2026-10-30), PC not
+        // f2xm1: 2^x − 1 CORRECTLY ROUNDED to the 64-bit mantissa (the same rule as fsin/fpatan), PC not
         // applied; ±0 -> ±0. Only |x| <= 1/2 is modelled (frndint leaves appExp's operand there); beyond that a refusal.
         public static X87Ext F2xm1(X87Ext x)
         {

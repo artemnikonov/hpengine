@@ -1,11 +1,10 @@
 // CORE WORLD BOOT AND TICK FOR THE FRONTEND.
 //
-// The single boot sequence: SmokeProgram.Main (the harness) goes through it too, with
-// BootStops stop points (D-18):
+// The single boot sequence; test harnesses go through it too, with
+// BootStops stop points:
 // class registry -> interpreter -> AppInit -> packages -> native table -> BSP and
 // ReachSpecs -> actor graph -> clock, brushes, collision hash -> Entry -> BootstrapPlayWorld. Tick is
-// UEGameEngineNatives.TickWorld. HeadlessHost (runtime_poc) is a thin wrapper over this class;
-// the own engine (openhp1) calls it directly.
+// UEGameEngineNatives.TickWorld. The own engine (hpengine) calls this class directly.
 // Frontend natives here are headless (canvas/sound without a device): enough for world rendering;
 // a real player needs its own set of frontend natives.
 using System;
@@ -18,7 +17,7 @@ namespace HP1.UEScript
 {
     public sealed class UEGameEngine
     {
-        // Native table factory: the harness (runtime_poc) supplies its own subclass with probes
+        // Native table factory: a test harness supplies its own subclass with probes
         // and comparison journals; without a factory the production Core table is used.
         public delegate UEGameEngineNatives NativesFactory(uint seed, List<string> journal,
             string defaultIni, Hp1SkeletalMeshCatalog skeletalMeshes);
@@ -39,12 +38,11 @@ namespace HP1.UEScript
         // selectHardwareRenderDevice — player's first run (UEScriptedActor calls
         // SelectHardwareRenderDeviceIfUnset before world boot): no device selected ->
         // D3DDrv (HighDetailActors=True). Set BEFORE BootstrapPlayWorld: boot-time bHighDetailMode
-        // and ULevel::DetailChange depend on it. The harness (pins) does not request it.
-        // BOOT STOP POINTS FOR THE VALIDATION HARNESS (D-18). There is ONE boot sequence — here;
-        // the harness (runtime_poc SmokeProgram.Main) keeps no copy of its own, it configures and
-        // stops this one at the declared points: gesture census — after packages, level dump —
-        // after the actor graph, SelfTest — after the collision hash (before Entry and
-        // BootstrapPlayWorld). false stops the boot, Boot returns null.
+        // and ULevel::DetailChange depend on it. A test harness does not request it.
+        // BOOT STOP POINTS FOR VALIDATION HARNESSES. There is ONE boot sequence — here;
+        // a harness keeps no copy of its own, it configures and stops this one at the declared
+        // points: after packages, after the actor graph, after the collision hash (before Entry
+        // and BootstrapPlayWorld). false stops the boot, Boot returns null.
         // Boot writes the boot journal lines itself; the game sets no stop points.
         public sealed class BootStops
         {
@@ -54,13 +52,20 @@ namespace HP1.UEScript
             public Func<bool> CollisionReady;
         }
 
+        // Lines for the game's log: the port's script overrides whose function the loaded scripts (a mod's) do not have,
+        // so the override does not apply there (UEPortScriptOverrides.AbsentTargets). Text only, no behaviour.
+        public static List<string> ScriptOverrideWarnings() =>
+            HP1.UEScript.UEPortScriptOverrides.AbsentTargets()
+                .Select(t => $"{t.Class}.{t.Function} is not in the loaded scripts: the port's override of it does not apply").ToList();
+
         // forceSurfaceLightmapsInFrame — the game always enables per-frame surface lightmaps
-        // and publishes the world static before the post-load frame (RunOwedLoadFrame). The harness passes
-        // false: its own HP1_SURF_LM switch (runtime_poc) decides lightmaps and the first tick
-        // (UEGameEngineNatives.TickWorld) publishes the static — its pins and surflm journals were taken that way.
+        // and publishes the world static before the post-load frame (RunOwedLoadFrame). A test harness passes
+        // false: it decides lightmaps itself and the first tick
+        // (UEGameEngineNatives.TickWorld) publishes the static.
         public static UEGameEngine Boot(string gameRoot, string mapName, NativesFactory createNatives = null,
             bool selectHardwareRenderDevice = false, UEConfig.IStore configStore = null,
-            bool forceSurfaceLightmapsInFrame = true, BootStops stops = null)
+            bool forceSurfaceLightmapsInFrame = true, BootStops stops = null, string saveDir = null,
+            IReadOnlyList<string> mods = null)
         {
             string systemDir = Path.Combine(gameRoot, "System");
             UEClassRegistry.Shared = new UEClassRegistry();
@@ -84,6 +89,8 @@ namespace HP1.UEScript
             interp.Natives = n;
             n.SelectHardwareRenderDevice = selectHardwareRenderDevice;
             n.SetGameRoot(gameRoot);
+            if (saveDir is not null) n.SaveDirOverride = saveDir;   // gameRoot is the mod working copy (hpengine ModOverlay)
+            if (mods is not null) n.ActiveMods = mods;               // the enabled mods: recorded in saves, compared on load
             stops?.NativesCreated?.Invoke(n);
             string mapPath = Path.Combine(gameRoot, "Maps", mapName + ".unr");
             mapPath = UEInstallPath.File(mapPath) ?? mapPath;
@@ -121,7 +128,7 @@ namespace HP1.UEScript
         // Travel probe: at tick `tick` (this host's numbering) Core performs travel to `url` — by the
         // same route as the scripted ClientTravel (UEGameEngineNatives.SetTravelProbe).
         public void SetTravelProbe(int tick, string url, bool items = true) => _n.SetTravelProbe(tick, url, items);
-        // Death probe (snapshot --kill, HeadlessSmoke HP1_KILL_AT): the player's baseHarry.KillHarry(true) between ticks,
+        // Death probe (snapshot --kill, HP1_KILL_AT): the player's baseHarry.KillHarry(true) between ticks,
         // the script's own death route (stateDead -> LoadSelectedSlot). No console route exists (KillHarry is not exec).
         // Returns the killed pawn's name, or null without a player pawn.
         public string KillPlayerProbe()
@@ -131,7 +138,7 @@ namespace HP1.UEScript
                 ?? throw new System.IO.InvalidDataException("KillPlayerProbe: the player has no KillHarry"), true);
             return victim.GetProp(PK.Name)?.ToString();
         }
-        // Snapshot probe (the live probe's `causeevent <Tag>` exec, tools/origprobe hp1drawlog EXEC): Trigger(player, player)
+        // Snapshot probe (the live original probe's `causeevent <Tag>` exec): Trigger(player, player)
         // on every actor whose Tag is the name, in actor-list order. Not a console command of the port (UEConsoleCommand).
         public int CauseEventProbe(string tag)
         {
@@ -180,7 +187,7 @@ namespace HP1.UEScript
             if (interp.Natives is UEGameEngineNatives headless)
             {
                 headless.SetActors(result.Select(x => x.Runtime));
-                // Review #12 P1: the Core interpreter owns the authoritative
+                // The Core interpreter owns the authoritative
                 // ULevel.Actors list (the SAME live list — later spawns appear).
                 interp.LevelActors = headless.ActorsLive;
                 // UGameEngine::LoadMap: empty LevelEnterText = URL.Map (the same step as in

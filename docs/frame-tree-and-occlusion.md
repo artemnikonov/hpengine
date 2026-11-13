@@ -1,13 +1,13 @@
 # Frame tree and occlusion
 
-The original renderer does not draw "the level" once. `URender::DrawWorld` builds a tree of frames: a master frame for the player's camera, and child frames for every sky window, mirror and warp-zone portal the BSP walk meets. Each frame has its own camera, near clip plane, span buffers and list of visible sprites. The decision of what is visible lives in `URender::OccludeBsp` (Render.dll 1.53, 0x10b22480..0x10b24f30) and `URender::CreateChildFrame` (0x10b20790). OpenHP1 ports both into Core and hands the frontend the finished tree, so the frontend only draws it.
+The original renderer does not draw "the level" once. `URender::DrawWorld` builds a tree of frames: a master frame for the player's camera, and child frames for every sky window, mirror and warp-zone portal the BSP walk meets. Each frame has its own camera, near clip plane, span buffers and list of visible sprites. The decision of what is visible lives in `URender::OccludeBsp` (Render.dll 1.53, 0x10b22480..0x10b24f30) and `URender::CreateChildFrame` (0x10b20790). HPEngine ports both into Core and hands the frontend the finished tree, so the frontend only draws it.
 
 ## Why occlusion is game logic, not just drawing
 
 - OccludeBsp decides which actors enter a frame's sprite list (`Frame->Sprite`, +0xa4). Only those get `GetFrame`/`ApplyAnim` and an emitter `Update(0)` in `DrawFrame`. Those calls write game state, so culling is part of the simulation (Render.dll 0x10b22c79, 0x10b22d8e, 0x10b2354a, 0x10b24ae6, 0x10b227ff, 0x10b2468d).
 - Concrete case: the third-person weapon branch of `DrawActorSprite` writes the weapon's Rotation/Mesh/DrawScale and the pawn's WeaponLoc/WeaponRot, but only for actors drawn after occlusion (0x10b32fd1..0x10b330b4). A simplified culling produced a different `baseWand0.Rotation` on Lev5_Snare (D-56).
 - OccludeBsp also writes node flag bits 0x10/0x08 and each zone's `LastRenderTime` (0x10b227ff, 0x10b2468d).
-- Port: [`HP1.Core/Runtime/Render/UEOcclusion.cs`](../HP1.Core/Runtime/Render/UEOcclusion.cs) (OccludeBsp, sprites, CreateChildFrame), [`HP1.Core/Runtime/VM/UEWorldFrameProducer.cs`](../HP1.Core/Runtime/VM/UEWorldFrameProducer.cs) (drives it per tick).
+- Port: [`HP1.Core/Runtime/Render/UEOcclusion.cs`](../HP1.Core/Runtime/Render/UEOcclusion.cs) (OccludeBsp, sprites, CreateChildFrame), [`HP1.Core/Runtime/VM/UEWorldFrameProducer.Views.cs`](../HP1.Core/Runtime/VM/UEWorldFrameProducer.Views.cs) (drives it per tick, `OccludeWorld`).
 
 ## The walk
 
@@ -43,7 +43,7 @@ The original renderer does not draw "the level" once. `URender::DrawWorld` build
 ## What the frontend receives
 
 - `WorldFrame.Views` carries each child as an affine "frame world to master world" map plus its near clip, the branch kind and the source surfaces ([`HP1.Core/Runtime/VM/UEWarpView.cs`](../HP1.Core/Runtime/VM/UEWarpView.cs)). The frontend computes no cameras itself (D-61).
-- Draw order: children's `DrawFrame` run before the parent's. A mesh runs `DrawActorSprite` once per frame whose list holds it, because `GetFrame` is not idempotent within a tick; an emitter or shadow updates at most once per tick ([`HP1.Core/Runtime/VM/UEWorldFrameProducer.cs`](../HP1.Core/Runtime/VM/UEWorldFrameProducer.cs), `DirectRenderStep`).
+- Draw order: children's `DrawFrame` run before the parent's. A mesh runs `DrawActorSprite` once per frame whose list holds it, because `GetFrame` is not idempotent within a tick; an emitter or shadow updates at most once per tick ([`HP1.Core/Runtime/VM/UEWorldFrameProducer.Views.cs`](../HP1.Core/Runtime/VM/UEWorldFrameProducer.Views.cs), `DirectRenderStep`).
 
 ## Verification status
 

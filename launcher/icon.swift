@@ -1,4 +1,4 @@
-// Draws the OpenHP1 launcher icon (original artwork, GPL-3.0-or-later like the rest of the code): a red and gold shield with a
+// Draws the HPEngine launcher icon (original artwork, GPL-3.0-or-later like the rest of the code): a red and gold shield with a
 // wand and sparkles. No crest, no characters, no studio artwork.
 //   xcrun swift launcher/icon.swift <out.iconset>     writes the PNG sizes iconutil expects
 import AppKit

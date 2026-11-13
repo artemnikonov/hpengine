@@ -4,7 +4,7 @@ The ONE canonical patched UELib binary. Every consumer references THIS copy:
 
 - `HP1.Core` (HintPath `ThirdParty/Eliot.UELib.dll` — the Core folder is
   self-contained and builds in isolation);
-- the OpenHP1 frontend (`openhp1/OpenHP1.csproj`);
+- the HPEngine frontend (`hpengine/HPEngine.csproj`);
 - the headless runner (`runtime_poc/HP1.Headless.Smoke.csproj`);
 - `se_harness/bsp_diff/BspDiffRunner.csproj`.
 

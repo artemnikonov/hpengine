@@ -2,10 +2,10 @@
 // the shared appFrand stream, so they belong beside the authoritative Core
 // world, not in a frontend camera/physics bridge.
 //
-// Source of truth (shipped Engine.dll, NOT the later SurrealEngine model —
-// SE reduces the body to a center/top/bottom probe and drops the
+// Source of truth is the shipped Engine.dll. A simplified model (a single
+// center/top/bottom probe) would drop the
 // Visibility scaling, the Stimulus transform, the Enemy bookkeeping, the
-// bLOSflag alternation, the RNG throttle and the corner probes):
+// bLOSflag alternation, the RNG throttle and the corner probes:
 //
 //   APawn::LineOfSightTo          Engine.dll.c:65712-66070
 //   APawn::execLineOfSightTo      Engine.dll.c:24921-24939   -> (Other, 0)
@@ -234,7 +234,7 @@ namespace HP1.UEScript
             return R64(R64(R64(dx * dx) + R64(dy * dy)) + R64(dz * dz));
         }
 
-        // ── APawn::LineOfSightTo x87 chains (0x103da070, PC64). Judge: x87_size_oracle.py kinds los*. ──
+        // ── APawn::LineOfSightTo x87 chains (0x103da070, PC64). ──
         internal static float LosDistSq(Vector3 a, Vector3 b) => DistSq87(a, b).ToFloat();
 
         // Range² in the register. LineOfSightTo half (0x103da4c4..0x103da589), pawn target: s = min(fild(Visibility
@@ -409,8 +409,8 @@ namespace HP1.UEScript
         }
 
         // APawn::CanHear (Engine.dll.c:68748). The plain range is 2000*Loudness
-        // (Loudness^2 * 4e6 against DistSquared); the 4000 of the old frontend
-        // comment exists only in the team-mate branch, which needs a team game
+        // (Loudness^2 * 4e6 against DistSquared); a range of 4000
+        // exists only in the team-mate branch, which needs a team game
         // and two players and is therefore unreachable in HP1.
         public bool PawnCanHear(UEInterpreter interp, UEObject listener,
             Vector3 noiseLoc, float loudness, UEObject other)
@@ -557,9 +557,9 @@ namespace HP1.UEScript
         static int VisibilityOf(UEObject actor)
             => UEInterpreter.ToInt(actor.GetProp(PK.Visibility)) & 0xff;
 
-        // FVector::SafeNormal — one authority, UEVector.normalized. This was a
-        // float32 copy of it; Core.dll keeps the square sum and the reciprocal
-        // wider than float32 (0x1014f4e6+), which the jump oracle measured.
+        // FVector::SafeNormal — one authority, UEVector.normalized (a float32 copy
+        // would differ: Core.dll keeps the square sum and the reciprocal
+        // wider than float32, 0x1014f4e6+).
         static Vector3 SafeNormalShipped(Vector3 v) => v.normalized;
 
         public object LineOfSightToNative(

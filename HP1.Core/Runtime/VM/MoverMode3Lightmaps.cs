@@ -8,7 +8,7 @@ namespace HP1.UEScript
     // Slot-3 mover branch (Render.dll.c:19876-19930): such a mover takes its lights not from the brush lists
     // (the editor does not bake them) but from the LEAF it currently stands in (Model->Leaves[Region.iLeaf].iPermeating ->
     // Model->Lights), with the face in its CURRENT pose. Selection (MoverMode3.Select) and fill (MoverMode3.FillSurface)
-    // are verified against shipped (validate_mover_light_branch.py, validate_mover_mode3_fill.py); this only applies them:
+    // are verified against shipped (checked against the real bodies); this only applies them:
     //   * face: brush B/U/V/N (FPoly) through BrushToWorldCoords(mover) — same coordinates as the vertices;
     //   * seed — ambient of the mover's CURRENT zone; no shadow mask (NoShadowMask, as in shipped);
     //   * tile — same format as level lightmaps (LevelSurfLightmapRuntime.Tile); tile zone = atlas slot zone.
@@ -33,7 +33,7 @@ namespace HP1.UEScript
         readonly List<MoverMode3.LightIn> _all = new();   // leaf, then dynamic — shipped record order
         public int Movers => _movers.Count;
         public int TilesBuilt { get; private set; }
-        public int DynamicApplied { get; private set; }   // accepted faces × dynamic lights, cumulative (V8)
+        public int DynamicApplied { get; private set; }   // accepted faces × dynamic lights, cumulative
 
         public MoverMode3Lightmaps(UELevelRuntime rt, UEMoverGeometry geo, Func<UEObject, int, int> trackerSurfOf)
         {

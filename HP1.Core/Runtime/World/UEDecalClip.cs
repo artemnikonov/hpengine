@@ -5,8 +5,7 @@
 // Ported from the DISASSEMBLY (the decompile of the point-insert block is garbled: Ghidra
 // confuses locals). x87 operation order is kept op-for-op because DrawWorld runs at 24-bit
 // precision (appEnableFastMath(1)), and under PC24 every x87 op rounds to float, exactly like
-// C# float arithmetic. Bit-exact check against the real body under unicorn:
-// se_harness/bsp_diff/validate_decal_clip.py.
+// C# float arithmetic. Bit-exact check against the real body under unicorn.
 //
 // Ported output is what the frame reads: point count, world points (static array
 // DAT_10b673e0) and U/V (FTransTexture +0x50/+0x54). The screen part (projection, outcodes,

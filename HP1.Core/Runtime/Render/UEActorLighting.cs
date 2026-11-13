@@ -72,7 +72,7 @@ namespace HP1.UEScript
         public int LosCalls, LosBlocked, Attached, RejectedCap, RejectedThreshold, RejectedLos, LeafUnknown, RejectedSpecial, Gated, MovableNoLos;
         bool _viewLit = true;
         public bool ViewLitFrame => _viewLit;   // frame view gates (BeginFrame) — for UnlitFlag
-        public int FadeRate => _fadeRate;   // frame fade-in rate (checked by validate_actor_light.py)
+        public int FadeRate => _fadeRate;   // frame fade-in rate
 
         public void SetLeafChain(int[] leafPermeating, int[] lightExports)
         {
@@ -106,8 +106,8 @@ namespace HP1.UEScript
                 if (a.Destroyed) continue;
                 LightState L = a.Light;
                 // LightBrightness 0 stays a source: SetupForActor takes every Model->Lights entry of the leaf chain as a
-                // candidate whatever its brightness (score 0, colour 0; shipped array 0x10b4c864 under unicorn,
-                // validate_actor_light.py, review C6 2026-11-01). R <= 0 never passes R·R > d2.
+                // candidate whatever its brightness (score 0, colour 0; shipped array 0x10b4c864 checked under unicorn).
+                // R <= 0 never passes R·R > d2.
                 if (L.Type == 0) continue;
                 if (!(L.WorldRadius > 0f)) continue;
                 var (r, g, b) = FGetHSV(L.Hue, L.Saturation, 255);
@@ -230,8 +230,7 @@ namespace HP1.UEScript
         struct Cand { public int Index, Score; }
         readonly List<Cand> _cand = new();
         readonly HashSet<int> _taken = new();
-        // The last Gather's candidates after the sort (light ExportIndex, score): the shipped array 0x10b4c864 with +0xec
-        // (validate_actor_light.py compares them).
+        // The last Gather's candidates after the sort (light ExportIndex, score): the shipped array 0x10b4c864 with +0xec.
         public IEnumerable<(int Export, int Score)> LastCandidates
         { get { foreach (Cand c in _cand) yield return (_lights[c.Index].ExportIndex, c.Score); } }
         bool[] _keep = new bool[64];
@@ -340,7 +339,7 @@ namespace HP1.UEScript
         // `push ebx` at 0x10b0a253 after `xor ebx, ebx` at 0x10b0a21d) — the level model without mover actors as
         // primitives; here ULevel::SingleLineCheck with TRACE_Level (4), no extent. Mover fragments from the brush
         // tracker (D-47) live in the same model and occlude as level geometry — same as shipped (checked on the
-        // live model with validate_actor_light: Tut1Hermione0/Light1908 rejected by both sides).
+        // live model: Tut1Hermione0/Light1908 rejected by both sides).
         public static Func<UEVector, UEVector, bool> BspLineClear(UELevelRuntime rt, UEInterpreter interp)
             => (from, to) => !rt.SingleLineCheck(interp, null, null, from, to, default, 4).Blocked;
 
@@ -350,9 +349,9 @@ namespace HP1.UEScript
         // Fresh-trace schedule: shipped — (source UObject::Index ^ Viewport->FrameCount) & 0xf (disasm
         // 0x10b0a238-0x10b0a243: [light+0x4] ^ [ebp-0x3c], with [ebp-0x3c] = [Viewport+0x7c], 0x10b09c30-0x10b09c3a).
         // The port uses the export index and its own frame counter: UObject::Index is a GObjObjects slot, and the
-        // port has no such table (UEObject.ObjectId is its own counter). Not emulated per §4a: it only decides ON WHICH
+        // port has no such table (UEObject.ObjectId is its own counter). Not emulated (render scheduling): it only decides ON WHICH
         // of 16 frames a source's visibility for the actor refreshes; the +0xec/+0xf4/+0xf8 writes are presentation
-        // (render ledger: game scripts do not read them). D-41 item 5.
+        // (game scripts do not read them). D-41.
         bool LineOfSight(in Source L, bool cold, int counter, UEVector location, Func<UEVector, UEVector, bool> lineClear)
         {
             int index = L.ExportIndex != 0 ? L.ExportIndex : L.ObjectId;
@@ -462,7 +461,7 @@ namespace HP1.UEScript
 
         // ── ACTOR INPUTS AND VERTICES (C5) ──
         // Core computes character lighting entirely; the frontend only lays out arrays and draws. Checked
-        // against shipped by se_harness/bsp_diff/validate_vertex_light.py.
+        // against the shipped code.
         public struct ActorInputs
         {
             public (float r, float g, float b) Amb;
@@ -478,7 +477,7 @@ namespace HP1.UEScript
         // its phase (seconds since machine start) is not observable. Otherwise AmbientGlow·(1/255) (0x10b3869c).
         // PRECISION: actor lighting runs inside the render window (PC24): fmul 2^-29 rounds the time to 24 bits, fstp
         // qword, appSin (fsin, correctly rounded at any PC, D-71) stays in the register, fmul qword 0.2f and fadd qword
-        // 0.25 round to 24 bits, fstp dword (0x10b09aef). Judge: x87_size_oracle.py kind glow24 (SelfTest x87_size_corpus).
+        // 0.25 round to 24 bits, fstp dword (0x10b09aef).
         internal static float Glow255(double viewportSeconds)
         {
             static HP1.Core.X87Ext R(HP1.Core.X87Ext v) => HP1.Core.X87Ext.Round24(v);
@@ -572,8 +571,7 @@ namespace HP1.UEScript
         // The original does not null-check Viewport->Actor (0x10b09bb4..0x10b09bb7), and UGameEngine::Draw reads its
         // Location before rendering (0x1039fab6..0x1039fac2): the original never has a world frame without a player;
         // throwing here is its loud equivalent. The LoadMap route (fade before world teardown, loading screen without
-        // a world) is held by the mutation
-        // loadmap_world_frame_without_viewport_actor (audit/completeness_mutations.txt).
+        // a world) must not reach this call.
         public static bool ViewLit(UELevelRuntime rt)
         {
             UEObject viewer = rt.LocalPlayer

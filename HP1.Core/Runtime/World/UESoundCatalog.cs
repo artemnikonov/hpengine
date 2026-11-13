@@ -2,7 +2,7 @@
 //
 // Why here: a sound's duration is the answer of native GetSoundDuration, from which scripts compute dialog timing
 // (baseDialog.DeliverDialog, SpellLearnTrigger.Say*). A single FSoundData::GetPeriod formula reads the SAME .u/.uax
-// bytes as the original, instead of each frontend deriving it from its decoded clip (two bodies for one answer, C7).
+// bytes as the original, instead of each frontend deriving it from its decoded clip (two bodies for one answer).
 //
 // Object paths are exact (Package.Group.Name, case-insensitive like FName); no lookup by leaf name.
 using System;
@@ -35,8 +35,7 @@ namespace HP1.UEScript
     public sealed class UESoundCatalog
     {
         // The catalog belongs to the game INSTALLATION, not to a level: sound packages do not change between maps.
-        // The root is set by the frontend / harness via SetSource (e.g. openhp1/SdlAudio.cs,
-        // HeadlessSmoke.SetGameRoot).
+        // The root is set by the frontend / harness via SetSource (e.g. hpengine/SdlAudio.cs).
         public static readonly UESoundCatalog Shared = new UESoundCatalog();
 
         private readonly Dictionary<string, string> _packageFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);

@@ -42,10 +42,9 @@ namespace HP1.Core
 
         // ── THE LOG MAY OPEN LATER THAN THE WORLD IS BUILT ──────────────────
         //
-        // A frontend may open the log after the actor graph is built (the old frontend opened it from
-        // `RuntimeInitializeOnLoadMethod(AfterSceneLoad)` — i.e. AFTER all
-        // Awake). With the log closed `Emit` used to return, and the first map's initial snapshot was lost while
-        // later travel snapshots worked, so the loss was easy to miss.
+        // A frontend may open the log after the actor graph is built (for example after all
+        // frontend initialisation). With the log closed `Emit` would return, and the first map's initial snapshot would be lost while
+        // later travel snapshots worked, so the loss would be easy to miss.
         //
         // WHY A LATCH, NOT A SECOND FRONTEND CALL. A second call is a second owner of the capture moment and
         // would drift silently. Here `Emit` stores the request and the log takes it when it opens, so frontend
@@ -79,8 +78,7 @@ namespace HP1.Core
             // names this session's map (callers set `Map` after `Open`). Whatever the field holds now is stale by
             // definition, and the snapshot knows its own map.
             //
-            // WHY NOT RESET IN `Close`. `Open` calls `Close` first, so such a reset masks the defect and the
-            // "restore the condition" mutation stays green. It adds nothing observable: after `Close` the log is
+            // WHY NOT RESET IN `Close`. `Open` calls `Close` first, so such a reset would mask the defect. It adds nothing observable: after `Close` the log is
             // off and nobody but this place reads `Map`.
             UEPlaythroughLog.Map = map;
             UEPlaythroughLog.AlwaysDistinct("snap",

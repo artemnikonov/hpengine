@@ -3,10 +3,9 @@
 // APawn::actorReachable (62486-62633, native 520) and the three mode bodies
 // walk/fly/swimReachable, which are mutually recursive and live here too.
 //
-// WIRED. The jump branch is no longer a STOP (SuggestJumpVelocity, jumpLanding
-// and FindBestJump live in UELevelRuntime.Jump.cs and are diffed against the
-// real shipped bodies under the emulator, gate step [jump]), and both entry
-// points are registered by BOTH frontends: native 520 through
+// The jump branch is ported (SuggestJumpVelocity, jumpLanding and FindBestJump live in
+// UELevelRuntime.Jump.cs and are checked against the real shipped bodies under the
+// emulator), and both entry points are registered natives: native 520 through
 // ActorReachableNative, native 521 through PointReachable. Both are also
 // VM-activated: 520 through the two shipped call sites inside
 // Engine.Mover.HandleTriggerDoor, and 521 — which has no campaign caller at all
@@ -573,16 +572,12 @@ namespace HP1.UEScript
 
         // APawn::swimReachable (Engine.dll.c:11801-11946).
         //
-        // CLASSIFICATION WITHDRAWN 2026-07-31. An earlier revision of this
-        // comment claimed the shipped campaign never exercises this body,
-        // because `bWaterZone` occurs in ZERO of the 41 maps in
-        // HARRY_POTTER_US_/maps. That search was too narrow: a `.unr` name table
-        // only carries SERIALIZED property overrides. It cannot see inherited
-        // class defaults, a native constructor default, a ZoneInfo subclass, or
-        // a runtime write from script.
+        // Whether the shipped campaign exercises this body is NOT established. `bWaterZone`
+        // occurs in ZERO of the 41 maps, but a `.unr` name table only carries SERIALIZED
+        // property overrides: it cannot see inherited class defaults, a native constructor
+        // default, a ZoneInfo subclass, or a runtime write from script.
         //
-        // Measured against the script packages, the claim does not hold: the
-        // name occurs in FOUR of the 29 `.u` packages — Engine, HPBase,
+        // Measured against the script packages, the name occurs in FOUR of the 29 `.u` packages — Engine, HPBase,
         // HarryPotter and Hub4. Engine is expected (ZoneInfo declares the
         // property there), but the three game packages are real script-side
         // references, and Hub4 is a level package. Control for the search being
@@ -595,7 +590,7 @@ namespace HP1.UEScript
         // auditing the script and native writes of the property — with a
         // committed, reproducible script, not an ad-hoc grep.
         //
-        // Consequence for validation, and this part is unchanged: the
+        // Consequence for validation: the
         // "step touched the target (5), then
         // FALL THROUGH to the zone checks in the SAME iteration" branch below
         // has no fixture and cannot get one through the public query. A pawn
@@ -605,11 +600,8 @@ namespace HP1.UEScript
         // re-zones the pawn (same reason DownSign is pinned directly rather than
         // observed through a query — see UELevelRuntime.ReachMoves.cs).
         //
-        // This is a LOUD, DELIBERATE debt, not an oversight: the body is ported
-        // from the shipped source, and the campaign never reaches it. Adding a
-        // test seam for a path the game does not take was judged not worth the
-        // non-shipped machinery. If a later level pack introduces water, this
-        // comment is the place that must be revisited FIRST.
+        // This is a known, deliberate gap: the body is ported from the shipped source and
+        // no test seam exists for this path. If a level pack introduces water, revisit this first.
         int SwimReachable(UEInterpreter interp, UEObject self, Vector3 dest,
             float tolerance, int flags, UEObject target)
         {
@@ -746,12 +738,9 @@ namespace HP1.UEScript
             finally { self.Props["MaxStepHeight"] = saved; }
         }
 
-        // FVector::SafeNormal. This used to be a second, float32 transcription
-        // of a body UEVector.normalized already carries at shipped precision,
-        // and the jump oracle caught the difference: Core.dll keeps the square
-        // sum AND the reciprocal wider than float32 (0x1014f4e6-0x1014f557,
-        // one rounding per component at the store), while this copy rounded
-        // both. One authority now, so the two cannot drift apart again.
+        // FVector::SafeNormal. UEVector.normalized is the single authority: Core.dll keeps the
+        // square sum AND the reciprocal wider than float32 (0x1014f4e6-0x1014f557, one rounding
+        // per component at the store), so a separate float32 copy would differ.
         static Vector3 SafeNormal(Vector3 v) => v.normalized;
     }
 }

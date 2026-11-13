@@ -48,8 +48,8 @@ namespace HP1.UEScript
         // (move, lift, carry, descend). Counting those conflated "how many times
         // the loop ran" with "how blocked each step was".
         // internal, not public: this is not shipped state and the frontends have
-        // no business reading or resetting it. HP1.Headless.Smoke gets access
-        // through InternalsVisibleTo in HP1.Core.csproj; Unity does not.
+        // no business reading or resetting it. Tests get access
+        // through InternalsVisibleTo in HP1.Core.csproj.
         internal int ReachStepCountForTest { get; private set; }
         internal void ResetReachStepCountForTest() => ReachStepCountForTest = 0;
 

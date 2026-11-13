@@ -1,6 +1,5 @@
 // The native-function dispatch seam between the Core interpreter and a
-// frontend's native table (UENatives in the Unity tree, HeadlessNatives in
-// the headless smoke). The interpreter only ever resolves handlers and
+// frontend's native table. The interpreter only ever resolves handlers and
 // reports unknowns; registration/ownership stays with the frontend.
 namespace HP1.UEScript
 {
@@ -10,7 +9,7 @@ namespace HP1.UEScript
     {
         UENativeHandler GetByIndex(int idx);
         UENativeHandler GetByName(string name);
-        // Loud unknown-native report (§8) — headless THROWS, Unity logs.
+        // Loud unknown-native report (§8) — a headless host THROWS, a game frontend logs.
         void OnUnknownNative(int idx, string name, string context);
         // Human name of a registered index (coverage diagnostics), or null.
         string NameOfIndex(int idx);

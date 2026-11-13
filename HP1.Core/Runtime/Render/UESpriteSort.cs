@@ -8,8 +8,8 @@
 //          Compare(*j,*Min) >= 0)`, swap; Exchange(*Min,*j); the smaller half continues, the larger is pushed
 //          ((j-1-Min)*4 < (Max-i)*4 signed, 0x10b2b0b1). Compare = (a->Actor->Class - b->Actor->Class) / 0x4fc (int32
 //          subtraction, imul 0x335c49d5 / sar 8 / +sign: truncation toward zero).
-//   key    the UClass object ADDRESS in the original — run-dependent heap order (audit/captures_2026-11-02_spritesort).
-//          NOT ORIGINAL (author decision A, DECISIONS.md 2026-11-03): heap classes by the port's class load order
+//   key    the UClass object ADDRESS in the original — run-dependent heap order.
+//          NOT ORIGINAL: heap classes by the port's class load order
 //          (UEClassRegistry.ClassLoadRank) times 0x4fc, DLL-native classes (RF_Native) after them by their static
 //          UClass address in Engine.dll (UEClassRegistry.NativeClassAddress).
 //   passes 0x10b2666a..0x10b26734: pass 1 draws sprites whose Actor is NULL or has Style (+0x155) != 3 (STY_Translucent)

@@ -14,7 +14,7 @@ namespace HP1.UEScript
     // ASCII is folded in place (A-Z <=> a-z); any non-ASCII char sends EQUALITY to the real
     // OrdinalIgnoreCase, and its hash uses Char.ToUpperInvariant, the same mapping
     // OrdinalIgnoreCase uses for equality, so equal keys give equal hashes.
-    // Equivalence is pinned by SelfTest `propname_comparer_equals_ordinal_ignore_case`.
+    // Equivalence to OrdinalIgnoreCase is checked by a self-test.
     public sealed class UEPropNameComparer : IEqualityComparer<string>
     {
         public static readonly UEPropNameComparer Instance = new UEPropNameComparer();

@@ -34,7 +34,7 @@ namespace HP1.UEScript
     //     something other than requested;
     //   * saving happens ONLY on success. A failed resize leaves no trace in the config or in GetCurrentRes;
     //   * saving comes AFTER applying, not instead of it. Shipped gets this order for free (synchronous), and so does
-    //     the port: every device (OpenHP1 SdlViewportDevice with SDL_SyncWindow, the headless canvas) resizes
+    //     the port: every device (HPEngine SdlViewportDevice with SDL_SyncWindow, the headless canvas) resizes
     //     synchronously and reports the outcome on return.
     //
     // The boundary follows the same seam: Core owns command parsing, step order and saving; the frontend owns the
@@ -57,7 +57,7 @@ namespace HP1.UEScript
     // ── WHAT IN A RESIZE IS ARITHMETIC, NOT PLATFORM ────────────────────────
     //
     // Both values below are FACTS FROM THE BINARY, identical for every frontend. A per-frontend copy would create two
-    // owners of one shipped rule (C7) — e.g. taking the depth from the ini, which holds the SAVED, not the current,
+    // owners of one shipped rule — e.g. taking the depth from the ini, which holds the SAVED, not the current,
     // state.
     public static class UEViewport
     {
@@ -122,8 +122,8 @@ namespace HP1.UEScript
         ViewportResizeOutcome Resize(int sizeX, int sizeY, int colorBytes, bool fullscreen);
 
         // Device screen modes, "WxH" space-separated in ascending order — the GetRes answer. Shipped lists the
-        // driver's modes in fullscreen mode (WinDrv.dll.c:5126); the port always returns them (author decision:
-        // the windowed constants 320x240..800x600 are meaningless on a modern screen).
+        // driver's modes in fullscreen mode (WinDrv.dll.c:5126); NOT ORIGINAL: the port always returns them (the
+        // windowed constants 320x240..800x600 are meaningless on a modern screen).
         string DisplayModes { get; }
     }
 }

@@ -4,8 +4,7 @@
 //     RedrawSparks -> fire kernel -> PostDrawSparks
 // * RedrawSparks (Fire.dll.c:966-2506, 0x105025e0) and DrawFlashRamp (:811-963,
 //   0x10502320) are ported from the decompile as plain code; PostDrawSparks (:2513-2549).
-//   Verified byte-for-byte against the real bodies under unicorn (fire_oracle.py,
-//   validate_fire_texture.py): all 44 spark types, campaign carriers and synthetic cases.
+//   Verified byte-for-byte against the real bodies under unicorn: all 44 spark types, campaign carriers and synthetic cases.
 // * The fire kernel is self-modifying code in .data (0x10515780 rising / 0x105159a4,
 //   plus two PentiumPro variants). The closed form below was derived by a
 //   sensitivity probe and verified byte-for-byte against ALL four shipped kernels
@@ -25,8 +24,7 @@
 // PostDrawSparks flag: constructor 0x7970 sets 1, AddSpark of type 0x16 sets 1).
 // A spark is 8 bytes: [0] type, [1] heat, [2] X, [3] Y, [4..7] type parameters.
 //
-// Oracle: se_harness/bsp_diff/fire_oracle.py (real Fire.dll bodies under unicorn),
-// validator validate_fire_texture.py, red test audit/fire_texture_redtest.sh.
+// Judge: the real Fire.dll bodies executed under unicorn.
 using System;
 using System.Buffers.Binary;
 

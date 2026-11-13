@@ -1,10 +1,8 @@
-// The pure core of the VM's native-function table (plan §2, natives slice).
-// Machinery (registration + dispatch + the shipped MSVCRT random stream) and
-// the proven-pure intrinsic groups — no UnityEngine, no frontend types. The
-// Unity frontend (UENatives) derives from this and adds the bridge-backed
-// groups; the headless smoke (HeadlessNatives) derives directly and
-// re-registers only these pure groups plus its own shipped-ported handlers.
-// Source citations inside each member are unchanged from the original file.
+// The pure core of the VM's native-function table: machinery (registration +
+// dispatch + the shipped MSVCRT random stream) and the pure intrinsic groups —
+// no frontend types. Frontends derive from this and add the bridge-backed
+// groups; the headless runtime derives directly and re-registers only these
+// pure groups plus its own handlers.
 
 using System;
 using System.Collections.Generic;
@@ -27,11 +25,14 @@ namespace HP1.UEScript
         readonly MsvcRandom _renderRandom;
         // Fixture seam: how many rand() draws each stream consumed.
         internal long GameRandomDrawsForTest => _random.Draws;
+        // Read-only draw counts of the game and Core render streams, for a frontend's per-tick state digest (HPEngine --digest).
+        public long GameRandomDraws => _random.Draws;
+        public long RenderRandomDraws => _renderRandom.Draws;
         internal long RenderRandomDrawsForTest => _renderRandom.Draws;
         internal HP1.Core.MsvcRandom RenderRandomForTest => _renderRandom;
 
         // Registers NOTHING: every group is registered by the derived
-        // frontend (Unity UENatives in its full order; HeadlessNatives only
+        // frontend, in its own order (the headless runtime registers only
         // the pure groups, with its provenance-journaling Pair override).
         // x87 COMPARISONS (Core.dll: fld A; fcomp B; fnstsw; test ah, M). With
         // unordered operands (NaN) fcomp sets C0, C2 and C3 at once,
@@ -61,7 +62,7 @@ namespace HP1.UEScript
             // 1 < sum. Then the same sum -> fstp qword -> appSqrt (Core
             // 0x10126100: fld qword; fsqrt) -> fdivr 1.0 -> fmul component ->
             // fstp dword. All in 64 bits: a float sum (Vector3.Dot) differed
-            // from shipped by 1-4 ulp (reference: crt_rand_oracle.py).
+            // from shipped by 1-4 ulp.
             // LOOP SUBTLETY (0x1013caf9): the third component is stored with `fst`
             // (no pop), and `fmul dword [esp+8]` multiplies the UNROUNDED
             // 2f-1 by its float store; after the loop the sum is recomputed from
@@ -331,7 +332,7 @@ namespace HP1.UEScript
             // 64-bit mantissa (exact for int32×float), _ftol truncation
             // (outside int64 and NaN — 0, otherwise the low dword). Rounding A and the
             // product to float would make `100 *= 0.01` give 1
-            // instead of shipped 0 (0.01f < 0.01). Oracle: validate_core_math_natives.py.
+            // instead of shipped 0 (0.01f < 0.01).
             Pair(159, "MultiplyEqual_IntFloat", (interp, frame, args) => {
                 int v = X87.MulIntFloatFtol(UEInterpreter.ToInt(args[0]), UEInterpreter.AsFloat(args[1]));
                 args[0] = v;
@@ -466,7 +467,7 @@ namespace HP1.UEScript
         // String functions and operators — bodies of UObject::exec* in Core.dll
         // for UE1 v220 (the secondary registrations at idx 197+ are for
         // newer engine versions, not HP1).
-        // Pure string intrinsics (no Unity, no game bridge) — safe for the
+        // Pure string intrinsics (no game bridge) — safe for the
         // headless core. Localize is Core-owned (RegisterLocalizationOps).
         protected void RegisterStringOpsPure()
         {
@@ -559,7 +560,7 @@ namespace HP1.UEScript
         }
 
         // Math functions — bodies of UObject::exec* in Core.dll. All pure (no
-        // Unity bridge). Float trig/exp/sqrt map to System.Math; Rand/FRand use
+        // game bridge). Float trig/exp/sqrt map to System.Math; Rand/FRand use
         // the shared shipped MSVCRT stream in HP1.Core.
         protected void RegisterMathOps()
         {
@@ -571,7 +572,7 @@ namespace HP1.UEScript
             });
             // Sin/Cos/Tan/Atan — radians. execSin/Cos/Tan/Atan call appSin/appCos/appTan/appAtan (Core 0x101260a0
             // fsin, 0x101260b0 fcos, 0x101260d0 fptan; fstp st(0), 0x101260e0 fld1; fpatan) on the qword argument;
-            // the result goes out by fstp dword. UEX87Transcendental: correctly rounded 64-bit results (D-71); finite
+            // the result goes out by fstp dword. UEX87Transcendental: correctly rounded 64-bit results; finite
             // |x| >= 2^63: fsin/fcos leave x (C2), appTan reads the popped register (NaN); ±inf -> the indefinite NaN.
             // ±0 gives ±0 for sin, tan, atan (X87Ext keeps the sign of zero).
             Pair(187, "Sin", (interp, frame, args) =>
@@ -584,8 +585,8 @@ namespace HP1.UEScript
                 UEX87Transcendental.AppAtan(X87Ext.From(UEInterpreter.AsFloat(args[0]))).ToFloat());
             // Exp/Loge — Core.dll appExp/appLoge (x87), not std::exp/std::log.
             // appExp (Core 0x10126060): fldl2e·x, frndint, f2xm1, fscale — the body is modelled (UEX87Transcendental.AppExp,
-            // judged by se_harness/bsp_diff/app_exp_oracle.py; D-74), but no shipped script calls Exp — proven by the
-            // campaign-wide bytecode scan (HeadlessSmoke --nativescan, SelfTest exp_has_no_shipped_caller), so the native's
+            // checked against the original body under unicorn; D-74), but no shipped script calls Exp — proven by the
+            // campaign-wide bytecode scan of all shipped scripts, so the native's
             // precision window was never established. appLoge (execLoge -> 0x10102d15): fldln2, fyl2x — NOT MODELLED (D-74):
             // fyl2x has no reference and no shipped script calls Loge (same scan). A call means that proof no longer holds:
             // refuse loudly.
@@ -658,7 +659,7 @@ namespace HP1.UEScript
 
         // Vector/Rotator operators — bodies of UObject::exec* in Core.dll: Vector (HP1.UEScript.UEVector) and
         // Rotator (UERotator) intrinsic math. Pure arithmetic in UE1 space;
-        // no Unity-world conversion here (that lives in the SetLocation/
+        // no engine-to-frontend conversion here (that lives in the SetLocation/
         // SetRotation bridge). The coordinate-transform operators
         // (>>/<< VectorRotator, idx 275/276) and Vector<->Rotator casts are
         // deferred to the transform-bridge commit where UE1's Coords::Rotation
@@ -680,9 +681,8 @@ namespace HP1.UEScript
                 X87.Sub(UEInterpreter.AsVector3(args[0]), UEInterpreter.AsVector3(args[1])));
             // execEqualEqual_VectorVector / execNotEqual_VectorVector (Core.dll.c:12350 /
             // 36660) — component-wise EXACT float comparison via x87 fcomp
-            // (X87Equal: a NaN component compares equal; 0x1013be60). Unity's
-            // Vector3 operators are approximate (~1e-5 epsilon),
-            // which turned sub-milliunit residuals (Harry.uc:910 `Acceleration ==
+            // (X87Equal: a NaN component compares equal; 0x1013be60). An approximate
+            // (~1e-5 epsilon) comparison would turn sub-milliunit residuals (Harry.uc:910 `Acceleration ==
             // vect(0,0,0)`) into false equality. Same fix as VectorToBool above.
             Pair(217, "EqualEqual_VectorVector", (interp, frame, args) => { // A==B
                 var a = UEInterpreter.AsVector3(args[0]); var b = UEInterpreter.AsVector3(args[1]);
@@ -698,8 +698,7 @@ namespace HP1.UEScript
                 X87.Dot(UEInterpreter.AsVector3(args[0]), UEInterpreter.AsVector3(args[1])));
             // execGreaterGreater_VectorRotator / execLessLess_VectorRotator
             // (Core.dll.c:24784 / 18270) — pure vector⊗rotator transforms (moved here
-            // from the Unity-backed transform group so the headless core gets
-            // them too; UEValue.Rotate/UnRotate is a 1:1 Coords::Rotation port).
+            // UEValue.Rotate/UnRotate is a 1:1 Coords::Rotation port).
             // `V >> R` transforms V from R's local frame to world; `V << R` the
             // inverse (world → local). Used by camera-target placement.
             Pair(276, "GreaterGreater_VectorRotator", (interp, frame, args) =>  // V >> R
@@ -711,8 +710,7 @@ namespace HP1.UEScript
             Pair(220, "Cross_VectorVector", (interp, frame, args) =>      // cross
                 X87.Cross(UEInterpreter.AsVector3(args[0]), UEInterpreter.AsVector3(args[1])));
             // execMultiply_VectorVector (Core.dll.c:59951) — COMPONENT-WISE A*B (vec3*vec3
-            // is component-wise, NOT the dot product). Unity has no operator* for two
-            // Vector3, so Vector3.Scale.
+            // is component-wise, NOT the dot product).
             Pair(296, "Multiply_VectorVector", (interp, frame, args) =>   // A*B (per-component)
                 X87.Mul(UEInterpreter.AsVector3(args[0]), UEInterpreter.AsVector3(args[1])));
             // Core.dll execVSize (0x1013c763): (Z²+Y²)+X² in a 64-bit mantissa,
@@ -720,7 +718,7 @@ namespace HP1.UEScript
             Pair(225, "VSize", (interp, frame, args) =>
                 X87.VSize(UEInterpreter.AsVector3(args[0])));
             // Normal (226, execNormal 0x1013c810: one call of FVector::SafeNormal) — X87.SafeNormal, PC64 or PC24 by
-            // the render window; checked by validate_core_math_natives.py in both precisions.
+            // the render window; checked against the original in both precisions.
             Pair(226, "Normal", (interp, frame, args) => X87.SafeNormal(UEInterpreter.AsVector3(args[0])));
             // UObject::execNormalize (Core.dll 0x1013e320, from disasm): each
             // rotator component (Pitch, Yaw, Roll) is `& 0xffff`, and values above 0x7fff
@@ -798,7 +796,7 @@ namespace HP1.UEScript
             Pair(288, "Multiply_FloatRotator", (interp, frame, args) =>
                 RotScale(UEInterpreter.AsRotator(args[1]), UEInterpreter.AsFloat(args[0])));
             // Shipped 0x1013d220 — multiplication by the float reciprocal with fistp to nearest
-            // (see RotDiv); direct division with truncation (SE rotator.h) differs from
+            // (see RotDiv); direct division with truncation (as in SurrealEngine's rotator.h) differs from
             // shipped. B==0 → ±inf/NaN → 0x80000000.
             Pair(289, "Divide_RotatorFloat", (interp, frame, args) =>
                 RotDiv(UEInterpreter.AsRotator(args[0]), UEInterpreter.AsFloat(args[1])));
@@ -806,7 +804,7 @@ namespace HP1.UEScript
             // execEqualEqual_RotatorRotator (body 0x1013ce40, export thunk RVA 0x2ced):
             // three plain `cmpl` on Pitch/Yaw/Roll, no movzx/and-0xFFFF/cmpw anywhere;
             // execNotEqual (0x1013cf30) identical inverted. Same as UT-public FRotator.
-            // SE's rotator.h:88-89 uint16 casts (0 == 65536) are SE's own deviation —
+            // SurrealEngine's rotator.h:88-89 uint16 casts (0 == 65536) are its own deviation —
             // native wins by source priority (the shipped engine says 0 != 65536).
             Pair(142, "EqualEqual_RotatorRotator", (interp, frame, args) => {
                 var a = UEInterpreter.AsRotator(args[0]); var b = UEInterpreter.AsRotator(args[1]);
@@ -943,7 +941,7 @@ namespace HP1.UEScript
         // operate on the *current Context* object (the implicit Self for the
         // call): in shipped this is `this`, the object the native runs on.
         // Pure VM state intrinsics (GotoState/Enable/Disable) — safe for the
-        // headless core. The decal natives live in RegisterStateOpsUnity.
+        // headless core.
         // Shipped UObject::execLocalize (Core.dll.c:10463 → worker :11150) —
         // reads the original .int files through the Core UELocalization port
         // (semantics + literals documented there). ONE body for BOTH
@@ -1113,7 +1111,7 @@ namespace HP1.UEScript
             //     if (StateFrame->LatentAction == 0x180) LatentFloat = -1.0f;
             // Code 0x180 (384) is the latent action `Sleep`: set by
             // AActor::execSleep (Engine.dll.c:124854), which also puts the seconds into
-            // LatentFloat (+0xcc, verified by the offset oracle). So the native
+            // LatentFloat (+0xcc, verified against the shipped class layout). So the native
             // means "if the pawn is asleep now, finish sleeping immediately"; for
             // any other latent (FinishAnim, MoveTo, TurnTo…) it does
             // nothing.
@@ -1137,7 +1135,7 @@ namespace HP1.UEScript
             // 0xc4/0x105 precedes any mask work.
             //
             // The mask is the only store (D-20); a separate per-name disable table is
-            // blocked by verify_architecture.py ("dual store").
+            // not allowed (two stores could disagree).
 
             // execEnable: the bit is restored ONLY if the class or state actually
             // defines it and it is not in ignores — the mask is recomputed with the
@@ -1392,11 +1390,9 @@ namespace HP1.UEScript
         public UENativeHandler GetByName(string name)
             => !string.IsNullOrEmpty(name) && _byName.TryGetValue(name, out var h) ? h : null;
 
-        // ── UNKNOWN NATIVE IS FATAL, AND THE DECISION IS ONE FOR BOTH FRONTENDS ──
+        // ── UNKNOWN NATIVE IS FATAL, FOR EVERY FRONTEND ──
         //
-        // There used to be `UETrace.Error(...)` here with the comment «the Unity runtime
-        // logs and continues (legacy behavior); the headless core overrides
-        // this to THROW». A skipped native returns no value and the bytecode then computes
+        // A skipped native returns no value and the bytecode then computes
         // from garbage — that would be faking a working game, forbidden by the STOP rule.
         // So an unknown native throws in every frontend; the only legitimate override is
         // headless survey mode, which calls the base.
@@ -1413,7 +1409,7 @@ namespace HP1.UEScript
             => _nameByIndex.TryGetValue(idx, out var n) ? n : null;
 
         // ── The shared WorldFrame producer + Canvas exec group ──────────────
-        // (review #11 item 1): frame building is owned by ONE Core object;
+        // Frame building is owned by ONE Core object;
         // every frontend sets FrameProducer at bootstrap and calls
         // RegisterCanvasOps so the UCanvas execs (Engine.u Canvas.uc natives
         // 464-470/480) dispatch into it. SetPos/SetOrigin/DrawIcon/DrawPattern
@@ -1496,7 +1492,7 @@ namespace HP1.UEScript
             // ── 467/471/480: LOUD BOUNDARIES, not stubs ──
             //
             // 471 DrawClippedActor and 480 DrawPortal: a bytecode census of all shipped .u
-            // (audit/campaign_coverage.json) — 480 has NO calls, 471 has a
+            // — 480 has NO calls, 471 has a
             // single one, UWindowWindow.DrawClippedActor, which itself has no
             // caller (neither final nor virtual). Unreachable.
             //
@@ -1514,14 +1510,14 @@ namespace HP1.UEScript
             //  * the execs are unreachable: the HPConsole console opens only with
             //    bDebugMode (globalconfig, absent from shipped ini — false; the cheat
             //    HarryDebugModeOn and the settings key are cut — no developer console,
-            //    author decision 2026-10-30, D-77), Tilde
+            //    NOT ORIGINAL, D-77), Tilde
             //    is unbound in DefUser.ini, no key calls
             //    View*/BehindView, the game's ConsoleCommand sends no such commands;
             //  * the game never enters PlayerSpectating (no GotoState in Engine.u or
             //    in scripts); Dying.EndState clears ViewTarget only for Carcass —
             //    the recipient stays the BaseCam camera (a Pawn without a Weapon);
             //  * ViewClass(BaseCam, true) from Harry.PostBeginPlay misses
-            //    only without a camera on the map: measured by audit/frame_census.sh (38 maps,
+            //    only without a camera on the map: measured over 38 maps (
             //    tick 300, view line) — everywhere bBehindView=True, ViewTarget is
             //    PotCam/BaseCam.
             // If the boundary is reached anyway: execDrawActor body (Engine.dll.c:
@@ -1542,7 +1538,7 @@ namespace HP1.UEScript
             // WinDrv UWindowsViewport::CreateNativeFont): an OS font (CreateFont(-Height, …, 400, …)) that GDI DrawText
             // measures and draws (WinDrv UWindowsViewport::DrawString). Called only by HPConsole.SetupLanguage for
             // languages without bitmap fonts (RU edition: 'MS Sans Serif' 24/16/10/12 from System/SAPFont.rus).
-            // NOT ORIGINAL: served by the bundled Liberation Sans (UENativeFonts, author decision 2026-11-03); other
+            // NOT ORIGINAL: served by the bundled Liberation Sans (UENativeFonts); other
             // faces (Asian SAPFont tables) refuse loudly.
             Pair(0, "CreateNativeFont", (interp, frame, args) =>
             {

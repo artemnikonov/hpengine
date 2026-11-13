@@ -3,9 +3,8 @@ using System;
 namespace HP1.UEScript
 {
     // UWaterTexture / UWetTexture (Fire.dll, UnFractal.cpp) — water simulation
-    // over a source texture. 1:1 port of the Fire.dll.c decompile; oracle:
-    // se_harness/bsp_diff/wet_oracle.py (real bodies under unicorn), compared
-    // byte-for-byte on every tick (validate_wet_texture.py).
+    // over a source texture. 1:1 port of the Fire.dll.c decompile; checked
+    // byte-for-byte on every tick against the real bodies under unicorn.
     //
     // State — UWaterTexture fields at the decompile offsets: +0x30 UBits,
     // +0x31 VBits, +0x34 USize, +0x38 VSize, +0xc0 UMask, +0xc4 VMask,

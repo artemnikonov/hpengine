@@ -15,7 +15,7 @@
 // UTexture::Tick accumulator: the shipped body (Engine.dll.c:70100, disasm 0x104217c0) is shared by all
 // UTexture and already ported in WaterTexture.Tick / FireTexture.Tick — sum in double, the sum compared
 // before the store to float; derived from disasm and verified byte-for-byte by the water oracle.
-// See openhp1/ProcTex/README.md.
+// See hpengine/ProcTex/README.md.
 //
 // Prime: UTexture::Tick calls Prime() (as Water/FireTexture.Prime) — PrimeCount ConstantTimeTick steps
 // once; les_spellbackgrnd has PrimeCount = 0. Gate Client && !NoFractalAnim — animation is always on

@@ -1,5 +1,4 @@
-// Mesh PF_Environment UV and light — Core's (moved from the frontend RenderRules 2026-10-29, review plan C7; the
-// frontend calls it per vertex). World-space form of the view-space body: the same values up to rounding (§1 tolerance).
+// Mesh PF_Environment UV and light — Core's (the frontend calls it per vertex). World-space form of the view-space body: the same values up to rounding (within render tolerance).
 using System;
 
 namespace HP1.UEScript

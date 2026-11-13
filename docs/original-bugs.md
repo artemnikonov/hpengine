@@ -1,7 +1,7 @@
 # Bugs and quirks of the original game
 
 Faults found in the 2001 game while porting it, each with a documented cause. For each: the symptom, the cause in the
-original, and what OpenHP1 does. "Fixed" always means an author decision recorded as "not original"; where the port keeps
+original, and what HPEngine does. "Fixed" always means an author decision recorded as "not original"; where the port keeps
 the original behaviour it says so. Game logic, physics and progress are otherwise exact, so most of these are visible only on
 modern hardware or in rare spots. The decision numbers (D-xx) are entries of the project's debt register.
 
@@ -30,7 +30,7 @@ modern hardware or in rare spots. The decision numbers (D-xx) are entries of the
   By the project's estimate (the places are not listed), about 45 places in the shipped bytecode count a step per tick
   (cameras, aiming, levitation, frogs) and behave differently at other rates.
 - **Port.** Kept rate, not behaviour: game logic always ticks at 60 Hz (not original, author decision), and frames between
-  ticks are interpolated for display, capped at 120 Hz (`../openhp1/FramePacing.cs`). The 0.005 s clamp itself is ported.
+  ticks are interpolated for display, capped at 120 Hz (`../hpengine/FramePacing.cs`). The 0.005 s clamp itself is ported.
 
 ## Mesh detail collapses with distance and low frame rate (D-62)
 

@@ -248,8 +248,8 @@ namespace HP1.UEScript
             if (head.Max == 0f) Advance(st, path);
             else
             {
-                // UTexture::Tick 0x104217c0 as WaterTexture.Tick (judged by merge_check 35): the sum stays in the x87
-                // register for both compares (float rounding of it flipped a step, validate_texanim.py).
+                // UTexture::Tick 0x104217c0 as WaterTexture.Tick (checked against the real body): the sum stays in the x87
+                // register for both compares (float rounding of it, flipped a step).
                 float max = head.Max < 0.1f ? 0.1f : head.Max >= 100f ? 100f : head.Max;
                 float min = head.Min < 0.1f ? 0.1f : head.Min >= 100f ? 100f : head.Min;
                 float minTime = (float)(1.0 / max), maxTime = (float)(1.0 / min);

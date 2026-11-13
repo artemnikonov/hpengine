@@ -1,10 +1,10 @@
-// Engine actor-lifecycle helpers shared by every frontend (headless, Unity):
+// Engine actor-lifecycle helpers shared by every frontend:
 // the ONE owner of the touch-list semantics and of engine event dispatch.
 // Ported from the shipped HP1 Engine.dll decompile — NOT from SurrealEngine:
 // the shipped BeginTouch/TouchTo/EndTouch family (Engine.dll.c FUN_1037a038 /
 // FUN_1037a0a0 / FUN_1037a3e0, guard names AActor::BeginTouch / TouchTo /
-// AActor::EndTouch) is asymmetric and eviction-capable, unlike SE's
-// symmetric UActor::Touch/UnTouch (§7: shipped wins).
+// AActor::EndTouch) is asymmetric and eviction-capable, unlike SurrealEngine's
+// symmetric UActor::Touch/UnTouch (shipped wins).
 using System;
 using UELib.Core;
 
@@ -18,7 +18,7 @@ namespace HP1.UEScript
         // pin event ORDER and to stand in for script bodies (a script Touch
         // may Destroy an actor — the fixture does the same from the probe).
         public static Action<UEObject, string, object[]> EventProbe;
-        // SwARc Engine measurement tap (tools/swarc_oracle/ENGINE_MEASURE.md): the dispatch of an event has ended
+        // Measurement tap for the SwARc judge harness: the dispatch of an event has ended
         // (its handler, if any, returned). Observes only; null in production.
         public static Action<UEObject, string> EventDone;
         readonly struct EventEnd : IDisposable
@@ -82,7 +82,7 @@ namespace HP1.UEScript
 
         // Frontend error policy for the event BODY only — the bookkeeping around
         // it (touch slots, base links) must still run, so this wraps just the
-        // Invoke. UELevelRuntime.Guard's setter keeps this in step, so a Unity
+        // Invoke. UELevelRuntime.Guard's setter keeps this in step, so a frontend's
         // log-and-continue policy also covers the events dispatched from inside
         // these helpers (Touch/UnTouch/EncroachedBy), not only the ones the tick
         // skeleton guards directly. Default runs the body straight through,
@@ -93,7 +93,7 @@ namespace HP1.UEScript
         // an actor event is delivered only when Level.bBegunPlay, then UObject::ProcessEvent.
         // LoadMap spawns GameInfo BEFORE bBegunPlay (247382), so in shipped its spawn events are
         // lost, and it gets Pre/Post/BeginPlay and SetInitialState from the common pass after
-        // InitGame (wave B3). An actor without Level (synthetic fixtures) is not gated.
+        // InitGame. An actor without Level (synthetic fixtures) is not gated.
         public static bool ActorEventsBlocked(UEObject obj)
             => obj?.GetProp(PK.Level) is UEObject level
                && UEInterpreter.ClassIsA(obj.Class, "Actor")
@@ -105,7 +105,7 @@ namespace HP1.UEScript
         //      (UnrealScript `ignores` lands here too, see UEProbeMask);
         //   2. !IsPendingKill() (vtable +0x2c; for an actor it is bDeleteMe, which
         //      DestroyActor sets AFTER its own events, 253087).
-        // Script Disable() clears a bit of the same mask (item 1); there is no second store (D-20).
+        // Script Disable() clears a bit of the same mask; there is no second store (D-20).
         // No body: silent no-op, as in the original.
         //
         // Check order as in shipped: probe mask BEFORE function lookup.
@@ -213,7 +213,7 @@ namespace HP1.UEScript
                 // since DestroyActor's unlink scans only the holder side (Engine.dll.c:253050),
                 // and the second half of BeginTouch links the corpse; it is evicted only by this
                 // pass when Physics==None. Live example: spellFlip x4 in Touching of spellTrigger9
-                // (Lev_Tut1b). IsValid is not "alive" (V1); in the C# model a registry slot
+                // (Lev_Tut1b). IsValid is not "alive"; in the C# model a registry slot
                 // reference is always valid, so there is nothing to assert.
                 for (int i = 0; i < UEObject.TouchingArraySize; i++)
                 {

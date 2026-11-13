@@ -1077,6 +1077,7 @@ namespace HP1.UEScript
             LevelTravelInfo = cfg.TravelInfo is null
                 ? new Dictionary<string, List<TravelActor>>(UEPropNameComparer.Instance)
                 : new Dictionary<string, List<TravelActor>>(cfg.TravelInfo, UEPropNameComparer.Instance);
+            LevelEntryTravel = LevelTravelInfo;   // port record (D-82): what travel carried in; a save load replaces it
         }
 
         // ── Travel actors (Engine.dll.c:249160-249230 collect, 51720-51900 accept) ──

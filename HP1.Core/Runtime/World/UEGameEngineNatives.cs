@@ -1,7 +1,7 @@
 // PLATFORM NATIVE TABLE AND ENGINE GAME LOOP.
 //
 // The bodies below were moved from `runtime_poc/HeadlessSmoke.cs` (class HeadlessNatives)
-// without changing behaviour or the journal, so the own engine (openhp1) boots and ticks
+// without changing behaviour or the journal, so the own engine (hpengine) boots and ticks
 // the world through Core without referencing the test harness.
 //
 // HeadlessNatives (runtime_poc) derives from this class: it adds probes, comparison
@@ -59,27 +59,122 @@ public class UEGameEngineNatives : UENativesCore
     }
 
     // ── Saves (D1): Save directory under the game root, like shipped `..\Save` ──
-    // Fixture seam: saves go to a temp folder so the GameSaveInfo native check
-    // does not write into the install's Save.
-    internal string SaveDirOverrideForTest;
-    string SaveDir => SaveDirOverrideForTest ?? Path.Combine(_gameRoot, "Save");
+    // Saves elsewhere than <root>/Save: test fixtures (a temp folder, so checks never write into the install's Save)
+    // and a game root that is not the install (the mod working copy: UEGameEngine.Boot saveDir).
+    internal string SaveDirOverride;
+    string SaveDir => SaveDirOverride ?? Path.Combine(_gameRoot, "Save");
     string SaveFilePath(string stem) => UELevelRuntime.SaveBodyPath(SaveDir, stem);
 
-    // Reads and validates a save body before the old world is touched; false (with the reason) when it cannot be loaded.
-    static bool TryReadSave(string path, out byte[] data, out string map, out string reason)
+    // The enabled HPEngine mods (UEGameEngine.Boot; the game root is then ModOverlay's working copy): recorded in saves
+    // and compared on load (UELevelRuntime.SaveScriptMismatch).
+    internal IReadOnlyList<string> ActiveMods = Array.Empty<string>();
+
+    // Reads and validates a save body before the old world is touched — its grammar, its map in this game, and that it
+    // fits the current scripts (mods) — false (with the reason) when it cannot be loaded; otherScripts: the body and its
+    // map are fine, only the scripts differ (the restart-with-progress fallback applies).
+    bool TryReadSave(UEInterpreter interp, string path, out byte[] data, out string map, out string mapPath, out string reason,
+        out bool otherScripts)
     {
-        data = null; map = null; reason = null;
-        try { data = File.ReadAllBytes(path); map = UELevelRuntime.ValidateSavedGame(data); return true; }
+        data = null; map = null; mapPath = null; reason = null; otherScripts = false;
+        try
+        {
+            data = File.ReadAllBytes(path);
+            map = UELevelRuntime.ValidateSavedGame(data);
+            mapPath = Path.Combine(_gameRoot, "Maps", map + ".unr");
+            mapPath = UEInstallPath.File(mapPath) ?? mapPath;
+            int packagesBefore = UEClassRegistry.Shared.Packages.Count;
+            reason = !File.Exists(mapPath) ? $"the save's map {map} is not in this game"
+                : UELevelRuntime.SaveScriptMismatch(data, mapPath, interp, ActiveMods);
+            // The check resolves the save's classes the linker way, so it is the step that raises their packages now
+            // (witness for verify_savegame_packages, next to LoadSavedWorld's own packages_raised).
+            var raised = new List<string>();
+            for (int p = packagesBefore; p < UEClassRegistry.Shared.Packages.Count; p++) raised.Add(UEClassRegistry.Shared.Packages[p].PackageName);
+            _journal.Add($"load_savegame_check packages_raised={(raised.Count == 0 ? "-" : string.Join(",", raised))} "
+                + $"verdict={(reason is null ? "fits" : "refused")}");
+            otherScripts = reason is not null && File.Exists(mapPath);
+            return reason is null;
+        }
         catch (Exception e) when (e is InvalidDataException or IOException or UnauthorizedAccessException) { reason = e.Message; return false; }
+    }
+
+    // ── LOAD NOTICE — IMPROVEMENT, NOT ORIGINAL (author decision 2026-11-13, D-82) ──
+    // A save of other scripts restarts its level, an old-format save is refused while mods are on: the player is told
+    // why by the shipped tutorial warning — what WarnTrigger.Touch does (Lev_Tut1's hints): baseHud.ShowPopup(
+    // class'baseWarning'), then curPopup.DisplayText and LifeSpan. The popup is drawn (baseWarning.Draw: top of the
+    // screen on the HPBase.Icons.leftPanel tile), timed (LifeSpan) and dismissed (basePopup.popstate: ClearMessages,
+    // set when the player makes Harry run or aim: Harry.PlayRunning, state playeraiming) by the shipped bytecode. The
+    // text waits here — engine state, in no save — for the first tick the player's baseHud exists (the level's first
+    // frame spawned it) and the level plays: not paused, no LevelAction, the menu book closed (HPHud.PostRender draws
+    // nothing under it), no popup of the game's own (ShowPopup would orphan it). A cut-scene does not hold it back:
+    // HPHud/BroomHud/QuidHud.PostRender call DrawPopup in cut-scene mode too, and no cut-scene code sets ClearMessages.
+    string _loadNotice;
+    UEObject _loadNoticePopup;
+    // `durration` of every WarnTrigger placed in the tutorial (Lev_Tut1, Lev_Tut1b: 6.0).
+    const float LoadNoticeSeconds = 6f;
+    // baseWarning.Draw falls to its smallest font (LocalSmallFont) while the text is wider than Canvas.SizeX - 32;
+    // 640 is the narrowest canvas. A text naming the save's mods is used only if it fits that.
+    const int LoadNoticeMaxWidth = 640 - 32;
+
+    // Width of the text in LocalSmallFont; -1 without the font. Canvas.TextSize on a scratch canvas (HUDSetup's
+    // SpaceX = 0): no live canvas state is touched.
+    float LoadNoticeWidth(UEInterpreter interp, string text)
+    {
+        object font = ((_localPlayer?.GetProp("Player") as UEObject)?.GetProp("Console") as UEObject)?.GetProp("LocalSmallFont");
+        var canvas = new UEObject { Interp = interp };
+        canvas.Props["Font"] = font; canvas.Props["ClipX"] = 0f; canvas.Props["ClipY"] = 0f;
+        return font is not null && FrameProducer.TextSize(canvas, text, out float w, out _) ? w : -1f;
+    }
+
+    void TryShowLoadNotice(UEInterpreter interp)
+    {
+        if (_loadNotice is null) return;
+        UEObject level = interp.GetLevelInfo();
+        if (_localPlayer?.GetProp(PK.myHUD) is not UEObject hud || !UEInterpreter.ClassIsA(hud.Class, "baseHud")) return;
+        if (hud.GetProp("curPopup") is UEObject) return;
+        if (level is null || UEInterpreter.ToInt(level.GetProp("LevelAction")) != 0
+            || !string.IsNullOrEmpty(level.GetProp(PK.Pauser)?.ToString())) return;
+        UEObject book = ((_localPlayer.GetProp("Player") as UEObject)?.GetProp("Console") as UEObject)?.GetProp(PK.menuBook) as UEObject;
+        if (book is not null && UEValue.ToBool(book.GetProp("bIsOpen"))) return;
+        string text = _loadNotice;
+        _loadNotice = null;
+        UClass cls = UEClassRegistry.Shared.Find("HPBase", "baseWarning");
+        UFunction show = interp.FindEventFunction(hud, "ShowPopup");
+        if (cls is not null && show is not null) interp.Invoke(hud, show, cls);
+        if (hud.GetProp("curPopup") is not UEObject popup)
+        {
+            // Scripts without the shipped popup (a mod): nothing to show it with; the reason is in the run log.
+            _journal.Add("load_notice not_shown no_popup");
+            UETrace.Info("[Save] load notice not shown: these scripts have no HPBase.baseWarning popup");
+            return;
+        }
+        popup.Props["DisplayText"] = text;
+        popup.Props["LifeSpan"] = LoadNoticeSeconds;
+        _loadNoticePopup = popup;
+        _journal.Add($"load_notice shown text=\"{text}\" seconds={LoadNoticeSeconds.ToString(CultureInfo.InvariantCulture)} "
+            + $"small_font_width={LoadNoticeWidth(interp, text).ToString(CultureInfo.InvariantCulture)} max={LoadNoticeMaxWidth}");
+    }
+
+    // The notice is not part of the game: a save written while it is up does not carry it.
+    void DropLoadNoticeForSave(UEInterpreter interp)
+    {
+        _loadNotice = null;
+        UEObject popup = _loadNoticePopup;
+        _loadNoticePopup = null;
+        if (popup is null || UEValue.ToBool(popup.GetProp("bDeleteMe"))) return;
+        if (_localPlayer?.GetProp(PK.myHUD) is UEObject hud && ReferenceEquals(hud.GetProp("curPopup"), popup))
+            interp.Invoke(hud, interp.FindEventFunction(hud, "DestroyPopup"));
+        else DestroyActorCore(interp, popup);
+        _journal.Add("load_notice dropped_for_save");
     }
 
     public void InstallSaveGameHandlers(UEInterpreter interp)
     {
         UEConsoleCommand.SaveGameHandler = slot =>
         {
+            DropLoadNoticeForSave(interp);
             Directory.CreateDirectory(SaveDir);
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            byte[] data = Runtime.SaveGame(interp);
+            byte[] data = Runtime.SaveGame(interp, ActiveMods);
             double serMs = sw.Elapsed.TotalMilliseconds;
             string path = SaveFilePath($"save{slot}");
             File.WriteAllBytes(path, data);
@@ -811,7 +906,7 @@ public class UEGameEngineNatives : UENativesCore
     //
     // Probes, comparison journals and route checkpoints live in runtime_poc
     // (HeadlessNatives) and plug in here, at the SAME loop positions their bodies
-    // occupied before the move. The engine (openhp1) needs no hooks: an empty hook is
+    // occupied before the move. The engine (hpengine) needs no hooks: an empty hook is
     // exactly the behaviour with no HP1_* variables set.
     //   TickBegin         — tick start, after _currentTick (HP1_TRACE, sampler);
     //   InputHook         — after the "tick N begin" line, before the travel probe;
@@ -900,7 +995,8 @@ public class UEGameEngineNatives : UENativesCore
                 var cfg = PlayWorldConfigFromIni();
                 cfg.Options = options;
                 bool isSave = map.EndsWith(".usa", StringComparison.OrdinalIgnoreCase);
-                byte[] data = null; string savedMap = null, badReason = null;
+                byte[] data = null; string savedMap = null, savedMapPath = null, badReason = null;
+                _loadNotice = null; _loadNoticePopup = null;   // a notice belongs to one load
                 string targetPath = isSave ? SaveFilePath(Path.GetFileNameWithoutExtension(map))
                     : UEInstallPath.File(Path.Combine(_gameRoot, "Maps", map.EndsWith(".unr", StringComparison.OrdinalIgnoreCase) ? map : map + ".unr"))
                       ?? Path.Combine(_gameRoot, "Maps", map.EndsWith(".unr", StringComparison.OrdinalIgnoreCase) ? map : map + ".unr");
@@ -911,18 +1007,60 @@ public class UEGameEngineNatives : UENativesCore
                     Runtime.LoadMapMissingFile(interp, map);
                     _journal.Add($"loadmap_failed url_map={map} file={Path.GetFileName(targetPath)}");
                 }
-                else if (isSave && !TryReadSave(targetPath, out data, out savedMap, out badReason))
+                else if (isSave && !TryReadSave(interp, targetPath, out data, out savedMap, out savedMapPath, out badReason,
+                             out bool otherScripts))
                 {
-                    // Damaged or newer-build save: LoadMap's catch, the old level plays on (UELevelRuntime.LoadMapBadSave).
-                    Runtime.LoadMapBadSave(interp, map, badReason);
-                    _journal.Add($"loadmap_failed url_map={map} file={Path.GetFileName(targetPath)} reason={badReason}");
+                    var dropped = new List<string>();
+                    Dictionary<string, List<UELevelRuntime.TravelActor>> carried = null;
+                    // The decode runs before teardown; a save it cannot read stays a refusal with the cause appended.
+                    try
+                    {
+                        carried = otherScripts ? Runtime.TravelInfoFromSave(data, savedMapPath, interp, dropped) : null;
+                        // Format 1..4 has no level-entry set: no guessing (author 2026-11-12).
+                        if (otherScripts && carried is null)
+                            badReason = $"saved by an older version with different scripts ({badReason})";
+                    }
+                    catch (Exception e) when (e is InvalidDataException or NotSupportedException or IOException)
+                    { badReason += $"; restart with progress impossible: {e.Message}"; }
+                    if (carried is null)
+                    {
+                        // Damaged or newer-build save, or one of other scripts without a level-entry set: LoadMap's catch,
+                        // the old level plays on (UELevelRuntime.LoadMapBadSave). The reason also goes to the run log.
+                        Runtime.LoadMapBadSave(interp, map, badReason);
+                        _journal.Add($"loadmap_failed url_map={map} file={Path.GetFileName(targetPath)} reason={badReason}");
+                        UETrace.Info($"[Save] {map} not loaded: {badReason}");
+                        // Old-format save of other scripts while mods are on: the old level plays on, with the notice.
+                        if (otherScripts && ActiveMods.Count > 0)
+                            _loadNotice = "This save cannot be loaded with mods on. Turn the mods off to load it.";
+                    }
+                    else
+                    {
+                        // RESTART WITH PROGRESS — IMPROVEMENT, NOT ORIGINAL (author decision 2026-11-12): the save fits
+                        // other scripts (mods on/off). The saved map is entered from its beginning as a level travel
+                        // enters it, with the travel set the level was ENTERED with (UELevelRuntime.TravelInfoFromSave) —
+                        // the death reload's progress, so the level's pickups cannot be collected twice; mid-level state
+                        // is lost. The player is told by the load notice (TryShowLoadNotice). The engine-level
+                        // travel does not arm HPConsole's level-start autosave (bLoadNewLevel): the slot is not overwritten.
+                        string carriedList = string.Join(",", carried.Values.SelectMany(l => l).Select(t => $"{t.Name}:{t.Props.Count}"));
+                        _journal.Add($"load_savegame_restart file={Path.GetFileName(targetPath)} map={savedMap} carried={carriedList} "
+                            + $"dropped={dropped.Count} reason={badReason}");
+                        foreach (string d in dropped) _journal.Add($"load_savegame_restart_dropped {d}");
+                        UETrace.Info($"[Save] {map}: {badReason}; restarting {savedMap} with the progress it was entered with ({carriedList})"
+                            + (dropped.Count == 0 ? "" : "; dropped: " + string.Join("; ", dropped)));
+                        cfg.TravelInfo = carried;
+                        Runtime.RetargetTravelToMap(savedMap);
+                        Runtime.TeardownPlayWorld(interp);
+                        _localPlayer = Runtime.LoadAndBootstrapPlayWorld(interp, savedMapPath, cfg);
+                        const string restarted = "Level restarted from its beginning.";
+                        string named = UELevelRuntime.SavedWithMods(data, ActiveMods) is { } savedWith ? $"{savedWith}. {restarted}" : null;
+                        _loadNotice = named is not null && LoadNoticeWidth(interp, named) is >= 0f and <= LoadNoticeMaxWidth
+                            ? named : $"Saved with other mods. {restarted}";
+                    }
                 }
                 else if (isSave)
                 {
                     // `open saveN.usa` — world from a save (UELevelRuntime.SaveGame).
                     string savePath = targetPath;
-                    string savedMapPath = Path.Combine(_gameRoot, "Maps", savedMap + ".unr");
-                    savedMapPath = UEInstallPath.File(savedMapPath) ?? savedMapPath;
                     _journal.Add($"load_savegame file={Path.GetFileName(savePath)} map={savedMap} bytes={data.Length}");
                     _localPlayer = Runtime.LoadSavedWorldAndBootstrap(interp, savedMapPath, data, cfg);
                     _journal.Add($"load_savegame_done actors={Runtime.Actors.Count} player={_localPlayer?.GetProp("Name")}");
@@ -940,6 +1078,7 @@ public class UEGameEngineNatives : UENativesCore
                 WorldFrame screen = Runtime.LastLoadMapScreen;
                 _journal.Add($"loadmap_levelinfo hud={screen?.Hud.Count ?? -1}");
             }
+            else TryShowLoadNotice(interp);
             // EVERY tick, not only when a frontend asks for the snapshot.
             //
             // UEWorldFrameProducer.Build IS the port of UGameEngine::Draw: it
@@ -1114,7 +1253,7 @@ public class UEGameEngineNatives : UENativesCore
     }
 
     internal HP1.UEScript.IViewportDevice _viewport;
-    // Window device of a frontend with a real window (OpenHP1): size, mode and mode list come from the
+    // Window device of a frontend with a real window (HPEngine): size, mode and mode list come from the
     // window and monitor, not the headless canvas. The frontend still sets the script canvas itself (UEWorldFrameProducer.SetViewport).
     public void UseViewportDevice(HP1.UEScript.IViewportDevice device)
         => _viewport = device ?? throw new ArgumentNullException(nameof(device));

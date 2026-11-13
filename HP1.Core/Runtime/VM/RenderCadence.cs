@@ -1,6 +1,6 @@
 namespace HP1.UEScript
 {
-    // 60 Hz CADENCE FOR FRAME-DEPENDENT RENDER STEPS (D-35, author decision: fix original's problems). Shipped steps
+    // 60 Hz CADENCE FOR FRAME-DEPENDENT RENDER STEPS (D-35). Shipped steps
     // procedural and animated textures in Lock/Update of the drawn frame (UTexture::Tick with MaxFrameRate=0 is a
     // step without time), and the player saw it at 60 Hz. The port draws at the monitor rate (60/120/144/240 Hz,
     // any OS), so steps are metered by wall clock: 60 per second. A quarter-period tolerance absorbs frame jitter

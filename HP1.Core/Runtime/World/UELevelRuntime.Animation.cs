@@ -113,9 +113,10 @@ namespace HP1.UEScript
         // Meshes and animations for the frontend — over the same catalog as the
         // game natives: one set of package data for Core and for drawing.
         UEMeshSource _meshSource;
-        public UEMeshSource MeshSource => MeshCatalog is null ? null
+        public UEMeshSource MeshSource => MeshSourceChecked();
+        UEMeshSource MeshSourceChecked() { HP1.Core.UECoreOwner.Check("UELevelRuntime.MeshSource"); return MeshCatalog is null ? null
             : _meshSource is not null && _meshSourceCatalog == MeshCatalog ? _meshSource
-            : (_meshSource = new UEMeshSource(_meshSourceCatalog = MeshCatalog));
+            : (_meshSource = new UEMeshSource(_meshSourceCatalog = MeshCatalog)); }
         Hp1SkeletalMeshCatalog _meshSourceCatalog;
 
         // Sequence resolution by the EXACT pair (actor mesh, name), owned by Core

@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace HP1.UEScript
 {
-    // PER-FRAME LIGHTMAPS OF MOVER SURFACES — owned by Core (moved from the frontend's MoverScene 2026-10-29).
+    // PER-FRAME LIGHTMAPS OF MOVER SURFACES — owned by Core.
     //
     // SetupForSurf takes a mover surface (BrushTracker->SurfIsDynamic, Render.dll.c:19845-19856) into one of two branches:
     //   * a mover without bDynamicLightMover — the LEVEL branch with the mover's brush model (+0x168): its iLightActors
@@ -75,7 +75,7 @@ namespace HP1.UEScript
         // (SetupForSurf 0x10b079d7: draw record +0x34 = Zones[iZone[side]].ZoneActor; cache 0x18 key = iLightMap + zone
         // byte). Each brush polygon has its own lightmap (iBrushPoly), so a lightmap's zone is the front zone (iZone[1])
         // of its polygon's live tracker fragments. A lightmap whose fragments lie in zones of different ambient
-        // (SpanningLightmaps) keeps its current tile: it needs per-fragment pieces (review plan A9, open).
+        // (SpanningLightmaps) keeps its current tile: it would need per-fragment pieces (not ported).
         readonly Dictionary<int, Dictionary<int, LevelSurfLightmapRuntime.Tile>> _zoneTiles = new();
         Dictionary<int, int> _geoOfTracker;   // ZoneLayerTiles scratch (allocation only)
         readonly Dictionary<int, HashSet<int>> _zonesOf = new();
@@ -160,6 +160,7 @@ namespace HP1.UEScript
         {
             get
             {
+                HP1.Core.UECoreOwner.Check("UELevelRuntime.MoverLightmaps");
                 WorldStatic w = LatestWorldStatic;
                 if (w?.Geometry is null || LatestFrame is null || Bsp is null) return null;
                 if (_moverLightmaps is not null && ReferenceEquals(_moverLightmapsWorld, w)) return _moverLightmaps;

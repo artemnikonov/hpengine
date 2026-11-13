@@ -1,6 +1,6 @@
 // BYTECODE BRANCH COVERAGE COUNTER (diagnostics for comparison with the original, not a gate).
 //
-// Counterpart of the `B`/`W` records of the live-original probe tools/origprobe/hp1probe.dll: for every executed
+// Counterpart of the `B`/`W` records of the live-original probe: for every executed
 // EX_JumpIfNot the outcome (J = jump taken, N = fall through), for every EX_Switch the offset of the matched case
 // body. Positions are in script memory (UELib Token.Position, same space as CodeOffset of jumps), like
 // `Code - Node->Script.Data` in the original (Core.dll.c execJumpIfNot: Script.Data = *(Node+0x48)).

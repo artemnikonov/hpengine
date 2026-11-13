@@ -27,7 +27,7 @@ namespace HP1.Core
         // every repeated state and event in place, because a stall shows up exactly in repeats — a player
         // oscillating between two states looks like one transition at threshold 3.
         //
-        // The default stays 3 (HP1_PLAYLOG_REPEATS raises it), so existing runs and pins are unchanged.
+        // The default stays 3 (HP1_PLAYLOG_REPEATS raises it), so existing runs and logs are unchanged.
         // Suppressed lines are still counted and printed in the summary (no silent caps).
         public static int RepeatsShown { get; set; } = ParseRepeats();
 
@@ -39,8 +39,8 @@ namespace HP1.Core
 
         static TextWriter _out;
         // KEY IS A TUPLE, NOT A CONCATENATED STRING. A string key `kind + '\u0001' + detail` split back with
-        // `Split` broke once its invisible separator was lost in an edit: `Close` threw IndexOutOfRange, on the
-        // path that runs only when there is a repeated loud message. A tuple has nothing to lose.
+        // `Split` breaks if its invisible separator is lost in an edit (`Close` would throw IndexOutOfRange, on the
+        // path that runs only when there is a repeated loud message). A tuple has nothing to lose.
         static readonly Dictionary<(string Kind, string Key), int> _seen = new();
         static readonly Dictionary<(string Kind, string Key), int> _suppressed = new();
         static int _written;
@@ -183,9 +183,9 @@ namespace HP1.Core
         // ── ROUTE CHECKPOINTS ─────────────────────────────────────────────
         //
         // The list is NOT hardcoded here: it is produced by the same analysis as the playability map
-        // (`audit/tut1_playability_ledger.py` -> backward closure from the CHANGELEVEL action) and supplied by
+        // (a backward closure from the CHANGELEVEL action) and supplied by
         // the loop owner. Hardcoding it would create a SECOND owner of "what is mandatory on the route" that
-        // would silently drift from the ledger.
+        // would silently drift from that analysis.
         //
         // The marker ONLY OBSERVES: it does not teleport, open doors or advance progress. Each checkpoint is
         // printed once; passing it again shows in the ordinary log lines.

@@ -1,4 +1,4 @@
-// OS fonts of UConsole.CreateNativeFont (RU edition) — NOT ORIGINAL substitution (author decision 2026-11-03,
+// OS fonts of UConsole.CreateNativeFont (RU edition) — NOT ORIGINAL substitution (see
 // HP1.Core/Fonts/README.md). The original creates a transient UFont with only a face name (+0x50) and a height (+0x5c)
 // (WinDrv UWindowsViewport::CreateNativeFont: CreateFont(-Height, 0,0,0, 400, 0,0,0, charset, 0,0,
 // NONANTIALIASED_QUALITY, 0, Face)), and UCanvas::WrappedPrint hands such a font to UViewport::DrawString, which

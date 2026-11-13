@@ -1,18 +1,11 @@
-// Typed world-state snapshot (plan stage 8, slice 1): a READ-ONLY projection
-// of the Core's live actor state that a frontend (the Unity visual proxy)
-// consumes to display the world — it never writes back (PLAN_core: the
-// frontend is a replaceable visual proxy, gameplay truth stays in the Core).
-// The snapshot is built directly from UEObject state, NOT by parsing the
-// journal — the state digest is one TEXT rendering of these same snapshots
-// (see HeadlessSmoke.EmitStateDigest), so the two can never drift.
+// Typed world-state snapshot (the WorldFrame): a READ-ONLY projection of the Core's live
+// actor state that a frontend consumes to display the world. It never writes back; gameplay
+// truth stays in the Core and the frontend only draws, mixes sound and passes input.
+// The snapshot is built directly from UEObject state, NOT by parsing the journal.
 //
-// SCOPE (review #7): this is the GAMEPLAY projection — identity (stable
-// ObjectId + base/owner ids), transform, motion, physics, region, state
-// frame, timers, animation, touch. The full PLAN_core stage-8 frontend
-// contract additionally needs: render identity (mesh/asset path, DrawScale,
-// PrePivot, MultiSkins/material, DrawType, hidden/style/PolyFlags); Camera;
-// movers/lights/particles/decals; and the audio/HUD command stream. Those
-// land as later slices — stage 8 is NOT closed by this file alone.
+// Contents: gameplay projection (identity with stable ObjectId + base/owner ids, transform,
+// motion, physics, region, state frame, timers, animation, touch), render identity, camera,
+// movers/lights/particles/decals, and the audio/HUD command stream.
 using System.Collections.Generic;
 using System.Linq;
 
@@ -22,8 +15,8 @@ namespace HP1.UEScript
     // lighting from these — LightType LT_None (0) means "not a light". Type/
     // Effect are the ELightType/ELightEffect enums; WorldRadius is the SHIPPED
     // AActor::WorldLightRadius, max(DrawScale,1)*(LightRadius+1)*25 (proven
-    // from the Engine.dll body — see WorldFrameProjector.WorldLightRadius; SE
-    // UActor.h:516 omits the scale factor and loses to shipped). All bytes as
+    // from the Engine.dll body — see WorldFrameProjector.WorldLightRadius;
+    // SurrealEngine omits the scale factor, which is wrong). All bytes as
     // UE1 stores them.
     public readonly struct LightState
     {
@@ -34,9 +27,9 @@ namespace HP1.UEScript
         public readonly int Saturation;
         public readonly int Radius;      // raw LightRadius byte
         public readonly float WorldRadius;
-        // KnowWonder addition (review #10 item 4): the inner-radius plateau of
+        // KnowWonder addition: the inner-radius plateau of
         // the falloff — authored on 316 Lev_Tut1 lights, consumed by the
-        // frontend light sources (HP1DynamicLight/HP1Lighting/HP1LightSource).
+        // frontend light sources.
         public readonly int RadiusInner;
         public readonly int Cone;        // spot outer cone: cos = 1 - Cone/256 (shipped spot filler, SurfLightmap.cs coneC)
         public readonly int Phase;       // pulse/flicker phase offset
@@ -90,7 +83,7 @@ namespace HP1.UEScript
         // (:486 _DAT_10b38694). The frontend cannot build a fog map without them.
         public readonly int VolumeRadius;
         public readonly int VolumeFog;
-        // LIGHT DIRECTION (D-68): AActor::GetViewRotation (Engine.dll.c:103977-104001: IsA(APawn) ? ViewRotation +0x33c
+        // LIGHT DIRECTION: AActor::GetViewRotation (Engine.dll.c:103977-104001: IsA(APawn) ? ViewRotation +0x33c
         // : Rotation +0x108). The spot filler FUN_10b05710 calls it (Render.dll.c:18492), and ComputeFromActor's
         // LightSource 1 branch inlines it (IsA [0x10b74734] = APawn::PrivateStaticClass, disasm 0x10b06e8e..0x10b06ea8).
         public readonly UERotator ViewRotation;
@@ -122,10 +115,9 @@ namespace HP1.UEScript
         public readonly int NumKeys;
         public readonly float PhysAlpha;
         public readonly bool Interpolating;
-        // Brush model identity (review #10 item 5): the mover's own Model
-        // export in the map package — the proxy binds its imported brush
-        // geometry by this export index (the same identity collision uses,
-        // HeadlessSmoke.BrushModelOf). -1 = the actor has no brush.
+        // Brush model identity: the mover's own Model
+        // export in the map package — the frontend binds its brush
+        // geometry by this export index (the same identity collision uses). -1 = the actor has no brush.
         public readonly int BrushExportIndex;
         public readonly string BrushName;
         // ABrush::ToWorld of this tick (UELevelRuntime.BrushToWorld: Location, Rotation, PrePivot, MainScale, PostScale):
@@ -269,22 +261,21 @@ namespace HP1.UEScript
         }
     }
 
-    // The static world contract (review #10 item 5): what the proxy binds
+    // The static world contract: what the frontend binds
     // ONCE, not per frame — the map package (level BSP geometry import) that
     // mover BrushExportIndex values resolve into.
     public sealed class WorldStatic
     {
         public readonly string MapPath;
         // Static render geometry. null when the level model is not loaded (e.g. in the contract dump,
-        // which builds WorldStatic from a path only): these values are pinned not by the dump SHA but by
-        // the campaign oracle diff - the [bsp-oracle] gate step.
+        // which builds WorldStatic from a path only).
         public readonly StaticGeometry Geometry;
         public WorldStatic(string mapPath) : this(mapPath, null) { }
         public WorldStatic(string mapPath, StaticGeometry geometry)
         { MapPath = mapPath; Geometry = geometry; }
     }
 
-    // Ambient sound state (review #10 item 2). The ORIGINAL ambient loop runs
+    // Ambient sound state. The ORIGINAL ambient loop runs
     // in the audio subsystem, not in gameplay: each update it STARTS the
     // ambient of any actor whose WorldSoundRadius reaches the view actor and
     // STOPS a playing one that went out of range / changed sound / whose actor
@@ -307,7 +298,7 @@ namespace HP1.UEScript
         }
     }
 
-    // Music state (review #10 item 2), read from the local player pawn — the
+    // Music state, read from the local player pawn — the
     // original audio subsystem reads the viewport actor's Song/Transition
     // (Galaxy UpdateMusic start block, Galaxy.dll.c:7385-7451; ClientSetMusic writes these props).
     // Valid=false when there is no local player.
@@ -344,7 +335,7 @@ namespace HP1.UEScript
     // The clamps compare the EXACT x87 product (fcom before fstp dword), so the comparison here is in
     // double (8 bit x 24/53 bit product is exact) with a single rounding to float. (For byte inputs no
     // byte was found where clamping before/after rounding differs; the source form is kept anyway.)
-    // Field offsets checked with --dumpprops ZoneInfo (audit/prop_offsets.py: bReverbZone 0x2f8/0x1,
+    // Field offsets checked against the shipped ZoneInfo layout (bReverbZone 0x2f8/0x1,
     // MasterGain 0x300, CutoffHz 0x304, Delay[6] 0x308, Gain[6] 0x30e).
     // Equality is bitwise over all fields (like rep cmpsd); Valid is not one of the Galaxy words and
     // does not take part in the comparison.
@@ -376,8 +367,7 @@ namespace HP1.UEScript
                 g[i] = Clamp(gain[i] * (double)(1f / 255f), 0.001f, 0.999f);
             }
             // byte*(double)1/255 has 61 significant bits, double would round twice; exhaustive check over
-            // all 256 bytes: (float)(b*(1.0/255)) equals the single rounding of the exact product (FromZoneBytes
-            // check in SelfTest).
+            // all 256 bytes: (float)(b*(1.0/255)) equals the single rounding of the exact product.
             return new ReverbState((float)(masterGain * (1.0 / 255)),
                 (float)(cutoffHz < 0 ? 0 : cutoffHz >= 0xac44 ? 0xac44 : cutoffHz), d, g);
         }
@@ -407,8 +397,8 @@ namespace HP1.UEScript
     // Live emitter parameters: the ORIGINAL scripts mutate them at runtime (baseProps.uc:86 ParticlesPerSec/Lifetime,
     // TargetGlow.uc:7, Doxie1.uc:30), so the frame carries LIVE values, not class defaults. Valid=false for a
     // non-ParticleFX actor. Emission itself is simulated in Core (UEWorldFrameProducer) from the actor.
-    // The emitter fields a consumer reads: Valid and RenderPrimitive (openhp1 ParticleBuilder/SdlActors),
-    // TexturePaths (headless render ledger), ParticlesPerSec and Lifetime (selftest: the projection is LIVE, not the
+    // The emitter fields a consumer reads: Valid and RenderPrimitive (hpengine ParticleBuilder/SdlActors),
+    // TexturePaths, ParticlesPerSec and Lifetime (the projection is LIVE, not the
     // class default). Every other AParticleFX property stays on the actor — nothing read it from the frame.
     public readonly struct ParticleState
     {
@@ -484,15 +474,15 @@ namespace HP1.UEScript
         // be a rename but a different blend model, with its own source and proof; not done here.
         public readonly float TweenRate;
         // CORE DRIVES THIS ACTOR'S ROOT. Exactly the condition under which `UELevelRuntime` calls
-        // `TickRootMovement` (UELevelRuntime.cs:606-615): authority role, `bAnimMove` and a mesh. Core then
+        // `TickRootMovement`: authority role, `bAnimMove` and a mesh. Core then
         // converts ALL root translation into actor movement (the remainder also goes back into the actor
-        // delta, RootMotion.cs:133-150), so the pose the frontend draws must come WITHOUT root offset -
+        // delta, see TickRootMovement), so the pose the frontend draws must come WITHOUT root offset -
         // otherwise the translation is applied twice.
         //
         // The flag travels in the frame instead of being derived from the class, so every `bAnimMove`
         // carrier (Harry, cauldrons, logs, boulders) is handled the same way.
         public readonly bool RootMotionDriven;
-        // Shipped tween model (review #11 item 4): a new sequence starts at
+        // Shipped tween model: a new sequence starts at
         // AnimFrame=0 while TweenAlpha (actor +0x60) ramps the CACHED previous
         // pose out separately — the frontend blends its own last-rendered pose
         // against the new frame with weight 1-TweenAlpha. Without this the
@@ -581,7 +571,7 @@ namespace HP1.UEScript
         // and the export thunk were scanned).
         //
         // The request is owned by Core: `UELevelRuntime.AttachDecal`. The `Update` body begins with native
-        // 257 BonePos (C3); fixture `decal_attach_request_is_built_by_core_bytecode` pins this state.
+        // 257 BonePos.
 
         public ActorSnapshot(int objectId, int baseId, int ownerId,
             string name, string @class, bool placed, UEVector location, UERotator rotation,
@@ -663,12 +653,11 @@ namespace HP1.UEScript
     // lines are the TEXT rendering of these same commands
     // (UELevelRuntime.FormatAudio), so the two cannot drift. Play carries the
     // full sound params; Stop only the slot.
-    // Ambient kinds (review #11 item 3, PLAN:172 — CORE decides the loop):
+    // Ambient kinds (CORE decides the loop):
     // the producer's ambient pass emits Start when the view actor enters an
     // ambient actor's WorldSoundRadius, Update every frame it stays (position
     // and live volume/pitch follow the actor), Stop when it leaves / dies /
-    // changes sound — the SE StartAmbience/UpdateAmbience model with the
-    // decisions IN CORE; the frontend only obeys commands.
+    // changes sound — the decisions are IN CORE; the frontend only obeys commands.
     // Modify - port of AActor::execModifySound (Engine.dll.c:72205): not a new sound but an edit of an
     // ALREADY PLAYING channel with the same identity (actor, slot); the original addresses the channel
     // the same way - (Index*8 + Slot)*2, like PlaySound.
@@ -676,7 +665,7 @@ namespace HP1.UEScript
     public readonly struct AudioCommand
     {
         public readonly AudioKind Kind;
-        // Stable channel identity (review #10): a UE1 sound channel is
+        // Stable channel identity: a UE1 sound channel is
         // (actor, slot) — the frontend keys running channels on ActorId so a
         // moving owner can be followed, its channel stopped, and a destroyed
         // actor never confused with a later spawn reusing the Name (the Name
@@ -710,8 +699,8 @@ namespace HP1.UEScript
         }
     }
 
-    // One HUD/Canvas draw command (review #10 item 6). The Core runs the HUD
-    // bytecode (PLAN_core: Canvas execs live engine-side; the frontend only
+    // One HUD/Canvas draw command. The Core runs the HUD
+    // bytecode (Canvas execs live engine-side; the frontend only
     // rasterises): PlayerPawn.PreRender lazily spawns myHUD (shipped Engine.u
     // bytecode), PlayerPawn.PostRender -> myHUD.PostRender and the console's
     // PostRender emit these through the Canvas natives (UCanvas exec 464-470).
@@ -780,7 +769,7 @@ namespace HP1.UEScript
         }
     }
 
-    // One live particle instance (review #11 item 2 / recorded decision):
+    // One live particle instance:
     // Core owns the simulation; the frontend rasterises these and never
     // randomises or destroys anything.
     // One FDecal entry of a surface (Surf->Decals of the shipped level model) - the RESULT of
@@ -969,7 +958,7 @@ namespace HP1.UEScript
         public readonly IReadOnlyList<int[]> DrawOrder;
 
         // Interface scale the canvas of this frame was built with (UEWorldFrameProducer.SetScreen: canvas = screen /
-        // scale, D-44 Interface Size, not original): the frontend scales this frame's HUD commands by it and never
+        // scale; NOT ORIGINAL (D-44), Interface Size): the frontend scales this frame's HUD commands by it and never
         // re-derives it — a menu change of the step mid-tick applies from the next frame's canvas.
         public readonly int CanvasScale;
 
@@ -978,13 +967,13 @@ namespace HP1.UEScript
 
         // World polygons each frame of the tree drew (see DrawnWorld): index 0 — master frame, i + 1 — Views[i]. null — no
         // OccludeBsp ran this tick (no camera, DrawWorld off): Core drew no world. The frontend draws BSP and mover
-        // polygons only from here (author decision 2026-10-16).
+        // polygons only from here.
         public readonly IReadOnlyList<DrawnWorld> Drawn;
 
         // Textures DrawFrame updated this tick (see DrawnWorld): AnimNext chains and procedural textures advance only these.
         public readonly IReadOnlyList<string> DrawnTextures;
 
-        // Original / Enhanced (author decision 2026-10-15, NOT ORIGINAL): the Options item "Object Detail" as read by
+        // NOT ORIGINAL (Enhanced mode): the Options item "Object Detail" as read by
         // Core this frame (UEWorldFrameProducer.EnhancedVisuals). true — the frontend applies the runtime-switchable
         // visual improvements (anisotropy D-53, trilinear mips D-48); false — the shipped D3DDrv sampling.
         public readonly bool EnhancedVisuals;
@@ -1035,7 +1024,7 @@ namespace HP1.UEScript
         static readonly MeshPose[] _noPoses = new MeshPose[0];
     }
 
-    // -- CHILD FRAME (D-61) --
+    // -- CHILD FRAME --
     //
     // A frame that Core occlusion (UEOcclusion - port of URender::OccludeBsp and CreateChildFrame, Render.dll 1.53)
     // spawned from a sky branch (PF_FakeBackdrop 0x80), mirror (PF_Mirrored) or warp portal (PF_Portal of AWarpZoneInfo).
@@ -1300,7 +1289,7 @@ namespace HP1.UEScript
         // actors of Lev_Tut1b that was most of the frame garbage. Key - the object by reference; the result
         // does not depend on world state. The key is held WEAKLY: every map load and save load builds new resource
         // references, and a strong table kept every previous world's references and their path strings
-        // (~0.3 MB per load on Lev_Tut1/Lev_Tut1b, audit/memory_growth.sh --travel). Reference identity, like before.
+        // (~0.3 MB per load on Lev_Tut1/Lev_Tut1b). Reference identity.
         static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, string> _assetPaths = new();
 
         // Public for Core owners that need a resource path outside actor projection (first one - the decal
@@ -1364,7 +1353,7 @@ namespace HP1.UEScript
                 animRate:     UEValue.AsFloat(a.GetProp(PK.AnimRate)),
                 tweenRate:    UEValue.AsFloat(a.GetProp(PK.TweenRate)),
                 // THE SAME CONDITION AS THE TickRootMovement CALL - not a "similar" one.
-                // Role_Authority = 4 (ENetRole), see UELevelRuntime.cs:606-615.
+                // Role_Authority = 4 (ENetRole), see TickRootMovement.
                 rootMotionDriven: UEValue.ToInt(a.GetProp(PK.Role)) == 4
                                   && UEValue.ToBool(a.GetProp(PK.bAnimMove))
                                   && a.GetProp(PK.Mesh) is not null,
@@ -1795,16 +1784,16 @@ namespace HP1.UEScript
                 viewRotation:     UEValue.AsRotator(a.GetProp(UEInterpreter.ClassIsA(a.Class, "Pawn") ? PK.ViewRotation : PK.Rotation)));
         }
 
-        // AActor::WorldLightRadius - PER SHIPPED, not per SE.
+        // AActor::WorldLightRadius - per the shipped body.
         //
-        // SE (UActor.h:516) computes (LightRadius+1)*25 WITHOUT the scale factor. The shipped body
-        // multiplies: export ?WorldLightRadius@AActor@@UBEMXZ (ordinal 2057) is a thunk to 0x1031ba10:
+        // (SurrealEngine computes (LightRadius+1)*25 WITHOUT the scale factor; the shipped body
+        // multiplies.) The export ?WorldLightRadius@AActor@@UBEMXZ (ordinal 2057) is a thunk to 0x1031ba10:
         //     fld  [ecx+0x16c]        ; DrawScale
         //     fcom [0x1046dd9c]       ; 1.0f
         //     ...  fld [0x1046dd9c]   ; DrawScale < 1 -> 1.0
         //     mov  al,[ecx+0x1e5]; inc eax; fimul   ; *(LightRadius+1)
         //     fmul [0x1046e2ac]       ; *25.0f
-        // Offsets resolved by the layout oracle (audit/prop_offsets.py):
+        // Offsets from the shipped class layout:
         // 0x16c = Actor.DrawScale, 0x1e5 = Actor.LightRadius.
         //
         // CONTROL: the neighbouring AActor::WorldSoundRadius (0x1031b9b0) has NO factor at all -
@@ -1823,8 +1812,8 @@ namespace HP1.UEScript
         // The ONE body (SurfLightmap, MoverMode3, UEOcclusion and actor lighting call it too).
         // Disasm 0x1031ba11..0x1031ba3d: fcom against 1.0f - "less or unordered" (NaN) -> 1.0f; fimul
         // (LightRadius+1), fmul 25.0f. Every game caller runs inside the render window (SetupDynamics, FUN_10b31c70,
-        // the SetupForSurf/SetupForActor fillers), where x87 is PC24: EACH operation rounds to float. Judged by the
-        // Engine body under unicorn at PC24 (SelfTest world_light_radius_pc24_matches_engine: the single-rounding
+        // the SetupForSurf/SetupForActor fillers), where x87 is PC24: EACH operation rounds to float. Checked against the
+        // Engine body under unicorn at PC24 (a single-rounding
         // form differed in 309 of 2560 DrawScale x radius cases).
         public static float WorldLightRadius(float drawScale, int radius)
         {
@@ -1883,7 +1872,7 @@ namespace HP1.UEScript
         // Project a whole actor list into a frame (live, non-destroyed actors),
         // the viewport camera, and the audio commands buffered since the last
         // frame (drained by the caller). The camera comes PRECOMPUTED from the
-        // caller (review #10 P2): PlayerCalcView is script, so the frame
+        // caller: PlayerCalcView is script, so the frame
         // builder evaluates it once per core tick and passes the snapshot in —
         // this projector stays free of script execution. (Music is pure prop
         // reads — no script — so it is projected here.)
@@ -1896,7 +1885,7 @@ namespace HP1.UEScript
         // intact while N is built, and frame N-3's storage IS OVERWRITTEN. This is the WorldFrame.Actors
         // contract: a consumer reads the current frame (and may compare with previous ones) but does not
         // keep the list longer than three frames - a snapshot needed longer is copied (ActorSnapshot is a
-        // struct). Contract pin: SelfTest `worldframe_actor_storage_double_buffered`.
+        // struct).
         public sealed class ProjectScratch
         {
             // THREE buffers (frame preparation on a separate thread): Core builds N while the frontend still
@@ -1953,7 +1942,7 @@ namespace HP1.UEScript
             // an actor twice in the same place - observably identical to one draw - while the frontend proxy
             // registry is keyed by actor identity and would take the second snapshot for a second actor. So the
             // frame carries the actor once. UEObject does not override Equals - HashSet compares by reference
-            // (ReferenceEqualityComparer is missing from Unity's netstandard2.1).
+            // (ReferenceEqualityComparer is missing from netstandard2.1).
             foreach (var a in actors)
                 if (a is not null && !a.Destroyed)
                 {
@@ -2016,8 +2005,7 @@ namespace HP1.UEScript
         // (location/rotation/FovAngle), then run PlayerCalcView(out ViewActor,
         // out CameraLocation, out CameraRotation); the pawn's override (HP1
         // Harry.uc:1108: redirect to ViewTarget when set) flows back through
-        // the out-params. FOV is the pawn's FovAngle (SE reads it from the
-        // viewport actor, PlayerCalcView never touches it). Read-only — no
+        // the out-params. FOV is the pawn's FovAngle (PlayerCalcView never touches it). Read-only — no
         // world mutation, no journal writes.
         public static CameraSnapshot ProjectCamera(UEInterpreter interp, UEObject player)
         {

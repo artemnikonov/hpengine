@@ -300,7 +300,7 @@ namespace HP1.UEScript
             return r;
         }
 
-        // Check seam (validate_light_filter.py): the given light items pushed to node 0 in order, then every node in
+        // Check seam: the given light items pushed to node 0 in order, then every node in
         // pre-order (node, front subtree, back subtree) filters its list-0 light items head first — the same drive the
         // oracle gives the shipped FUN_10b31c70. Returns SurfLights (iSurf -> list indices into `lights`, list order).
         // leaves: LeafLights (iLeaf -> (list index, link +0x14) in list order); vol: the seeds' +0x14 flags (null — all 0).
@@ -1150,8 +1150,8 @@ namespace HP1.UEScript
         }
     }
 
-    // Occlusion judge (D-56): the frame tree, node bits and zone LastRenderTime as lines — the same format is written
-    // by the Render.dll translation (RenderLevelPass.FrameTree); comparison — tools/frame_tree_compare.py.
+    // Occlusion dump (D-56): the frame tree, node bits and zone LastRenderTime as text lines, in the same format
+    // as the reference Render.dll translation, so the two can be compared line by line.
     public static class UEOcclusionDump
     {
         static string H(params float[] v)

@@ -1,4 +1,4 @@
-// Affine view mapping and BSP portal with a warp zone (types shared by Core and OpenHP1).
+// Affine view mapping and BSP portal with a warp zone (types shared by Core and HPEngine).
 //
 // Child frames (sky, mirrors, warp portals) are built by Core occlusion (UEOcclusion, port of URender::OccludeBsp and
 // CreateChildFrame) and handed out in WorldFrame.Views (D-61): each frame is an Affine "frame world -> master-frame

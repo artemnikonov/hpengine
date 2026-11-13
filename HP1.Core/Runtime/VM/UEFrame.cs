@@ -106,9 +106,9 @@ namespace HP1.UEScript
         public float SleepTimeLeft;
     }
 
-    // Call-object pool of one interpreter (audit/perf_core_ceiling_2026-11-03.md, "perf/vm-alloc"): the UEFrame of a
+    // Call-object pool of one interpreter: the UEFrame of a
     // function call (Invoke), the argument arrays and out-ref lists of a bytecode call (CollectArgsWithOuts). An object
-    // goes back only at a call return where no holder keeps it (holder audit in that section); every other path leaves
+    // goes back only at a call return where no holder keeps it; every other path leaves
     // it to the GC. Allocation only: a pooled object is reset to the state of a new one before it is handed out.
     // HP1_POOL_VERIFY=1: a released object is reset, checked against a new one, poisoned and never reused, so a late
     // reader fails loudly (frame: Variables/EvalNext/Run/lvalue access; args: Invoke entry and lvalue writes; out

@@ -1,19 +1,19 @@
 # Building from source
 
 Requirements: .NET SDK 9 or newer (the projects target `net9.0`). Nothing else: SDL3 comes from the `ppy.SDL3-CS` NuGet
-package, and the shader blobs are committed (`openhp1/shaders/build.sh` rebuilds them with DXC and SPIRV-Cross).
+package, and the shader blobs are committed (`hpengine/shaders/build.sh` rebuilds them with DXC and SPIRV-Cross).
 
-    dotnet build openhp1/OpenHP1.csproj -c Release
-    dotnet run --project openhp1/OpenHP1.csproj -c Release -- --root <game folder>
+    dotnet build hpengine/HPEngine.csproj -c Release
+    dotnet run --project hpengine/HPEngine.csproj -c Release -- --root <game folder>
 
-Release packages (self-contained, `win-x64`, `linux-x64`, `osx-arm64`, all three can be built on one machine):
+Release packages (self-contained, `win-x64`, `linux-x64`, `osx-arm64`, `osx-x64`, all can be built on one machine):
 
-    sh openhp1/packaging/publish.sh                     # -> .artifacts/openhp1-packages/
-    sh openhp1/packaging/publish.sh --out DIR osx-arm64
+    sh hpengine/packaging/publish.sh                     # -> .artifacts/hpengine-packages/
+    sh hpengine/packaging/publish.sh --out DIR osx-arm64
 
 Tests that need no game files:
 
-    sh openhp1/tests/run_all.sh
+    sh hpengine/tests/run_all.sh
 
 ## What is not in this repository
 
@@ -24,7 +24,7 @@ decompiled code of the original executables, so they **stay private** and are no
 
 - the decompiled and disassembled original DLLs and the tools that run them;
 - data extracted from the game and captures of the running original;
-- the headless validation harness, the acceptance suite and the tests that load the game (`openhp1/tests` here holds
+- the headless validation harness, the acceptance suite and the tests that load the game (`hpengine/tests` here holds
   only the tests that run without game files);
 - the project's internal notes.
 

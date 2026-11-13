@@ -1,3 +1,5 @@
+// Value types of the VM: UnrealScript name, package resource and model references, and the UE1 vector, rotator and plane
+// structs with the shipped Core.dll semantics.
 using UELib.Core;
 
 namespace HP1.UEScript
@@ -51,9 +53,8 @@ namespace HP1.UEScript
     // Reference to a non-actor Model export (a mover's Brush). Carries the
     // export index so collision code can look up the model's serialized
     // bounds and the frontend proxy can bind the imported brush geometry
-    // (review #10 item 5 — the frame projects this identity). Plain class,
-    // not a positional record: Unity's netstandard2.1 profile lacks
-    // IsExternalInit; ToString keeps the record rendering byte-for-byte.
+    // (the frame projects this identity). Plain class, not a positional
+    // record; ToString keeps the record rendering byte-for-byte.
     public sealed class UEModelRef
     {
         public string Name { get; }
@@ -62,12 +63,9 @@ namespace HP1.UEScript
         public override string ToString() => $"UEModelRef {{ Name = {Name}, ExportIndex = {ExportIndex} }}";
     }
 
-    // UE1 Vector intrinsic — the Unity-independent replacement type for
-    // UnityEngine.Vector3 in gameplay code (mirrors UERotator's role for
-    // rotators). Field/member NAMES mirror UnityEngine.Vector3 so the
-    // migration was a per-file type-name swap; the SEMANTICS are the shipped
-    // FVector's (review #5 P1 — the Unity approximation quirks in == and
-    // normalized were a proven deviation from Core.dll and are gone):
+    // UE1 Vector intrinsic — the engine-independent vector type for
+    // gameplay code (mirrors UERotator's role for rotators). The SEMANTICS
+    // are the shipped FVector's (Core.dll), including == and normalized:
     //   ==          — EXACT per-component float equality
     //                 (execEqualEqual_VectorVector, Core.dll.c:12346: three
     //                 exact fcomp compares, no epsilon).
@@ -130,7 +128,7 @@ namespace HP1.UEScript
         public UEVector normalized => UEWorldFrameProducer.FastMathWindow ? SafeNormal24(x, y, z) : SafeNormal64(x, y, z);
 
         // PC64: sum and reciprocal wider than float. This double form equals the PC64 chain: 3.1M random inputs against
-        // x87_size_oracle.py, 0 differences.
+        // the x87 chain, 0 differences.
         public static UEVector SafeNormal64(float x, float y, float z)
         {
             double sum = ((double)x * x + (double)y * y) + (double)z * z;

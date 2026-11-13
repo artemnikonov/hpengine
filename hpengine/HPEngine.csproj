@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- Windows: a GUI program, no console window next to the game (the run journal is a file, HPEngineData/logs). -->
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>HPEngine</RootNamespace>
+    <AssemblyName>HPEngine</AssemblyName>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <TieredPGO>true</TieredPGO>
+    <!-- JIT ramp of a fresh process (audit/perf_core_ceiling_2026-11-03.md, "perf/jit"): precompiled code from the
+         first tick (composite R2R with the framework, publish only) and call counting from process start instead of
+         after 100 ms; dynamic PGO still tiers the hot code up. -->
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <PublishReadyToRunComposite>true</PublishReadyToRunComposite>
+  </PropertyGroup>
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="System.Runtime.TieredCompilation.CallCountingDelayMs" Value="0" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Subsystem test projects are not part of the engine build. -->
+    <Compile Remove="tests/**" />
+    <None Remove="tests/**" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="ppy.SDL3-CS" Version="2026.1002.1" />
+    <ProjectReference Include="../HP1.Core/HP1.Core.csproj" />
+    <Reference Include="Eliot.UELib">
+      <HintPath>../HP1.Core/ThirdParty/Eliot.UELib.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Blobs of shaders/build.sh from shaders/classic.hlsl; resource name — HPEngine.shaders.<file>. -->
+    <EmbeddedResource Include="shaders/classic.*.spv;shaders/classic.*.dxil;shaders/classic.*.msl" LogicalName="HPEngine.shaders.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="Hud/shaders/hud.*.spv;Hud/shaders/hud.*.dxil;Hud/shaders/hud.*.msl" LogicalName="HPEngine.shaders.%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

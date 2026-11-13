@@ -113,7 +113,7 @@ namespace HP1.UEScript
 
         static string OwnerName(UProperty p) => (p.Outer as UClass)?.Name ?? p.Outer?.Name.ToString();
 
-        // Config keys the port does not read (author decision 2026-10-30, NOT ORIGINAL: no developer console, D-77):
+        // Config keys the port does not read (NOT ORIGINAL (D-77): no developer console):
         // globalconfig baseConsole.bDebugMode would turn HPConsole's developer mode on from the settings file. The
         // property keeps its default (false, as with the shipped ini, which has no such key); SaveConfig still writes it.
         static bool IsNotHonoured(UProperty p)

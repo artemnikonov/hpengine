@@ -239,7 +239,7 @@ namespace HP1.UEScript
         // sequence (PlayAnim('None')) takes the same writes with AnimLast forced
         // to 0 (Engine.dll.c:73716-73718). SimAnim (+0x234) is replication-only
         // state with no reader in this single-player world and is not maintained;
-        // OldAnimRate is likewise never read here and no longer written.
+        // OldAnimRate is likewise never read here and is not written.
         // fild N; fdivr 1.0; fsubr 1.0; fstp.
         public static float AnimLastX87(int numFrames)
         {

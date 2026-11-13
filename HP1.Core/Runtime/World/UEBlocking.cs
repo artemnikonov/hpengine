@@ -5,8 +5,7 @@ namespace HP1.UEScript
     // THE single blocking authority. Every collision consumer — ULevel::MoveActor,
     // ULevel::SingleLineCheck, SpawnActor's mutual-block test and
     // CheckEncroachment — asks this and nothing else. It lives in Core because
-    // headless and Unity must not be able to disagree about who blocks whom
-    // (three separate copies had once all collapsed the matrix the same wrong way).
+    // no two frontends may disagree about who blocks whom.
     //
     // The shipped body picks the block flag SEPARATELY FOR EACH SIDE:
     //
@@ -41,7 +40,7 @@ namespace HP1.UEScript
 
         // A brush side per shipped: a non-NULL Brush model AND the ABrush class.
         // Public because it is the SINGLE definition of "is a brush" for every
-        // collision path — IsBlockedBy, CheckEncroachment's gate and push
+        // collision path — IsBlockedBy, CheckEncroachment's test and push
         // condition, and the encroachment candidate walk all read the same two
         // shipped tests (`*(int *)(x + 0x168) != 0` plus the ABrush class walk).
         public static bool IsBrush(UEObject actor)

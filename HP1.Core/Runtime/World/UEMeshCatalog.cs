@@ -1,9 +1,8 @@
 // MESH AND ANIMATION CATALOG, Core-owned.
 //
-// Single source of animation data. With a second (frontend) source, Core requested the root track through a hook
-// that only received the actor and the frame, and the frontend sampled ITS player's CURRENT sequence; the player
-// switched later, on the visual update, so on the tick where a script called PlayAnim('climb32') root motion still
-// came from 'breath'.
+// Single source of animation data. A frontend-side source would sample the player's CURRENT sequence, which
+// switches later (on the visual update), so on the tick where a script called PlayAnim('climb32') root motion
+// would still come from 'breath'.
 //
 // The catalog resolves data by the EXACT pair (mesh UEResourceRef, sequence name), regardless of what the
 // frontend is showing at that moment. Gameplay animation data belongs to the engine.
@@ -50,7 +49,7 @@ namespace HP1.UEScript
             SkeletalExportsGrouped() => _exports;
 
         // Same for ANIMATION OBJECTS: the frontend animation store is checked by key
-        // (validate_animseqs.py) on the EXACT package+name pair, because
+        // on the EXACT package+name pair, because
         // animation objects with the same name live in different packages.
         public IEnumerable<KeyValuePair<string, List<(PackageFile Package, PackageExport Export)>>>
             AnimExportsGrouped() => _animExports;
@@ -118,7 +117,7 @@ namespace HP1.UEScript
         // (UMesh::GetCollisionBoundingBox, Engine.dll.c:33473): the UPrimitive
         // BoundingBox plus Scale/Origin/RotOrigin out of the UMesh scalar tail.
         // Ambiguous leaf names (skbarrelMesh ships from two packages) resolve by
-        // the reference's FULL ObjectPath (path-first identity, review #5): the
+        // the reference's FULL ObjectPath (path-first identity): the
         // path's package segment picks the export. A pathless ambiguous query
         // stays loud.
         private (PackageFile Package, PackageExport Export) ResolveMeshExport(
@@ -212,7 +211,7 @@ namespace HP1.UEScript
         }
 
         // FIXTURE SEAM (headless build only, InternalsVisibleTo): synthetic
-        // mesh and animation object from the skelanim_oracle.py oracle corpus.
+        // mesh and animation object from the oracle corpus.
         internal void InjectForTest(string key, Hp1SkeletalMesh mesh) { lock (_gate) { _loaded[key] = mesh; _lastMesh = null; _epoch++; } }
         internal void InjectAnimationForTest(string key, IReadOnlyDictionary<string, Hp1AnimSequence> seqs)
         { lock (_gate) { _loadedAnims[key] = seqs; _epoch++; } }
@@ -292,7 +291,7 @@ namespace HP1.UEScript
             else
             {
                 // Ambiguous leaf → disambiguate by the reference's full path
-                // package (path-first, review #5/#6), same as ResolveMeshExport.
+                // package (path-first), same as ResolveMeshExport.
                 string pkg = objectPath is not null && objectPath.IndexOf('.') > 0
                     ? objectPath.Substring(0, objectPath.IndexOf('.')) : null;
                 var byPkg = pkg is null ? null : matches.Where(x =>
@@ -309,10 +308,9 @@ namespace HP1.UEScript
 
         // Validation dump: every SkeletalMesh's sequence metadata (the fields the
         // gameplay kernel consumes for anim timing) as THIS parser reads them, one
-        // JSON line per mesh, for the cross-pipeline diff against the Unity-era
-        // extraction (validate_animseqs.py).
+        // JSON line per mesh, for cross-checking against an independent extraction.
         // (DumpAnimSequences and ExportAnimBanks live in headless: they are TOOLS
-        //  (metadata dump for gate cross-validation and the frontend animation bank generator),
+        //  (metadata dump for cross-validation and the frontend animation bank generator),
         //  unrelated to gameplay, and would pull System.Text.Json into Core, which the frontend
         //  profile lacks (netstandard2.1 + C#9). The catalog only READS shipped data.)
 
@@ -645,7 +643,7 @@ namespace HP1.UEScript
                 r.Skip(CheckedCount(r.CompactIndex(), "bounding spheres") * (_version > 61 ? 16 : 12));
                 // UMesh scalar tail. Root movement consumes the same Scale and
                 // RotOrigin as USkeletalMesh::GetMeshCoords; retain them from the
-                // shipped mesh rather than borrowing Unity's imported mesh data.
+                // shipped mesh rather than borrowing imported mesh data.
                 int skelFrameVerts = r.Int32();              // FrameVerts (+0xf0)
                 r.Skip(12);                                  // AnimFrames, AndFlags, OrFlags
                 var meshScale = new Vector3(r.Single(), r.Single(), r.Single());
@@ -1055,7 +1053,7 @@ namespace HP1.UEScript
     // see ReadMeshHashFields) moved to Core UEBspCollision with HashBoxes (layer C).
 
     // UEModelRef (the mover-Brush model reference) moved to Core UEValueTypes —
-    // the WorldFrame projection needs the typed identity (review #10 item 5).
+    // the WorldFrame projection needs the typed identity.
 
     // Shipped FBox: Min, Max, IsValid (25 bytes serialized).
     public readonly struct Hp1Box
@@ -1357,8 +1355,7 @@ namespace HP1.UEScript
                 // (64 bits), to float only via fstp dword. Math.Sqrt rounds the root
                 // to 53 bits, but for a square root double rounding p -> 24 is harmless when p >= 2*24+2
                 // (both 53 and 64): both give the correctly rounded float root. A search over 2e7
-                // random keys (Math.Sqrt vs X87Ext.Sqrt64) found 0 differences, the mutation is
-                // indistinguishable (V9), so Math.Sqrt is kept.
+                // random keys (Math.Sqrt vs X87Ext.Sqrt64) found 0 differences, so Math.Sqrt is kept.
                 double t = QuatWSquare(x, y, z);
                 d[o] = x; d[o + 1] = y; d[o + 2] = z;
                 d[o + 3] = (float)Math.Sqrt(t);
@@ -1368,7 +1365,7 @@ namespace HP1.UEScript
 
         // FAnimVec::Quat (Engine 0x1041a120..0x1041a1b9) at PC24: fild key; fmul dword C rounds the argument to 24 bits
         // before fsin (fsin itself is not rounded by the precision control); w: x·x, 1 − ·, − y·y, − z·z each round to
-        // 24 bits; zero unless 0 < t (NaN passes); appSqrt's fsqrt rounds to 24 bits. Judge: skelanim_oracle.py --pc24.
+        // 24 bits; zero unless 0 < t (NaN passes); appSqrt's fsqrt rounds to 24 bits. Checked against the original at PC24.
         static float[] DecodeAll24(short[] keys)
         {
             var d = new float[keys.Length / 3 * 4];

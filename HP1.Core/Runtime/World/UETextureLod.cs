@@ -3,7 +3,7 @@ using System;
 namespace HP1.UEScript
 {
     // WHICH MIP THE ORIGINAL DRAWS A TEXTURE FROM — the "Texture Detail" menu settings
-    // (author decision: "as in the original HP1 1.53").
+    // (as in the original HP1 1.53).
     //
     // Core owns the formula, the frontend only asks: which mip comes first for a texture with this LODSet and mip
     // count on this draw path. The frontend has no formula of its own.

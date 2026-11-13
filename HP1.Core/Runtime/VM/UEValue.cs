@@ -1,6 +1,5 @@
 // The VM's value semantics — coercion, UE1 truthiness/equality and the
-// leading-number parses — extracted verbatim from the frontend interpreter
-// (plan §2, interpreter slice 1). Coercions of the port's untyped storage
+// leading-number parses. Coercions of the port's untyped storage
 // (ToInt/ToBool have no shipped counterpart). Typed bytecode conversions are
 // the cast-token handlers (checked against Core.dll); comparisons follow
 // execSwitch (appStricmp/appMemcmp) and property Identical.
@@ -106,9 +105,8 @@ namespace HP1.UEScript
             if (a is string sa && b is string sb) return sa == sb;   // UE1 strings ARE case-sensitive
             // UE1 FName comparison is CASE-INSENSITIVE (names intern to a shared table
             // by case-folded key — NameString.h:24 / FName::operator==). switch(name) and
-            // EX_StructCmpEq on names must match UE1: 'Idle'=='idle'. Case-insensitive is a
-            // strict superset of the old ==, adding exactly the matches UE1 also makes (UE1
-            // never distinguishes names by case), so it can only make matching MORE faithful.
+            // EX_StructCmpEq on names must match UE1: 'Idle'=='idle' (UE1
+            // never distinguishes names by case).
             if (a is UEName na && b is UEName nb)
                 return string.Equals(na.Value, nb.Value, StringComparison.OrdinalIgnoreCase);
             return a.Equals(b);
@@ -353,12 +351,11 @@ namespace HP1.UEScript
         //   pitch = _ftol(appAtan2((double)Z, appSqrt((double)(X*X + Y*Y))) * C)
         //   roll  = 0
         // C = qword [0x1017fa40] = 0x40C45F1C0516956D (10430.218905280077), NOT
-        // 65536/2π as in SE Rotator::FromVector. X*X+Y*Y — in
+        // 65536/2π. X*X+Y*Y — in
         // x87 PC64 registers (fstp qword), appSqrt 0x10126100 = fsqrt in PC64
         // (fstp qword), appAtan2 0x101260f0 = fpatan, product with C — in the
         // register, _ftol — truncation (low dword of int64).
-        // Oracle: se_harness/bsp_diff/validate_vector_to_rotator.py (the real
-        // body under unicorn, 775 cases). fpatan = UEX87Transcendental.Fpatan (correctly
+        // Checked against the real body under unicorn (775 cases). fpatan = UEX87Transcendental.Fpatan (correctly
         // rounded to the 64-bit mantissa, D-71), the product with C one PC64 rounding.
         static readonly double RotationScale = BitConverter.Int64BitsToDouble(0x40C45F1C0516956D);
 
@@ -420,25 +417,23 @@ namespace HP1.UEScript
         // outside int64 — "integer indefinite", low dword 0; outside
         // int32 — low dword of int64), byte — low byte. A plain `(int)f`
         // saturates (.NET 9) or gives MinValue (Mono), so frontends would
-        // differ. Oracle: validate_core_math_natives.py.
+        // differ. Checked against the original bodies.
         public static int FloatToInt(float f) => UELevelRuntime.Ftol(f);
         public static byte FloatToByte(float f) => (byte)UELevelRuntime.Ftol(f);
 
         // Cast Vector(Rotator) — UObject::execRotatorToVector (Core.dll 0x1013ab10)
         // = (GMath.UnitCoords / R).XAxis via the SinTab table. The real body
         // run under unicorn: 702 cases bit-equal to this form. Continuous cos/sin
-        // (SE transcription) differs the same way as for `>>`/`<<`.
+        // would differ the same way as for `>>`/`<<`.
         public static Vector3 RotatorToVector(UERotator r) => GetAxes(r).X;
 
         // ── Vector ⊗ Rotator operators (`<<` / `>>`) and GetAxes — FROM THE SHIPPED BODIES ──
         //
-        // Review 2026-08-27 (P1 #4): the previous revision built the axes via
-        // Math.Sin/Cos of a CONTINUOUS angle (SE Coords::Rotation transcription) and
-        // differed from shipped Core.dll on 559 of 602 corpus cases
-        // (se_harness/bsp_diff/validate_rotate_vector.py — runs the real
+        // Building the axes via Math.Sin/Cos of a CONTINUOUS angle would differ
+        // from shipped Core.dll on 559 of 602 corpus cases (checked by running the real
         // exec natives 276/275 under unicorn): shipped QUANTISES the angle by the table
         // FGlobalMath.SinTab[(a>>2)&0x3fff] (angles 1..3 give zero), and cos/sin are
-        // float32 table entries (lesson board: 69 ULP in X).
+        // float32 table entries (69 ULP in X).
         //
         // Bodies (Core.dll.c:24784 execGreaterGreater_VectorRotator, 18270
         // execLessLess_VectorRotator, 53242 execGetAxes, 39424 execGetUnAxes):
@@ -453,7 +448,7 @@ namespace HP1.UEScript
         // Shipped accumulates TransformVectorBy in x87 extended (FPCW PC=64)
         // with one store to float32; here — double with one rounding: three
         // float32·float32 products are exact in double, a difference is possible only
-        // through double rounding of the sum — measured by the oracle (see its report).
+        // through double rounding of the sum — measured against the original.
         // The table has one owner: BrushCoords.SinAngle/CosAngle
         // (UEBspCollision.cs, transcription of the FGlobalMath ctor with a float32 step).
         // UnitCoords * R / UnitCoords / R: ONE body, BrushCoords.MulRotator/DivRotator (Core.dll 0x1011d780 /

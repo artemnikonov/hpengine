@@ -10,8 +10,7 @@
 // USkeletalMesh::AdjustRootMovement (96222-96257), GetMeshCoords (157028-157162)
 // and the AActor::Tick tail (128808-128855). State — skeleton cache header fields
 // (UELevelRuntime.SkeletalPose.cs, SkelCache). Proof — execution of the
-// real bodies under unicorn (se_harness/bsp_diff/skelanim_oracle.py, fixture
-// skelanim_matches_shipped_oracle).
+// real bodies under unicorn.
 using System;
 using System.Collections.Generic;
 using System.IO;

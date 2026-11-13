@@ -16,7 +16,7 @@
 //   CopyIndexFrom         export 0x119a                 CopyFromRaster      export 0x109b (0x10b2eb..)
 //   CopyFromRasterUpdate  0x10b2e830..0x10b2eb44        MergeWith           export 0x11c7 (0x10b2ee..)
 //   BoxIsVisible          0x10b2e7c0..0x10b2e829
-// Judge: se_harness/bsp_diff/span_oracle.py (real bodies under unicorn) and SelfTest span_buffer_matches_shipped.
+// Checked against the real bodies under unicorn.
 namespace HP1.UEScript
 {
     public sealed class UESpan

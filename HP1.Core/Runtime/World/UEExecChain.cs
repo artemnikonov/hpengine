@@ -1,4 +1,4 @@
-// VIEWPORT COMMAND EXECUTOR LOOKUP CHAIN (boot A5).
+// VIEWPORT COMMAND EXECUTOR LOOKUP CHAIN.
 //
 // Shipped order for a command that UInput::ExecInputCommands hands to the
 // viewport on Press (Engine.dll.c:144880-144897 -> Viewport->Exec):

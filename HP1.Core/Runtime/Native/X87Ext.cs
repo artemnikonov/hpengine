@@ -6,26 +6,25 @@
 //
 // The mantissa is a 128-bit integer (sign separate); BigInteger only when the exact value is wider than 128 bits
 // (addition with a large exponent gap, Div64, TruncateToInteger); keeping everything in BigInteger cost ~2 us and
-// a kilobyte of garbage per VSize. Both models agree bitwise (random corpus, SelfTest
-// x87ext_matches_bigint_model).
+// a kilobyte of garbage per VSize. Both models agree bitwise (random corpus).
 //
-// Special values (review round 7): NaN and ±inf load (fld), propagate through + − × ÷ √ as the FPU does with every
+// Special values: NaN and ±inf load (fld), propagate through + − × ÷ √ as the FPU does with every
 // exception masked (x/0 -> ±inf), and store (fstp).
-// Signed zero (2026-10-30): a zero carries its sign bit as the x87 register does (IEEE 754, round to nearest — the only
+// Signed zero: a zero carries its sign bit as the x87 register does (IEEE 754, round to nearest — the only
 // rounding the shipped chains use): fld of ±0 keeps it, fild 0 is +0; an exact zero sum of nonzero operands is +0, (−0) +
 // (−0) is −0, (+0) + (−0) is +0, x + (±0) = x; fchs/subtraction flips it; a product or quotient of a zero has the xor sign,
 // x/(±0) is ±inf by the xor sign, x/(±inf) is ±0 likewise; √(−0) = −0; fstp dword/qword keep it. A stored −0 is observable
 // (sign bit tests, 1/x, fpatan of ±0); compares do not see it (Sign and Fcom: −0 == +0).
 // CompareTo and Sign refuse NaN loudly: a compare that can see NaN uses Fcom and tests the status-word bits exactly as
 // the disassembly does.
-// NaN keeps its sign and 64-bit significand (2026-10-30), because a stored NaN's sign bit is observable (FastLineCheck
+// NaN keeps its sign and 64-bit significand, because a stored NaN's sign bit is observable (FastLineCheck
 // side = sign bit of the stored float). Rules, Intel SDM vol. 1 §4.8.3.5/§8.5.1.2 (x87 rows of table 4-7), all
 // exceptions masked: an invalid operation (inf − inf, 0·inf, 0/0, inf/inf, √negative) gives the real indefinite
 // (sign 1, significand 0xC000000000000000; fstp dword 0xFFC00000); fld of a signalling NaN quiets it (significand bit
 // 62 set) and keeps sign and payload; an operation with one NaN operand returns it; with two, the one with the larger
 // significand, and of two with the same significand the positive one (the CPU model of unicorn, QEMU softfloat
-// float_2nan_prop_x87; judge se_harness/bsp_diff/nan_slope_oracle.py kind x87, quiet NaNs). fsub/fsubr do not flip a
-// NaN's sign; fchs does. fstp dword/qword keep the sign and the top 23/52 significand bits after the integer bit. Not judged: a
+// float_2nan_prop_x87; checked against it for quiet NaNs). fsub/fsubr do not flip a
+// NaN's sign; fchs does. fstp dword/qword keep the sign and the top 23/52 significand bits after the integer bit. Not checked: a
 // signalling NaN (unicorn keeps it signalling after fld, unlike the SDM; no SNaN reaches the ported chains). ToFloat rounds once to the float grid, subnormals
 // included, and overflows to ±inf like fstp dword. ToDouble keeps the normal-double range check.
 using System;
@@ -355,7 +354,7 @@ namespace HP1.Core
 
         X87Ext Negate() => _sp == 2 ? new X87Ext(!_neg, _lo) : _sp == 1 ? Inf(!_neg) : IsBig ? new X87Ext(-BigBox, _e)
             : IsZero ? Zero(!_neg) : new X87Ext(_hi, _lo, !_neg, _e);
-        // fchs: flips the sign bit (of a zero and of a NaN too; judge nan_slope_oracle x87 chs).
+        // fchs: flips the sign bit (of a zero and of a NaN too).
         public static X87Ext operator -(X87Ext a) => a.Negate();
 
         public static X87Ext operator *(X87Ext a, X87Ext b)

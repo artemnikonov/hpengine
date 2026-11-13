@@ -12,8 +12,7 @@
 //     play position reaches the end the feeder armed after the data. Here Core runs the same feeder on its audio clock
 //     (FeedVoice): the voice's first message sets the pre-roll lead (data starts lead frames into the ring, the
 //     frontend plays that silence: Playback.PreRoll), the arming rule of FeederVoiceOff, the position advancing by the
-//     voice step of each Update's Frequency. SwARc Galaxy judge (GALAXY_MEASURE.md G1): the channel was freed at the
-//     data end, ~0.5 s before the original.
+//     voice step of each Update's Frequency.
 //   * MUSIC. "Song stream exhausted" (SoundStream+8 IsFinished, vfunc +0xc) is set by the Galaxy FEEDER thread at the
 //     short FillBuffer read, ahead of playback — modelled on Core's audio clock (FeederShortRead, D-72). The next
 //     Update's music block stops the song (StopSound); a loop never ends. AUTHOR IMPROVEMENT (D-72, not original):
@@ -85,7 +84,7 @@ namespace HP1.UEScript
             public int Volume { get; internal set; }
             public int Pan { get; internal set; }
             public int Frequency { get; internal set; }
-            // AUTHOR IMPROVEMENT D-72 (2026-10-30), not original: the song was stopped by the music block after its
+            // NOT ORIGINAL (D-72): the song was stopped by the music block after its
             // natural end (IsFinished) and its remaining audio plays out. Core clears it when new music starts or the
             // viewport is lost. Script-visible state (channel, Song, bSongFinished) is as in the original: stopped.
             public bool TailPlays { get; internal set; }
@@ -153,7 +152,7 @@ namespace HP1.UEScript
 
         public UEGalaxyAudio(IUEGalaxyWorld world) { _world = world ?? throw new ArgumentNullException(nameof(world)); }
 
-        // SwARc Galaxy judge tap (runtime_poc/HeadlessGalaxyJudgeDump, tools/swarc_oracle/galaxy_judge.py): observes the
+        // Judge tap (diagnostics only): observes the
         // device calls after they ran ("cmd" AudioCommand, "destroy" actor id, "viewport" bool, "viewport-same") and the
         // frame's Update ("update-begin" / "update-end" from UEWorldFrameProducer); null in production.
         public static Action<UEGalaxyAudio, string, object> JudgeTap;
@@ -704,7 +703,7 @@ namespace HP1.UEScript
         // ════════════════ UPDATE (once per engine frame) ══════════════════════
         bool _menuPaused;
 
-        // K2 (author decision 2026-11-06, sound timing is exact): a device call frees its voices at once
+        // Sound timing is exact: a device call frees its voices at once
         // (StopSound -> FUN_10615d40) and the mixer's next frames run without them. The frame carries the pool voices the
         // calls since the previous Update stopped (LastCallStops, pool voices) and the dt this Update advanced the audio clock by
         // (LastMixDt); the frontend stops those voices, then mixes the frame's audio, then takes the new table. The list
@@ -873,7 +872,7 @@ namespace HP1.UEScript
                     if (_sound != null && HoldsMusic(_sound))
                     {
                         _sound.Playing = false;
-                        // AUTHOR IMPROVEMENT D-72 (2026-10-30), not original: after the natural end the buffered rest
+                        // NOT ORIGINAL (D-72): after the natural end the buffered rest
                         // of the song is heard (the original cuts it here); the channel is freed as in the original.
                         if (_sound.Ended) { StopTail(); _sound.TailPlays = true; _tail = _sound; }
                         ReleaseMusic(_sound);
@@ -960,7 +959,7 @@ namespace HP1.UEScript
             _tail = null;
         }
 
-        // ── MUSIC FEEDER MODEL (D-72; author decision 2026-10-30: deterministic, phase 0 at Galaxy start) ─────
+        // ── MUSIC FEEDER MODEL (D-72: deterministic, phase 0 at Galaxy start) ─────
         // Galaxy streams a song through a feeder thread (0x1060bba0, GetMessage 0x400). The mixer (FUN_10612250) cuts
         // its chunk at the sequencer counter DAT_1067d0ac (0x1061234e-0x1061235a); when the counter drops below 0x10000
         // it posts 0x400 to every stream voice with lParam = play offset +0x46 - +0x52 (0x10612acb-0x10612b25), BEFORE
@@ -975,10 +974,10 @@ namespace HP1.UEScript
         // (0x8000 bytes = 0x8000/(2·ch) frames) is read when the data written exceeds j blocks. The short read — block
         // floor(D / 0x8000), D = iEndPosn (Data.mUncompressedLength) — sets IsFinished (MP2SoundStream::FillBuffer,
         // Engine 0x1037e550, SoundStream+8).
-        // Live original (audit/captures_2026-10-30c/music_tail, 6 natural ends, feeder_model.py): the first message's
+        // Live original (6 natural song ends): the first message's
         // play offset is 29..205 frames (inside one message interval only with the 0x400 pre-roll); fed it and the
         // IsFinished message's lParam, the block/ring accounting gives the live bytes copied from the short block
-        // (536/1416/536/540/536/196). The mixer phase there is wall clock; here it is 0 at Galaxy start (author).
+        // (536/1416/536/540/536/196). The mixer phase there is wall clock; here it is 0 at Galaxy start.
         // Not modelled: mix-call splits (DirectSound buffer, wall clock) that move a message's lParam inside its
         // interval (measured steps 220..243 frames instead of 229/230).
         public const int FeederBlockBytes = 0x8000, RingFrames = 0x8000 / 2, PreRollFrames = 0x800 / 2;
@@ -1082,8 +1081,8 @@ namespace HP1.UEScript
                 if (RingAdvance(v, x - cur, step, v.ArmedEnd, cur)) return;
                 cur = x;
                 long l = v.Laps * RingFrames + (v.Pos16 >> 16);   // lParam, unwrapped by the voice's laps
-                // the lead: the first message writes at play + 0x800 bytes (0x1060bd1e-0x1060bd32); a D-51 resume (author
-                // improvement) continues seamlessly
+                // the lead: the first message writes at play + 0x800 bytes (0x1060bd1e-0x1060bd32); a D-51 resume (not original)
+                // continues seamlessly
                 if (v.Lead < 0) { v.Lead = v.Resumed ? 0 : l + PreRollFrames; v.PreRoll = (int)v.Lead; }
                 long dataEnd = v.Frames - v.DataBase + v.Lead;   // ring position at which the data ends
                 if (v.ArmedEnd < 0 && !v.Loop)

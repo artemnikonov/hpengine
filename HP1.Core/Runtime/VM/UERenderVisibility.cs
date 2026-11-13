@@ -109,7 +109,7 @@ namespace HP1.UEScript
             return f;
         }
 
-        // A master frame for projection only, without the span buffer: the OpenHP1 display frame between two logic ticks
+        // A master frame for projection only, without the span buffer: the HPEngine display frame between two logic ticks
         // projects the corona tiles at its interpolated camera (CoronaBuilder; presentation, nothing in Core reads it).
         public static UESceneNode ProjectionMaster(int x, int y, Vector3 location, UERotator rotation, float fovAngle)
         {
@@ -182,7 +182,7 @@ namespace HP1.UEScript
         }
 
         // FSceneNode +0xdc Proj.Z = FX2 / tan(FovAngle·π/360) (Engine.dll.c:75891-75963): the one owner of the projection
-        // distance — the frame, and every frontend projection of the same camera (OpenHP1 Camera, CoronaBuilder, fog,
+        // distance — the frame, and every frontend projection of the same camera (HPEngine Camera, CoronaBuilder, fog,
         // draw log). FovAngle·(π/360 as float, 0x10474588) in x87 and straight to double (fstp qword); pc24 — the render
         // window (child frames), every operation rounds to float.
         // appTan (0x101260d0: fptan; fstp st(0)) = UEX87Transcendental.AppTan (correctly rounded like fsin, D-71); the

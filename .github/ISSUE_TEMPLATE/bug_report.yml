@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in OpenHP1 behaves differently from the original game, crashes or does not start.
+description: Something in HPEngine behaves differently from the original game, crashes or does not start.
 labels: [bug]
 body:
   - type: input
@@ -19,8 +19,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: OpenHP1 version
-      description: The release you downloaded (e.g. 0.1.0-beta).
+      label: HPEngine version
+      description: The release you downloaded (e.g. 0.2.0-beta).
     validations:
       required: true
   - type: textarea
@@ -34,4 +34,4 @@ body:
     id: log
     attributes:
       label: Log
-      description: Attach the newest run_<date>_<time>.log from <game folder>/OpenHP1Data/logs/ (it may contain your user name in file paths). A save close to the problem helps too.
+      description: Attach the newest run_<date>_<time>.log from <game folder>/HPEngineData/logs/ (it may contain your user name in file paths). A save close to the problem helps too.

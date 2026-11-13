@@ -88,7 +88,7 @@ namespace HP1.UEScript
             //    UClass::Register does not change the default. (`TextureDetailBias=Near` in
             //    Default.ini:283 is a DIFFERENT key in another section, unrelated.)
             //
-            // 6. INDEPENDENT CONFIRMATION. SurrealEngine reached the same value on its own:
+            // 6. INDEPENDENT CONFIRMATION. The SurrealEngine reimplementation has the same value:
             //    USubsystem.h:198 `TextureDetail = "High"`.
             //
             // Result: byte 0 -> Details(0) -> "High".

@@ -58,7 +58,10 @@ namespace HP1.UEScript
         // package tag logs LocalizeError("BinaryFormat") to GWarn and throws LocalizeError("Aborted") into the same LoadMap
         // catch as above: the player sees "Failed launching URL" / "Aborted" for 6 s and the old level plays on.
         // The port's save body is its own format (D-01): a damaged file, or one written by a NEWER port build (version
-        // above SaveVersion), takes this route — ValidateSavedGame runs before the old world is torn down.
+        // above SaveVersion), or one that does not fit the current scripts (mods turned on/off: SaveScriptMismatch) takes
+        // this route (the latter only when it carries no level-entry set, format 1..4: otherwise the level restarts with it, D-82) — both
+        // checks run before the old world is torn down. HP1's scripts only write ProgressMessage (PlayerPawn.uc), none
+        // draws it, so shipped shows the player no text here; the reason goes to the run log (UEGameEngineNatives).
         public void LoadMapBadSave(UEInterpreter interp, string urlMap, string reason)
         {
             Log($"loadmap_bad_save warn=\"{UELocalization.Localize("Errors", "BinaryFormat", "Core").Replace("%s", urlMap)}\" reason=\"{reason}\"");

@@ -9,7 +9,7 @@ namespace HP1.Core
     //
     // REFERENCE: the msvcrt.dll the live 1.53 original ran with (CrossOver XP bottle, syswow64): qsort -> qsort_s
     // with a comparator thunk (0x100561c0 -> 0x100561f0). The port is checked against real execution of that DLL
-    // under unicorn (se_harness/bsp_diff/validate_msvcrt_qsort.py) on random arrays with ties. Algorithm:
+    // under unicorn on random arrays with ties. Algorithm:
     // median-of-three partitioning with an explicit stack; a run shorter than 8 uses selection sort that moves
     // the maximum to the end (an equal element does not displace an earlier maximum).
     public static class MsvcQsort

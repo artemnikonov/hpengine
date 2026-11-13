@@ -1,5 +1,4 @@
-// MESH TRIANGLE ORDER OF URender::DrawLodMesh (review plan C3; spec audit/C3_MESH_TRIANGLE_SORT_SPEC.md, disasm addresses
-// there). Core's: which faces of a mesh a frame draws and in which order, the frontend emits them in that order.
+// MESH TRIANGLE ORDER OF URender::DrawLodMesh (disasm addresses below). Core's: which faces of a mesh a frame draws and in which order, the frontend emits them in that order.
 //
 //   enabled   PolyFlags & 0x10000004, PolyFlags = FUN_10b338f0 (style 3 -> 4) | (Opacity < 1 or unordered -> 0x10000004,
 //             0x10b1119d), RenDev->SpanBased = 0 on D3D;

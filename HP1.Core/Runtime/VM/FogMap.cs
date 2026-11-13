@@ -3,12 +3,12 @@ using System.Collections.Generic;
 
 namespace HP1.UEScript
 {
-    // ZONE FOG (C4): surface fog-map generator — port of the texel loop of
+    // ZONE FOG: surface fog-map generator — port of the texel loop of
     // FLightManager::SetupForSurf (Render.dll.c:20006-20260), the light record fields of
     // ComputeFromActor (:479-500), the colour ramp (:435-470), the blend table
     // (:16430-16436) and the table FastSqrt (:16500-16509 ==
-    // FGlobalMath +0x1008c, Core.dll.c:47370-47380). Judge: python replica runtime_poc/fogmap_replica.py
-    // (fixture in SelfTest.cs) — a transcription of the same decompile, not disasm/unicorn execution.
+    // FGlobalMath +0x1008c, Core.dll.c:47370-47380). Checked against an independent
+    // transcription of the same decompile, not against disassembly or unicorn execution.
     //
     // NOT decided here: the light set (LeafVolumetricLighting +
     // SetupDynamics — Core, LevelFogMaps),
@@ -25,7 +25,7 @@ namespace HP1.UEScript
         // PreRender..PostRender PC24 window). Disasm 0x10b025c8-0x10b025d7: sqrt(2.0) is stored as a
         // QWORD and multiplied as one (`fmul qword [ebp-0x1c]`); the decompile's `(float)local_20`
         // drops that. A float32 sqrt2 is the PC24 build and differs in 248 of 2048 entries
-        // (se_harness/bsp_diff/fast_sqrt_table_oracle.py runs both shipped builders under unicorn).
+        // (checked by running both shipped builders under unicorn).
         static readonly int[] _sqrt = BuildSqrtTable();
 
         static int[] BuildSqrtTable()

@@ -9,7 +9,7 @@
 // WarpZoneInfo): Generate — `if (OtherSideLevel != None) return; ForceGenerate();`; ForceGenerate — with "/" in
 // OtherSideURL both None, else OtherSideLevel = XLevel and foreach AllActors(WarpZoneInfo) -> OtherSideActor with
 // ThisTag == OtherSideURL. Both fields are transient: after loading a save (no BeginPlay) they are None, and the
-// renderer is the first to fill them again on seeing the portal (audit/warp_generate_redtest.sh).
+// renderer is the first to fill them again on seeing the portal.
 using System;
 using System.Collections.Generic;
 

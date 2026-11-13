@@ -1,9 +1,9 @@
 // ULodMesh::GetFrame (Engine 0x1035e460, Engine.dll.c:211393-211724) — WORLD-space vertices
 // of a drawn vertex mesh (input coords = identity).
 //
-// Presentation (§4a): only the frontend draws a vertex mesh; the body writes no Core actor
+// Presentation: only the frontend draws a vertex mesh; the body writes no Core actor
 // fields (see RenderMeshFrame). The body's shape is ported, without a bit-exact x87 check.
-// LOD REQUEST (review round 5 item J / D-71, ported 2026-10-30): GetFrame runs once per DrawLodMesh, i.e. per
+// LOD REQUEST (D-71): GetFrame runs once per DrawLodMesh, i.e. per
 // (actor, frame) draw in DrawFrame order (UEWorldFrameProducer.DirectRenderStep), with that draw's request
 // (*param, the DrawLodMesh level; ModelVerts when the draw has no LOD). 0x1035e4ac..0x1035e4c7:
 // full = min(SpecialVerts + request, FrameVerts); only that many vertices are computed into the cache and the

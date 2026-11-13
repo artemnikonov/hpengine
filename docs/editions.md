@@ -1,7 +1,7 @@
 # Game editions and how they differ
 
 Harry Potter and the Philosopher's Stone (PC, 2001) shipped in several releases whose DLLs and scripts are not identical.
-OpenHP1 treats **US 1.53** as the reference and identifies the install it is given from SHA-1 hashes, so that Core can select
+HPEngine treats **US 1.53** as the reference and identifies the install it is given from SHA-1 hashes, so that Core can select
 the matching native behaviour and the launcher can name what it found and warn when it is not verified. UK 1.1 and the Russian EA release
 are supported but not yet proven exact; the European English release is unknown; the fan "1.55" patch and other modified copies run with a warning.
 

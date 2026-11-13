@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace HP1.UEScript
 {
-    // ZONE FOG MAPS OF LEVEL SURFACES, PER FRAME OF THE OCCLUSION TREE (C4, moved from the frontend 2026-10-16).
+    // ZONE FOG MAPS OF LEVEL SURFACES, PER FRAME OF THE OCCLUSION TREE (owned by Core).
     //
     // FLightManager::SetupForSurf builds a surface's fog map with the frame it is drawing (Render.dll.c:20006-20260:
     // light records in that frame's Coords, ComputeFromActor :479-500), so a surface drawn by the master frame and by a
@@ -11,7 +11,7 @@ namespace HP1.UEScript
     // then its children in the WorldFrame.Views order) and every fog surface that frame drew (UESceneNode.DrawnPolys):
     //   * surfaces — a level node with a lightmap, without PF_Unlit/PF_Translucent (surface | texture flags; translucent
     //     takes no fog map: SetupForSurf `(Draw->PolyFlags & 4) == 0`, Render.dll.c:19944-19947), in a zone whose ZoneInfo
-    //     has bFogZone (:19936); one map per DRAW RECORD (C1, 2026-11-01): OccludeBsp merges a polygon into the frame's
+    //     has bFogZone (:19936); one map per DRAW RECORD: OccludeBsp merges a polygon into the frame's
     //     record of its surface and zone actor unless the polygon's flags have any of 0x4010047 — then the polygon is a
     //     record of its own (Render.dll.c:5928-5953; the search 0x10b2338c..0x10b23437 reads the flags BEFORE the
     //     translucent-mirror reflag 0x10b23aa1, so such a mirror never merges); SetupForSurf builds the fog map of each
@@ -27,7 +27,7 @@ namespace HP1.UEScript
     //     (ComputeFromActor: `Level->Brightness (+0x44c) * this+0x3c` multiplies +0x8c..+0x98, Render.dll.c:19274-19280);
     //     FogMap.K takes the brightness without Level.Brightness (+0x3c is not rescaled).
     // Tiles: Tiles[frame][record] = UClamp·VClamp texels, BGRA7 as the FColor before the D3DDrv ×2 (FogMap.Build).
-    // Which run reads which record — and whether a draw takes a fog map at all — is Core's (FogRecord, review F5); the
+    // Which run reads which record — and whether a draw takes a fog map at all — is Core's (FogRecord); the
     // frontend only copies the tiles into its atlases.
     public sealed class LevelFogMaps
     {
@@ -50,7 +50,7 @@ namespace HP1.UEScript
         readonly List<FogMap.Light> _lights = new();
         public readonly List<Dictionary<int, byte[]>> Tiles = new();
         // Per frame: record -> polygons merged into it, for the records that have a fog map in the original's sense (a
-        // non-empty light list); compared with the live journal by tools/origprobe/compare_fog_records.py.
+        // non-empty light list); checked against the live original's journal.
         public readonly List<Dictionary<int, int>> RecordPolys = new();
         public int LastLights;
 
@@ -193,7 +193,7 @@ namespace HP1.UEScript
 
         // The fog record a draw of node `node` through zone `zone` with draw-record flags `polyFlags` reads, or -1: no fog
         // map — not a fog surface, a zone without bFogZone, or a translucent record (SetupForSurf `(Draw->PolyFlags & 4)
-        // == 0`, Render.dll.c:19944-19947; review F5: Core decides it, the frontend passes the flags of its run).
+        // == 0`, Render.dll.c:19944-19947; Core decides it, the frontend passes the flags of its run).
         public int FogRecord(int node, int zone, int polyFlags)
         {
             if ((polyFlags & PF_Translucent) != 0 || !_byNode.ContainsKey(node)) return -1;

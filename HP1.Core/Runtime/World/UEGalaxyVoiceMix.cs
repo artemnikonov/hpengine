@@ -27,8 +27,7 @@
 // Arithmetic is x87 PC64 (Galaxy runs outside the PreRender..PostRender window,
 // where appEnableFastMath(1)): intermediates are double, float stores where
 // shipped does `fstp dword`. Reference: these instructions executed under
-// unicorn (se_harness/bsp_diff/galaxy_voice_oracle.py, corpus
-// data/galaxy_voice_corpus.txt, fixture galaxy_voice_mix_matches_shipped).
+// unicorn.
 //
 // STATED BOUNDARY. Everything Update computes is here. Not ported, left to the
 // frontend device: the mixer gain chain other than voice volume (master volume,

@@ -10,8 +10,8 @@ namespace HP1.UEScript
     //
     // Core-owned for the same reason the actor graph is: HashBoxOf dispatches on
     // these values for every CollideType=3 actor, so a frontend that cannot
-    // supply them gets an InitCollisionHash that throws — and the alternative
-    // was each frontend growing its own reader and hook.
+    // supply them gets an InitCollisionHash that throws; Core owns the reader so
+    // no frontend needs its own reader and hook.
     public sealed class UEMeshBounds
     {
         readonly Dictionary<string, List<(UEPackageReader Package, PackageExport Export)>>

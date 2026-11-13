@@ -1,13 +1,13 @@
 # How the original works: reverse-engineering notes
 
-What OpenHP1 learned about **Harry Potter and the Philosopher's Stone** for PC (KnowWonder, 2001, Unreal Engine 1,
+What HPEngine learned about **Harry Potter and the Philosopher's Stone** for PC (KnowWonder, 2001, Unreal Engine 1,
 US 1.53) while porting it. The notes describe the original engine and game, not the port's design.
 
 - **Addresses** are virtual addresses in the shipped US 1.53 binaries (`Engine.dll`, `Render.dll`, `Fire.dll`,
   `Galaxy.dll`, `Core.dll`, `HP.exe`), as cited in the port's code comments. Unnamed functions are written as
   `FUN_<address>`.
 - **Sources.** Each claim names the original function and the port file that carries it (`../HP1.Core/...`,
-  `../openhp1/...`). Natives were checked against the original's machine code run in an emulator, frames against draw
+  `../hpengine/...`). Natives were checked against the original's machine code run in an emulator, frames against draw
   logs of the running original; those tools and the decompiled code stay private (see
   [What is not in this repository](building.md#what-is-not-in-this-repository)).
 - **D-nn** numbers are entries of the project's internal decision and debt register (not published); they are given so

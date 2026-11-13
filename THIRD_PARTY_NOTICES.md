@@ -1,6 +1,6 @@
 # Third-party notices
 
-OpenHP1 builds and ships with the components below. Each keeps its own license.
+HPEngine builds and ships with the components below. Each keeps its own license.
 
 ## SDL3 — zlib license
 

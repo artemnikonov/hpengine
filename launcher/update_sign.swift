@@ -3,7 +3,7 @@
 //   xcrun swift launcher/update_sign.swift pub <private key file>      prints the public key (base64, 32 bytes)
 //   xcrun swift launcher/update_sign.swift sign <private key file> <file>   writes <file>.sig (base64 signature)
 // The private key stays with the release author, outside the repository; make_launcher.sh reads it from
-// OPENHP1_UPDATE_KEY, pins the public key into the app and signs the release zip.
+// HPENGINE_UPDATE_KEY, pins the public key into the app and signs the release zip.
 import CryptoKit
 import Foundation
 

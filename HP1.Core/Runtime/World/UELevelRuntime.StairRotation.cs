@@ -15,8 +15,7 @@
 // registered: the branch is off, not bodiless, and the first case reaching it
 // would otherwise be a fatal STOP via OnUnknownNative.
 //
-// SOURCE — SHIPPED ONLY. SurrealEngine's body is a stub
-// (`NPawn::FindStairRotation` = `LogUnimplemented`).
+// SOURCE — SHIPPED ONLY: the body is read from the shipped binary.
 //
 // BODY ADDRESS FROM THE THUNK, NOT THE EXPORT. Export 2262
 // (`?execFindStairRotation@APawn@@QAEXAAUFFrame@@QAX@Z`) points to
@@ -44,7 +43,7 @@
 //   * the `0.8` threshold is a QWORD, i.e. double (`fmul qword ptr [0x10479df0]`,
 //     value 0.8), while 0.7/0.9/3.0/6.0/8.0/10.0/1.0 are float.
 //
-// FIELD OFFSETS MEASURED (`--dumpprops Pawn` + `audit/prop_offsets.py --find`):
+// FIELD OFFSETS MEASURED against the shipped Pawn layout:
 // 0x33c/0x340/0x344 = `Pawn.ViewRotation` (Pitch/Yaw/Roll), 0x354 =
 // `Pawn.BaseEyeHeight` (not MaxStepHeight), 0x1cc = `Actor.CollisionRadius`,
 // 0x1d4 = `Actor.CollisionHeight`, 0xfc = `Actor.Location`.

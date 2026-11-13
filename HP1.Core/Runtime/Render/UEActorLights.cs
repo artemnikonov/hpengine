@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace HP1.UEScript
 {
-    // ACTOR LIGHT LISTS AND VERTEX FOG INPUTS OF A TICK — Core's (moved from the frontend's ActorBuilder 2026-10-29).
+    // ACTOR LIGHT LISTS AND VERTEX FOG INPUTS OF A TICK — Core's.
     //
     // FLightManager::SetupForActor runs inside DrawFrame for every mesh the frame draws (Render.dll.c:21222-21455): the
     // light-source culling with its FMemCache pairs and fade counters, the LOS traces against the level model and the
@@ -34,7 +34,7 @@ namespace HP1.UEScript
             Fog.Bind(fogZones, g);
         }
 
-        public bool ViewLit => Lighting.ViewLitFrame;
+        public bool ViewLit { get { HP1.Core.UECoreOwner.Check("UEActorLights.ViewLit"); return Lighting.ViewLitFrame; } }
 
         // The tick's frames (pre-order: master, then WorldFrame.Views) and the viewport actor, for TriangleOrder.
         readonly List<UESceneNode> _frames = new();
@@ -58,7 +58,7 @@ namespace HP1.UEScript
         }
         public void Clear() { _sets.Clear(); _used = 0; }
         // The SetupForActor result for the DrawMesh of frame `view` (−1 master, else WorldFrame.Views index).
-        public bool TryGet(int objectId, int view, out Set s) => _sets.TryGetValue((objectId, view), out s);
+        public bool TryGet(int objectId, int view, out Set s) { HP1.Core.UECoreOwner.Check("UEActorLights.TryGet"); return _sets.TryGetValue((objectId, view), out s); }
         // Test seam: a synthetic frame the tick did not draw (frontend tests of per-frame eyes) takes the list of `from`.
         public void ShareForTest(int objectId, int from, int to) => _sets[(objectId, to)] = _sets[(objectId, from)];
 
@@ -104,7 +104,7 @@ namespace HP1.UEScript
             s.In = UEActorLighting.Inputs(a, rt.ZoneAmbientHSB(a.ZoneNumber), viewportSeconds);
             // Unlit actors and actors in leaf -1 get no list: SetupForActor gates (UEActorLighting.Gather).
             // Dispatched dynamics: the frame's sprite of the actor carries LeafLights[iLeaf] (UESprite.LeafLights). A
-            // third-person weapon is drawn with its pawn's sprite (UEWorldFrameProducer.WeaponPawns, review C3).
+            // third-person weapon is drawn with its pawn's sprite (UEWorldFrameProducer.WeaponPawns).
             int[] dispatched = Array.Empty<int>();
             int id = rt.FrameProducer is { } fp && fp.WeaponPawns.TryGetValue(a.ObjectId, out int pawn) ? pawn : a.ObjectId;
             foreach (UESprite sp in node.Sprites) if (sp.Actor?.ObjectId == id) { dispatched = sp.LeafLights; break; }
@@ -119,7 +119,8 @@ namespace HP1.UEScript
         WorldStatic _actorLightsWorld;
 
         // Actor light lists of the CURRENT world (per tick, with the per-frame surface lightmaps).
-        public UEActorLights ActorLights => _actorLights is not null && ReferenceEquals(_actorLightsWorld, LatestWorldStatic) ? _actorLights : null;
+        public UEActorLights ActorLights => ActorLightsChecked();
+        UEActorLights ActorLightsChecked() { HP1.Core.UECoreOwner.Check("UELevelRuntime.ActorLights"); return _actorLights is not null && ReferenceEquals(_actorLightsWorld, LatestWorldStatic) ? _actorLights : null; }
 
         internal void UpdateActorLights(UEInterpreter interp)
         {

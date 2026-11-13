@@ -4,7 +4,7 @@
 // FUN_10b26f10 (0x10b26f10..0x10b27045), constants read from .rdata:
 //   0x10b386ac = 2^-32 (FTime -> seconds), 0x10b385b4 = 3.0, 0x10b385bc = 0.0, 0x10b385b0 = 1.0,
 //   0x10b38fd8 = 1/85, 0x10b38fd4 = 1/84, 0x10b3869c = 1/255, 0x10b38fd0 = 0.8, 0x10b385ec = 0.5.
-// Field offsets (audit/prop_offsets.py over the Light class dump): +0x28 bit 0x200 bDeleteMe, +0x1f0 bit 4 bCorona,
+// Field offsets (checked against the shipped Light class layout): +0x28 bit 0x200 bDeleteMe, +0x1f0 bit 4 bCorona,
 // +0x160 Skin, +0xfc Location, +0x16c DrawScale, +0x1e3 LightHue, +0x1e4 LightSaturation, +0xa0/+0xa4 Region.Zone/iLeaf,
 // +0x80 XLevel. RenDev+0x60 = URenderDevice.Coronas (Engine.dll.c StaticConstructor of URenderDevice, offset 0x60).
 //
@@ -32,8 +32,8 @@
 // LightSaturation) * brightness (thunk_FUN_10b2aab0 0x10b2aab0). All arithmetic sits in the render PC24 window
 // (URender::PreRender..PostRender) — every x87 result is a float, as below.
 //
-// NOT ORIGINAL, decided: improvement (author 2026-11-03, audit/DEFERRED_DEBT_2026-10-04.md "Corona fade clock";
-// distance cut-off = leaf permeation + line check, both as shipped: tools/swarc_oracle/RENDER_MEASURE.md): the clock is the Core viewport clock (sum of the engine frame deltas Core receives,
+// NOT ORIGINAL (corona fade clock; the distance cut-off = leaf permeation + line check stays as shipped): the clock is
+// the Core viewport clock (sum of the engine frame deltas Core receives,
 // UEWorldFrameProducer.ViewportDelta); shipped reads wall time (appSeconds/rdtsc FTime) at each run of the block.
 // The GCache item can be flushed in shipped (FMemCache flush re-zeroes the table); the port keeps the table for the
 // process lifetime, across levels, like an unflushed cache item.

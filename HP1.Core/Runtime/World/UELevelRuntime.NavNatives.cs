@@ -1,10 +1,8 @@
 // APawn::findPath (Engine.dll.c:99644-99749), native 553.
 //
 // World query, not presentation: it walks the level's own ReachSpecs table and
-// the NavigationPoint Paths[16] indices into it. Both frontends used to answer
-// it themselves — headless from a private field, Unity from a scene-baked
-// HP1NavNetwork built out of a JSON export — so neither was guaranteed to be
-// running on the table the gate verifies byte for byte.
+// the NavigationPoint Paths[16] indices into it. Core answers it itself, so the
+// query always runs on the level's own table, never on a frontend copy.
 //
 // The shape is deliberately literal, because every part of it decides WHICH hop
 // comes back first:
@@ -37,7 +35,7 @@ namespace HP1.UEScript
         //
         //   1 walk, 2 fly, 4 swim, 8 jump, 16 door, 32 special, 64 playerOnly
         //
-        // Names come from the property-offset oracle (bool word APawn+0x25c:
+        // Names come from the shipped layout (bool word APawn+0x25c:
         // bit 0x2 bIsPlayer, 0x1000 bCanJump, 0x2000 bCanWalk, 0x4000 bCanSwim,
         // 0x8000 bCanFly, 0x10000 bCanOpenDoors, 0x20000 bCanDoSpecial), which
         // is what turned the shift chain into readable flags.
@@ -59,8 +57,8 @@ namespace HP1.UEScript
         // in the way that would stop it?"
         //
         // Two lists are scanned, not one: Paths[16] and then PrunedPaths[16]
-        // (NavigationPoint+0x2a4 and +0x2e4 — resolved by the offset oracle;
-        // "upstreamPaths" would have been the natural guess and it is wrong).
+        // (NavigationPoint+0x2a4 and +0x2e4 — resolved from the shipped layout;
+        // the second list is not "upstreamPaths").
         // Each list ends at its own -1 sentinel.
         //
         // The size gates compare ROUNDED INTEGERS against the spec's integer
@@ -169,8 +167,7 @@ namespace HP1.UEScript
         // being reduced to a call to actorReachable:
         //
         //   * an Inventory target is swapped for its MyMarker (Inventory+0x2dc,
-        //     resolved by the offset oracle — "Owner" was the natural guess and
-        //     it is wrong), and the ORIGINAL actor is put back before the final
+        //     offset checked against the shipped layout; it is not "Owner"), and the ORIGINAL actor is put back before the final
         //     query. The marker is used only for the proximity shortcut.
         //   * a NavigationPoint target, asked by a SMALL pawn in a level whose
         //     ReachSpecs table is NOT EMPTY, gets a proximity shortcut: a nav point within CollisionHeight

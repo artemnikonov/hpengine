@@ -1,6 +1,6 @@
 // Actor skeletal-mesh query natives. These are gameplay-visible VM results,
-// so both frontends resolve them from the shipped mesh packages through Core;
-// Unity's skinner and Renderer bounds are presentation mirrors only.
+// so they are resolved from the shipped mesh packages through Core;
+// any frontend skinner or renderer bounds are presentation mirrors only.
 //
 // Sources:
 //   AActor::execBoneNumber       Engine.dll.c:106189

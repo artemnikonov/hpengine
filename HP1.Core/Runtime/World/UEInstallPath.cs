@@ -1,11 +1,11 @@
 // INSTALL FILE LOOKUP LIKE WINDOWS. Shipped HP1 ran on a case-insensitive file system (appFindPackageFile,
 // appLoadFileToArray, appFileSize go to the Win32 API), so references in scripts and packages name files whose case on
 // disk differs: `SkyBox` -> Textures/Skybox.utx, `hp_fx` -> Textures/HP_FX.utx, `..\Save\SGS Lev_Tut1b.bmp` ->
-// Save/SGS lev_tut1b.bmp. macOS and Windows resolve them natively; Linux (Steam Deck, ext4) does not — measured
-// 2026-10-30: Lev2_Quid1 threw "TraceTexture: package SkyBox not found" on the Deck (D-22).
+// Save/SGS lev_tut1b.bmp. macOS and Windows resolve them natively; Linux (Steam Deck, ext4) does not — measured:
+// Lev2_Quid1 threw "TraceTexture: package SkyBox not found" on the Deck (D-22).
 // Exact path first (one stat, nothing else where the file system already ignores case); otherwise each component that
 // does not exist is matched OrdinalIgnoreCase in its parent directory. null when there is no such file (Dir: directory).
-// THE ONE OWNER of install file lookups (review 2026-10-31 F6; lock in runtime_poc/verify_architecture.py).
+// THE ONE OWNER of install file lookups.
 using System;
 using System.IO;
 

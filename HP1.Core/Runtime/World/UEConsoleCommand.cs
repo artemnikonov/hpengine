@@ -43,8 +43,8 @@ namespace HP1.UEScript
     // installed on the player alone is worse still: every non-player caller
     // (Camera.Timer, Harry.Timer) then hits "unknown native" instead.
     //
-    // Anything not covered raises a loud STOP rather than a plausible default
-    // (§8): an invented answer here is indistinguishable from a real one.
+    // Anything not covered raises a loud STOP rather than a plausible default:
+    // an invented answer here is indistinguishable from a real one.
     public static class UEConsoleCommand
     {
         // `config` — the SINGLE mutable config state (UELevelRuntime.Config):
@@ -157,7 +157,7 @@ namespace HP1.UEScript
                 //
                 // Only the UNPROVEN stays loud: a class whose defaults nobody has
                 // taken from the binary. A plausible number must not be substituted —
-                // an invented answer is indistinguishable from a real one (§8).
+                // an invented answer is indistinguishable from a real one.
                 if (value is null)
                     throw new KeyNotFoundException(
                         "get ini: [" + section + "] " + property + " — the key is absent from the ini, and that is NORMAL: "
@@ -256,10 +256,10 @@ namespace HP1.UEScript
             // Status by slice:
             //   MusicVolume/SoundVolume — frontend-linked: volume consumers read the
             //     value, slider and sound move together;
-            //   Brightness — frontend-linked: the OpenHP1 frame reads the value and
+            //   Brightness — frontend-linked: the HPEngine frame reads the value and
             //     applies the D3DDrv gamma ramp (Flush 0x10002f42, ScreenEffects);
             //     menu slider and screen brightness move together;
-            //   TextureDetail — frontend-linked: the OpenHP1 frame reads the value
+            //   TextureDetail — frontend-linked: the HPEngine frame reads the value
             //     and picks the first mip via UETextureLod (UTexture::Lock, Render skins);
             //   arbitrary `set ini:` of any class — NOT closed: the port has no typing,
             //     live instances or notification.
@@ -317,6 +317,7 @@ namespace HP1.UEScript
                 string key = keyEnd < 0 ? tail : tail.Substring(0, keyEnd);
                 string bound = keyEnd < 0 ? "" : tail.Substring(keyEnd + 1).TrimStart();
                 if (key.Length == 0) throw new InvalidDataException("bad SET Input: " + command);
+                input.KeepPadDefaults(config, key);   // improvement D-75 (not original): pad defaults become bindings first
                 input.SetBinding(key, bound);
                 if (config is null)
                     throw new InvalidOperationException(
@@ -365,7 +366,8 @@ namespace HP1.UEScript
             if (ParseCommand(command, "KEYBINDING", out string wanted))
             {
                 if (FindKeyName(wanted) < 0) return "";
-                return input is not null && input.TryGetBinding(wanted, out string bound)
+                // improvement D-75 (not original): while the Controls page loads its list, one device's keys (UEInput.ControlsLoad)
+                return input is not null && input.TryGetKeyBindingAnswer(wanted, out string bound)
                     ? bound : "";
             }
 
@@ -384,7 +386,7 @@ namespace HP1.UEScript
             //     ...enumerate driver modes for the current colour depth...
             // Enumeration happens only in fullscreen. The faithful windowed answer is
             // the constant, extracted from WinDrv.dll (UTF-16 at offset 0x1df0c).
-            // NOT ORIGINAL (author decision): the device's screen modes in any window
+            // NOT ORIGINAL: the device's screen modes in any window
             // mode, see IViewportDevice.DisplayModes; the menu filter
             // (FEOptionsPage.IsSupportedResolution) is replaced — UEPortScriptOverrides.
             if (ParseCommand(command, "GetRes", out _))
@@ -652,7 +654,7 @@ namespace HP1.UEScript
             string name = names[key];
             // The `Names(key) == 0` branch in shipped goes to HardcodedNames; it never
             // happens with the full EInputKey, and the contents of that table cannot be
-            // guessed here — so the case is LOUD, not invented (§8).
+            // guessed here — so the case is LOUD, not invented.
             if (name is null)
                 throw new InvalidOperationException(
                     "KEYNAME: EInputKey has no name for index " + key

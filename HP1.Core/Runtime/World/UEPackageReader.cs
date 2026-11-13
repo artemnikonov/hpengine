@@ -9,9 +9,8 @@ namespace HP1.UEScript
     // the tagged-property skip, and the UMesh walk that yields the collision
     // hash's extent fields.
     //
-    // Core-owned because collision needs mesh bounds, and the alternative was a
-    // second frontend hook feeding them in — which is how the actor graph went
-    // wrong: identity data living outside the kernel that dispatches on it.
+    // Core-owned because collision needs mesh bounds; feeding them in through a
+    // frontend hook would put identity data outside the kernel that dispatches on it.
     //
     // Only the FORMAT lives here, not the skeletal-animation model. A frontend
     // that also wants bones, sequences or render meshes derives from this and
@@ -569,8 +568,7 @@ namespace HP1.UEScript
 
         // UE1's array-index width is chosen by the TOP BITS of the first byte:
         // 0x00..0x7f = 1 byte, 0x80..0xbf = 2 bytes, 0xc0..0xff = 4 bytes. The
-        // writer side in SurrealEngine (PackageStream.cpp:362-386) is explicit:
-        // the two-byte form emits 0x80 | (index >> 8), the four-byte form
+        // two-byte form is 0x80 | (index >> 8), the four-byte form
         // 0xc0 | (index >> 24).
         //
         // This had the two widths REVERSED — it consumed 4 bytes for the 0x80
@@ -601,8 +599,7 @@ namespace HP1.UEScript
         }
     }
 
-    // Plain classes, not positional records: Unity's netstandard2.1 profile has
-    // no IsExternalInit, so init-only setters do not compile there.
+    // Plain classes, not positional records.
     public sealed class PackageExport
     {
         public readonly int ClassIndex; public readonly string Name;

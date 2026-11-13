@@ -1,4 +1,4 @@
-// HP1Setup — installs the game data for OpenHP1 from the player's own copy of Harry Potter (2001, PC).
+// HP1Setup — installs the game data for HPEngine from the player's own copy of Harry Potter (2001, PC).
 //
 //   HP1Setup [--dest <dir>] <source> [<source> ...]
 //   HP1Setup                        (in a terminal: asks for the source)
@@ -12,13 +12,13 @@
 // System/ and Maps/ up to 3 levels down is found; without one, archives and installers up to 3 levels down are
 // unpacked (into temporary folders, removed at the end), also inside each other up to 3 deep. Nothing from the source
 // is ever executed and the source is never written.
-// <dest>: the install root OpenHP1 runs with. Default: `game/` in this executable's directory, i.e. next to OpenHP1
-// (openhp1/packaging/InstallRoot.cs, step 3), so after setup `OpenHP1` starts without arguments. With no --dest and a
+// <dest>: the install root HPEngine runs with. Default: `game/` in this executable's directory, i.e. next to HPEngine
+// (hpengine/packaging/InstallRoot.cs, step 3), so after setup `HPEngine` starts without arguments. With no --dest and a
 // game already next to this executable (the package unpacked into the game folder) nothing is needed: refused.
 //
 // SAFETY: a <dest> that holds game data (System, Maps, Textures, Sounds, Music or Help, any case) not installed by
 // HP1Setup (no .hp1-installed or .hp1-installing) is refused before anything is read: an original game install is
-// never changed. <dest>/Save and <dest>/OpenHP1Data (settings, logs; OpenHP1 before 2026-11-08) are never deleted or overwritten.
+// never changed. <dest>/Save and <dest>/HPEngineData (settings, logs) are never deleted or overwritten.
 //
 // Check: the edition is Core's UEEdition (linked from HP1.Core: the same SHA-1 keys, System/Engine.dll + Render.dll +
 // HPBase.u, so HP1Setup and Core never disagree), and so is its support tier (UEEdition.Support). A supported edition
@@ -84,10 +84,10 @@ static class Program
         if (args.Length == 1 && args[0] == "--check-manifests") return CheckManifests();   // launcher/test_setup.sh
         if (args.Length == 1 && args[0] is "--help" or "-h" or "/?")
         {
-            Console.WriteLine("HP1Setup installs the game data for OpenHP1 from your own copy of Harry Potter and the Philosopher's Stone (PC, 2001).");
+            Console.WriteLine("HP1Setup installs the game data for HPEngine from your own copy of Harry Potter and the Philosopher's Stone (PC, 2001).");
             Console.WriteLine("Usage: HP1Setup [--dest <dir>] <source> [<source> ...]");
             Console.WriteLine("  <source>  the installed game folder, the game CD, a copy of the CD, the game's installer, or a .zip of those");
-            Console.WriteLine("  --dest    where to install (default: game/ next to HP1Setup, where OpenHP1 finds it)");
+            Console.WriteLine("  --dest    where to install (default: game/ next to HP1Setup, where HPEngine finds it)");
             Console.WriteLine("Without arguments, in a terminal, it asks for the source. Your game files are only read, never changed.");
             return 0;
         }
@@ -98,15 +98,15 @@ static class Program
             else sources.Add(args[i]);
         if (dest is null && IsRoot(AppContext.BaseDirectory))
         {
-            Console.WriteLine("ERROR already_installed OpenHP1 is in a game folder already (System and Maps are next to it): "
-                + "HP1Setup is not needed here. Start OpenHP1.");
+            Console.WriteLine("ERROR already_installed HPEngine is in a game folder already (System and Maps are next to it): "
+                + "HP1Setup is not needed here. Start HPEngine.");
             return 2;
         }
         dest ??= Path.Combine(AppContext.BaseDirectory, "game");   // InstallRoot.SetupDir
         bool interactive = sources.Count == 0 && !Console.IsInputRedirected;
         if (interactive)
         {
-            Console.WriteLine("HP1Setup installs the game data for OpenHP1 from your own copy of Harry Potter and the "
+            Console.WriteLine("HP1Setup installs the game data for HPEngine from your own copy of Harry Potter and the "
                 + "Philosopher's Stone (PC, 2001: US 1.53, UK 1.1 or the Russian EA release).\nDrag the installed game folder or the game CD "
                 + "(or a copy of it, or a .zip of it) into this window and press Enter:");
             Console.Write("> ");
@@ -122,7 +122,7 @@ static class Program
         finally { Cleanup(); }
         if (interactive)
         {
-            Console.WriteLine(code == 0 ? "Done. Start OpenHP1." : "Nothing was installed.");
+            Console.WriteLine(code == 0 ? "Done. Start HPEngine." : "Nothing was installed.");
             Console.WriteLine("Press Enter to close.");
             Console.ReadLine();
         }
@@ -312,7 +312,7 @@ static class Program
         if (tool is null)
         {
             _hint ??= new Reject("unpack_tool_missing", $"{Path.GetFileName(exe)} may be a game installer, but the unpacker "
-                + "(innoextract) is missing next to HP1Setup. Reinstall OpenHP1, or install the game and add its folder.");
+                + "(innoextract) is missing next to HP1Setup. Reinstall HPEngine, or install the game and add its folder.");
             return null;
         }
         Console.WriteLine("STEP unpack");

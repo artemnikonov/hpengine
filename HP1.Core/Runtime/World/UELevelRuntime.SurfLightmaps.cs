@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace HP1.UEScript
 {
-    // PER-FRAME LIGHTMAPS OF LEVEL SURFACES — owned by Core (C5/C7).
+    // PER-FRAME LIGHTMAPS OF LEVEL SURFACES — owned by Core.
     // The body is LevelSurfLightmap / LevelSurfLightmapRuntime (the shipped
     // SetupForSurf rule and its addresses are in the LevelSurfLightmap.cs header).
     // Here only the world binding: model, LightBits and zone ambient from live actors.
@@ -19,6 +19,7 @@ namespace HP1.UEScript
         {
             get
             {
+                HP1.Core.UECoreOwner.Check("UELevelRuntime.SurfaceLightmaps");
                 WorldStatic w = LatestWorldStatic;
                 if (w?.Geometry is null || Bsp?.ParseTables?.LightBits is null) return null;
                 if (_surfLightmaps is not null && ReferenceEquals(_surfLightmapsWorld, w)) return _surfLightmaps;
@@ -95,6 +96,7 @@ namespace HP1.UEScript
         {
             get
             {
+                HP1.Core.UECoreOwner.Check("UELevelRuntime.FogMaps");
                 WorldStatic w = LatestWorldStatic;
                 if (w?.Geometry is null || LatestFrame is null) return null;
                 if (_fogMaps is not null && ReferenceEquals(_fogMapsWorld, w)) return _fogMaps;

@@ -2,7 +2,7 @@
 //
 // Selection, disasm 0x10b0ffcd..0x10b1011d (decompile Render.dll.c:14110-14146), in the render window (x87 PC24: every
 // step below is a float operation):
-//   gate        Mesh->LODStrength (+0x18c) != 0 and Mesh->CollapsePointThus.Num (+0x130) != 0, otherwise no LOD;
+//   LOD enabled Mesh->LODStrength (+0x18c) != 0 and Mesh->CollapsePointThus.Num (+0x130) != 0, otherwise no LOD;
 //   lod       = Owner->LODBias (+0x78) / (Render->GlobalShapeLODAdjust (+0x50) * Render->GlobalShapeLOD (+0x4c) * LODStrength);
 //   area      = (Sprite->Y2 - Sprite->Y1 + 1) * (Sprite->X2 - Sprite->X1 + 1)        (FDynamicSprite +0x9c..+0xa8, int);
 //   r1        = area * 0.04f (.rdata 0x10b387e0) / (float)ModelVerts (+0x180);
@@ -29,8 +29,7 @@ namespace HP1.UEScript
     public static class UEMeshLod
     {
         // URender::Init values (see the header).
-        // GlobalShapeLODAdjust: NOT ORIGINAL — improvement (author 2026-10-30; debt register improvements list,
-        // "GlobalShapeLODAdjust"): shipped URender::PostRender (Render.dll FUN_10b1ef80) raises it per frame below
+        // GlobalShapeLODAdjust: NOT ORIGINAL: shipped URender::PostRender (Render.dll FUN_10b1ef80) raises it per frame below
         // MinDesiredFrameRate fps; the port keeps the Init value 1.0.
         public const float GlobalShapeLOD = 1f, GlobalShapeLODAdjust = 1f, ShapeLODFix = 1f;
         public const int ShapeLODMode = 1;
