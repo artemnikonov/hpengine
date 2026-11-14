@@ -19,6 +19,7 @@
     <Compile Include="../../hpengine/packaging/InstallRoot.cs" Link="InstallRoot.cs" />
     <!-- The engine's own mod placement rule (Logic.cs StartMap: the maps the enabled mods add). -->
     <Compile Include="../../hpengine/packaging/ModOverlay.cs" Link="ModOverlay.cs" />
+    <Compile Include="../../hpengine/packaging/GameLanguage.cs" Link="GameLanguage.cs" />
     <PackageReference Include="Avalonia" Version="11.3.23" />
     <PackageReference Include="Avalonia.Desktop" Version="11.3.23" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.23" />

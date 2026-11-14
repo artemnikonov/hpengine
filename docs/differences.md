@@ -48,6 +48,8 @@ not original behaviour:
 - Linux: X11 (XWayland) is preferred to native Wayland; `SDL_VIDEO_DRIVER=wayland` chooses Wayland.
 - Own save format (see [Install](../README.md#where-things-are)); the original's saves are not shown.
 - Mods are switched on and off from a `Mods` folder without changing the game files (the original has no mod switch).
+- The Windows/Linux launcher can select an installed language before starting the game. Multilingual distribution
+  folders are assembled in the same working copy as mods; original files are not rewritten or replaced.
 - A save made with different mods (turned on or off since) restarts its level from the beginning with the progress you
   had when you entered that level (house points, beans, wizard cards, potions) instead of failing to load; the Launcher
   names such slots. A save made by 0.1.0-beta does not load while mods are on (turn the mods off to load it). In both

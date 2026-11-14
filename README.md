@@ -115,6 +115,7 @@ What we learned about how the original engine works, with addresses in the origi
 |---|---|
 | US English 1.53 | **exact**: the reference the port is checked against |
 | UK English 1.1 | supported: plays through, not yet proven exact |
+| Nordic multilingual CD (`HARRY_POTTER_NORD_2210`: English, Danish, Finnish, Norwegian, Swedish) | native startup and localized menus verified on Windows 11; same engine family as UK 1.1, different language data; full campaign unverified |
 | Russian (EA) | supported: plays through, not yet proven exact; menu text in a substitute font (Liberation Sans for MS Sans Serif, **not original**) |
 | any other unmodified release (European English, French, German, Spanish, Italian, ...) | **unverified**: installed and run with a warning; it may not work correctly |
 | the fan "1.55" patch, modded re-releases (such as the 2002 "City" disc), other modified copies | **modified**: installed and run with a warning; the port is not checked against changed game scripts |
@@ -129,7 +130,7 @@ What we learned about how the original engine works, with addresses in the origi
 |---|---|
 | macOS, Apple Silicon (M1 or later) | developed and played on; the package is not signed or notarized |
 | macOS, Intel | the Launcher is universal; tested under Rosetta on Apple Silicon, **not yet on an Intel Mac** |
-| Windows x64 (D3D12) | installs, plays, saves and loads under CrossOver (D3D12 translated); **not verified on a Windows PC yet** |
+| Windows x64 (D3D12) | native startup, menus and five Nordic languages verified on Windows 11 Pro 26H2, OS build **26300.9818**; full campaign and save/load not yet verified on Windows. Earlier installs, play, save/load tests were under CrossOver (D3D12 translated) |
 | Linux x64 / Steam Deck (Vulkan) | runs natively on the Steam Deck (no Proton); a full playthrough there is still to do |
 
 ## Install
@@ -223,6 +224,24 @@ Without the launcher the game folder is `HPEngine/game/` (HP1Setup) or your own 
 launcher's **More** menu opens the saves and the logs. The shipped `.ini` files are never rewritten. Saves are in
 HPEngine's own format: they stay loadable across HPEngine versions, but saves of the original game are not read.
 
+### Game language (Windows and Linux)
+
+The launcher's **Game language** chooser lists the languages included in your game files. Select one before pressing
+**Play**; the choice is remembered. For multilingual discs, the language is read from each numbered `System` folder's
+`Default.ini`, rather than assuming folder `0` is the language you want. The corresponding text, dialogue, menu art
+and splash are used together. **Game default** restores the original data selection.
+
+No language files are downloaded. If your copy contains only one language, you need your own game data containing
+another language to use it. Original files stay unchanged: the engine builds a working copy (links where available) in
+`HPEngineData/modroot`, and applies enabled mods after the selected language. Saves stay in the normal `Save` folder;
+selecting a language does not change the list of script mods recorded in saves. Removing a selected language is
+reported as an error until you select an available language or **Game default**.
+
+The launcher separates multilingual data from its engine family. For example, the Nordic language set shares the
+engine family called **UK 1.1**; that match does not identify a UK disc. **Different data** means the Nordic files
+differ from that family's reference manifest, which alone does not establish that a disc was modified. The language
+set is detected from installed files; identifying an exact source image requires its volume information and hashes.
+
 ## Controls and settings
 
 Keyboard and mouse work as in the original (rebind keys in **Options → Controls**); **Alt+Enter** toggles fullscreen.
@@ -255,7 +274,8 @@ please report it with the mod's name. Check any other bug without mods before re
 
 ## Known issues
 
-- The Windows package has been run under CrossOver only, not on a Windows PC yet. Reports are welcome.
+- Native Windows startup and localized menus were tested on Windows 11 Pro 26H2 (OS build 26300.9818) with the Nordic
+  multilingual CD. A full campaign and save/load on Windows still need verification; earlier tests were under CrossOver.
 - Mods are in beta: a mod may not work, and large conversions (Restored + Free Play, HP1 Demo Extended) do not start
   yet. See [Mods](#mods).
 - The 0.1.0 launcher and folders (OpenHP1) are not moved to HPEngine automatically: see [CHANGELOG.md](CHANGELOG.md).

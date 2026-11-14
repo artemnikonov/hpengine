@@ -7,7 +7,7 @@ using Avalonia.LogicalTree;
 using Avalonia.Threading;
 using HPEngine.Launcher;
 
-static class T
+static partial class T
 {
     static int fails;
     static readonly HashSet<string> fired = new();
@@ -22,6 +22,10 @@ static class T
 
     static int Main(string[] args)
     {
+        if (args.Length == 3 && args[0] == "--language-select")
+        { HPEngine.Packaging.GameLanguage.Save(args[1], args[2] == "default" ? null : args[2]); return 0; }
+        if (args.Length == 3 && args[0] == "--language-shot")
+        { LanguageShot(args[1], args[2]); return 0; }
         if (args.Length == 2 && args[0] == "--shots") { Shots(args[1]); return 0; }
         // <game dir>: the Mods notice lines the window shows for it (MainWindow: ModsIni.Load, ModsNotice.Lines), one per
         // output line — for saves the engine wrote (audit/mods_saves_e2e.sh).
@@ -42,9 +46,11 @@ static class T
             Console.WriteLine(EngineError.Banner(File.ReadAllLines(args[2]), int.Parse(args[1]), "L."));
             return 0;
         }
-        Protocol(); Ini(); Dirs(); Releases(); Removal(); Smoke(); Notice(); Errors(); ModProblems(); StartMaps(); OwnGame(); PadResetRule();
+        Protocol(); Ini(); Dirs(); Releases(); Removal(); Smoke(); Notice(); Errors(); ModProblems(); StartMaps(); OwnGame(); PadResetRule(); Languages();
         Console.WriteLine("branches: " + string.Join(" ", fired.OrderBy(x => x)));
         if (fails > 0) return 1;
+        foreach (var b in new[] { "language:overlay", "language:window", "language:missing", "language:default", "language:edition" })
+            if (!fired.Contains(b)) { Console.WriteLine("NOVERDICT: branch did not execute: " + b); return 3; }
         foreach (var b in new[] { "proto:all-kinds", "proto:malformed", "ini:roundtrip", "ini:missing-section", "dir:3os", "pick:prerelease-build", "smoke:not-installed", "smoke:installed", "smoke:toggle", "smoke:reorder", "rm:keep", "rm:all", "rm:marker-first", "rm:symlink", "notice:cases", "notice:window", "err:pick", "mods:missing", "mods:misplaced", "mods:play-blocked", "map:list", "map:window", "own:rule", "own:window", "pad:reset", "pad:nothing" })
             if (!fired.Contains(b)) { Console.WriteLine("NOVERDICT: branch did not execute: " + b); return 3; }
         if (!OperatingSystem.IsWindows() && !fired.Contains("map:play-args")) { Console.WriteLine("NOVERDICT: branch did not execute: map:play-args"); return 3; }
