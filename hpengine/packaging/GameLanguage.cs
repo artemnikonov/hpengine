@@ -19,11 +19,26 @@ namespace HPEngine.Packaging
         public const string DefaultLabel = "Game default";
         static readonly Dictionary<string, string> Names = new(StringComparer.OrdinalIgnoreCase)
         {
-            ["eng"] = "English", ["int"] = "English", ["fin"] = "Finnish", ["dan"] = "Danish",
-            ["swe"] = "Swedish", ["nor"] = "Norwegian", ["fra"] = "French", ["fre"] = "French",
-            ["deu"] = "German", ["ger"] = "German", ["ita"] = "Italian", ["esn"] = "Spanish",
-            ["esp"] = "Spanish", ["rus"] = "Russian", ["pol"] = "Polish", ["hun"] = "Hungarian",
-            ["por"] = "Portuguese", ["dut"] = "Dutch", ["nld"] = "Dutch", ["cze"] = "Czech",
+            ["eng"] = "English",
+            ["int"] = "English",
+            ["fin"] = "Finnish",
+            ["dan"] = "Danish",
+            ["swe"] = "Swedish",
+            ["nor"] = "Norwegian",
+            ["fra"] = "French",
+            ["fre"] = "French",
+            ["deu"] = "German",
+            ["ger"] = "German",
+            ["ita"] = "Italian",
+            ["esn"] = "Spanish",
+            ["esp"] = "Spanish",
+            ["rus"] = "Russian",
+            ["pol"] = "Polish",
+            ["hun"] = "Hungarian",
+            ["por"] = "Portuguese",
+            ["dut"] = "Dutch",
+            ["nld"] = "Dutch",
+            ["cze"] = "Czech",
         };
 
         static string FindDir(string parent, string name) => Directory.Exists(parent)
