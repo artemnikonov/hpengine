@@ -108,9 +108,9 @@ namespace HP1.UEScript
             float x = b * 0.005490196f;                       // 1.4/255
             float lum = x > 0f ? Clamp01(0.7f * x / ((float)Math.Sqrt(x) + 0.01f)) : 0f;
             float wr, wg, wb;
-            if (h < 0x56)      { wb = 0f; wr = (85 - h) * 0.011764706f; wg = h * 0.011764706f; }
+            if (h < 0x56) { wb = 0f; wr = (85 - h) * 0.011764706f; wg = h * 0.011764706f; }
             else if (h < 0xab) { wr = 0f; wg = (170 - h) * 0.011764706f; wb = (h - 85) * 0.011764706f; }
-            else               { wg = 0f; wr = (h - 170) * 0.011764706f; wb = (255 - h) * 0.011904762f; }
+            else { wg = 0f; wr = (h - 170) * 0.011764706f; wb = (255 - h) * 0.011904762f; }
             float sat = s * 0.003921569f;
             return new UEVector(((1f - wr) * sat + wr) * lum,
                                 ((1f - wg) * sat + wg) * lum,
@@ -678,8 +678,12 @@ namespace HP1.UEScript
         static void FillSearchlight(byte[] illum, int rw, int W, in Basis bs, in Light L, float radius, float inner,
                                     float field44, float[] table, float[] mask, int col0, int col1, int row0, int row1, FrameFx fx)
         {
-            var t = new SearchlightTexel { Local70 = Local70(field44, radius, inner), Table = table,
-                Tfp = MulIntFloat(PhaseT(in L, fx), PhaseToRad) + HalfPi };
+            var t = new SearchlightTexel
+            {
+                Local70 = Local70(field44, radius, inner),
+                Table = table,
+                Tfp = MulIntFloat(PhaseT(in L, fx), PhaseToRad) + HalfPi
+            };
             Walk(ref t, illum, rw, W, in bs, in L, radius, mask, col0, col1, row0, row1, ref SearchlightTexels);
         }
 
@@ -853,9 +857,15 @@ namespace HP1.UEScript
                              int col0, int col1, int row0, int row1, FrameFx fx, bool interference, float waveScale)
         {
             int phaseT = PhaseT(in L, fx);
-            var t = new WaveTexel { Local70 = Local70(field44, radius, inner), Table = table, PhaseT = phaseT,
+            var t = new WaveTexel
+            {
+                Local70 = Local70(field44, radius, inner),
+                Table = table,
+                PhaseT = phaseT,
                 Tf = interference ? MulIntFloat(phaseT, PhaseToRad) : 0f,   // fild; fmul [0x10b38100]
-                Interference = interference, WaveScale = waveScale };
+                Interference = interference,
+                WaveScale = waveScale
+            };
             Walk(ref t, illum, rw, W, in bs, in L, radius, mask, col0, col1, row0, row1, ref WaveTexels);
         }
 

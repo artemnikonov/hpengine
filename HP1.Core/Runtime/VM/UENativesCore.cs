@@ -74,7 +74,8 @@ namespace HP1.UEScript
             HP1.Core.X87Ext R(HP1.Core.X87Ext v) => pc24 ? HP1.Core.X87Ext.Round24(v) : HP1.Core.X87Ext.Round64(v);
             float x, y, z;
             HP1.Core.X87Ext loopSum;
-            do {
+            do
+            {
                 x = VRandComponent(rng, pc24).ToFloat();
                 y = VRandComponent(rng, pc24).ToFloat();
                 var zExt = VRandComponent(rng, pc24);
@@ -263,7 +264,8 @@ namespace HP1.UEScript
                 UEInterpreter.ToInt(args[0]) * UEInterpreter.ToInt(args[1]));
             // Core.dll 0x10137022: `cmp B,0; je` — for B == 0 the result is 0, no
             // exception; otherwise idiv.
-            Pair(145, "Divide_IntInt", (interp, frame, args) => {
+            Pair(145, "Divide_IntInt", (interp, frame, args) =>
+            {
                 int b = UEInterpreter.ToInt(args[1]);
                 return b == 0 ? 0 : UEInterpreter.ToInt(args[0]) / b;
             });
@@ -318,37 +320,43 @@ namespace HP1.UEScript
 
             // ── In-place (arg 0 is OutParm; mutate args[0]) ───────────────
             // execAddAdd_PreInt (Core.dll.c:5914 / 0x10137f20) — `++A`
-            Pair(163, "AddAdd_PreInt", (interp, frame, args) => {
+            Pair(163, "AddAdd_PreInt", (interp, frame, args) =>
+            {
                 int v = UEInterpreter.ToInt(args[0]) + 1;
                 args[0] = v;
                 return v;
             });
             // execSubtractSubtract_PreInt (Core.dll.c:10013 / 0x10137fe0) — `--A`
-            Pair(164, "SubtractSubtract_PreInt", (interp, frame, args) => {
+            Pair(164, "SubtractSubtract_PreInt", (interp, frame, args) =>
+            {
                 int v = UEInterpreter.ToInt(args[0]) - 1;
                 args[0] = v;
                 return v;
             });
             // execAddAdd_Int (Core.dll.c:55279 / 0x101380a0) — `A++` (post, returns old)
-            Pair(165, "AddAdd_Int", (interp, frame, args) => {
+            Pair(165, "AddAdd_Int", (interp, frame, args) =>
+            {
                 int v = UEInterpreter.ToInt(args[0]);
                 args[0] = v + 1;
                 return v;
             });
             // execSubtractSubtract_Int (Core.dll.c:47504 / 0x10138160) — `A--` (post)
-            Pair(166, "SubtractSubtract_Int", (interp, frame, args) => {
+            Pair(166, "SubtractSubtract_Int", (interp, frame, args) =>
+            {
                 int v = UEInterpreter.ToInt(args[0]);
                 args[0] = v - 1;
                 return v;
             });
             // execAddEqual_IntInt (Core.dll.c:16217 / 0x10137d40) — `A += B`
-            Pair(161, "AddEqual_IntInt", (interp, frame, args) => {
+            Pair(161, "AddEqual_IntInt", (interp, frame, args) =>
+            {
                 int v = UEInterpreter.ToInt(args[0]) + UEInterpreter.ToInt(args[1]);
                 args[0] = v;
                 return v;
             });
             // execSubtractEqual_IntInt (Core.dll.c:1384) — `A -= B`
-            Pair(162, "SubtractEqual_IntInt", (interp, frame, args) => {
+            Pair(162, "SubtractEqual_IntInt", (interp, frame, args) =>
+            {
                 int v = UEInterpreter.ToInt(args[0]) - UEInterpreter.ToInt(args[1]);
                 args[0] = v;
                 return v;
@@ -358,7 +366,8 @@ namespace HP1.UEScript
             // (outside int64 and NaN — 0, otherwise the low dword). Rounding A and the
             // product to float would make `100 *= 0.01` give 1
             // instead of shipped 0 (0.01f < 0.01).
-            Pair(159, "MultiplyEqual_IntFloat", (interp, frame, args) => {
+            Pair(159, "MultiplyEqual_IntFloat", (interp, frame, args) =>
+            {
                 int v = X87.MulIntFloatFtol(UEInterpreter.ToInt(args[0]), UEInterpreter.AsFloat(args[1]));
                 args[0] = v;
                 return v;
@@ -366,7 +375,8 @@ namespace HP1.UEScript
             // Core.dll 0x10137c97: B == 0.0 → A = _ftol(0.0) = 0; otherwise
             // `fild A; fdiv B; _ftol` (MSVCRT, truncation, outside int64 — 0) — the dividend
             // never passes through float. The quotient here is double (x87 — extended).
-            Pair(160, "DivideEqual_IntFloat", (interp, frame, args) => {
+            Pair(160, "DivideEqual_IntFloat", (interp, frame, args) =>
+            {
                 int v = X87.DivIntFloatFtol(UEInterpreter.ToInt(args[0]), UEInterpreter.AsFloat(args[1]));
                 args[0] = v;
                 return v;
@@ -385,28 +395,44 @@ namespace HP1.UEScript
             // post: ReturnValue = A++ / A-- ; pre: ++A / --A — execAddAdd_Byte /
             // execSubtractSubtract_Byte / execAddAdd_PreByte / execSubtractSubtract_PreByte
             // (Core.dll.c:16726 / 64143 / 47830 / 13124)
-            Pair(139, "AddAdd_Byte", (interp, frame, args) => {
-                byte v = (byte)UEInterpreter.ToInt(args[0]); args[0] = (byte)(v + 1); return v; });
-            Pair(140, "SubtractSubtract_Byte", (interp, frame, args) => {
-                byte v = (byte)UEInterpreter.ToInt(args[0]); args[0] = (byte)(v - 1); return v; });
-            Pair(137, "AddAdd_PreByte", (interp, frame, args) => {
-                byte v = (byte)(UEInterpreter.ToInt(args[0]) + 1); args[0] = v; return v; });
-            Pair(138, "SubtractSubtract_PreByte", (interp, frame, args) => {
-                byte v = (byte)(UEInterpreter.ToInt(args[0]) - 1); args[0] = v; return v; });
+            Pair(139, "AddAdd_Byte", (interp, frame, args) =>
+            {
+                byte v = (byte)UEInterpreter.ToInt(args[0]); args[0] = (byte)(v + 1); return v;
+            });
+            Pair(140, "SubtractSubtract_Byte", (interp, frame, args) =>
+            {
+                byte v = (byte)UEInterpreter.ToInt(args[0]); args[0] = (byte)(v - 1); return v;
+            });
+            Pair(137, "AddAdd_PreByte", (interp, frame, args) =>
+            {
+                byte v = (byte)(UEInterpreter.ToInt(args[0]) + 1); args[0] = v; return v;
+            });
+            Pair(138, "SubtractSubtract_PreByte", (interp, frame, args) =>
+            {
+                byte v = (byte)(UEInterpreter.ToInt(args[0]) - 1); args[0] = v; return v;
+            });
             // in-place A op= B — execAddEqual_ByteByte / execSubtractEqual_ByteByte /
             // execMultiplyEqual_ByteByte / execDivideEqual_ByteByte (Core.dll.c:3616 /
             // 12145 / 13157 / 19521)
-            Pair(135, "AddEqual_ByteByte", (interp, frame, args) => {
-                byte v = (byte)(UEInterpreter.ToInt(args[0]) + UEInterpreter.ToInt(args[1])); args[0] = v; return v; });
-            Pair(136, "SubtractEqual_ByteByte", (interp, frame, args) => {
-                byte v = (byte)(UEInterpreter.ToInt(args[0]) - UEInterpreter.ToInt(args[1])); args[0] = v; return v; });
-            Pair(133, "MultiplyEqual_ByteByte", (interp, frame, args) => {
-                byte v = (byte)(UEInterpreter.ToInt(args[0]) * UEInterpreter.ToInt(args[1])); args[0] = v; return v; });
+            Pair(135, "AddEqual_ByteByte", (interp, frame, args) =>
+            {
+                byte v = (byte)(UEInterpreter.ToInt(args[0]) + UEInterpreter.ToInt(args[1])); args[0] = v; return v;
+            });
+            Pair(136, "SubtractEqual_ByteByte", (interp, frame, args) =>
+            {
+                byte v = (byte)(UEInterpreter.ToInt(args[0]) - UEInterpreter.ToInt(args[1])); args[0] = v; return v;
+            });
+            Pair(133, "MultiplyEqual_ByteByte", (interp, frame, args) =>
+            {
+                byte v = (byte)(UEInterpreter.ToInt(args[0]) * UEInterpreter.ToInt(args[1])); args[0] = v; return v;
+            });
             // Core.dll 0x10136779: for B == 0 A is NOT changed, the result is 0.
-            Pair(134, "DivideEqual_ByteByte", (interp, frame, args) => {
+            Pair(134, "DivideEqual_ByteByte", (interp, frame, args) =>
+            {
                 int b = UEInterpreter.ToInt(args[1]);
                 if (b == 0) return (byte)0;
-                byte v = (byte)(UEInterpreter.ToInt(args[0]) / b); args[0] = v; return v; });
+                byte v = (byte)(UEInterpreter.ToInt(args[0]) / b); args[0] = v; return v;
+            });
         }
 
         // Float operators — bodies of UObject::exec*_Float* in Core.dll: float arithmetic, comparison,
@@ -464,25 +490,29 @@ namespace HP1.UEScript
 
             // ── In-place (arg 0 OutParm) ──────────────────────────────────
             // execMultiplyEqual_FloatFloat (Core.dll.c:33946 / 0x101391a0) — `A *= B`
-            Pair(182, "MultiplyEqual_FloatFloat", (interp, frame, args) => {
+            Pair(182, "MultiplyEqual_FloatFloat", (interp, frame, args) =>
+            {
                 float v = X87.Mul(UEInterpreter.AsFloat(args[0]), UEInterpreter.AsFloat(args[1]));
                 args[0] = v;
                 return v;
             });
             // execDivideEqual_FloatFloat (Core.dll.c:1298 / 0x10139280) — `A /= B`
-            Pair(183, "DivideEqual_FloatFloat", (interp, frame, args) => {
+            Pair(183, "DivideEqual_FloatFloat", (interp, frame, args) =>
+            {
                 float v = X87.Div(UEInterpreter.AsFloat(args[0]), UEInterpreter.AsFloat(args[1]));
                 args[0] = v;
                 return v;
             });
             // execAddEqual_FloatFloat (Core.dll.c:39089 / 0x10139360) — `A += B`
-            Pair(184, "AddEqual_FloatFloat", (interp, frame, args) => {
+            Pair(184, "AddEqual_FloatFloat", (interp, frame, args) =>
+            {
                 float v = X87.Add(UEInterpreter.AsFloat(args[0]), UEInterpreter.AsFloat(args[1]));
                 args[0] = v;
                 return v;
             });
             // execSubtractEqual_FloatFloat (Core.dll.c:12081 / 0x10139440) — `A -= B`
-            Pair(185, "SubtractEqual_FloatFloat", (interp, frame, args) => {
+            Pair(185, "SubtractEqual_FloatFloat", (interp, frame, args) =>
+            {
                 float v = X87.Sub(UEInterpreter.AsFloat(args[0]), UEInterpreter.AsFloat(args[1]));
                 args[0] = v;
                 return v;
@@ -575,13 +605,15 @@ namespace HP1.UEScript
             // Core.dll.c:7393). A call to native 238 goes loudly to OnUnknownNative.
             // ── Substring family ──────────────────────────────────────────
             // execLeft (Core.dll.c:22754 / 0x1013fdb0) — substring(0, clamp(i, 0, len))
-            Pair(128, "Left", (interp, frame, args) => {
+            Pair(128, "Left", (interp, frame, args) =>
+            {
                 var s = Str(args[0]) ?? "";
                 int i = System.Math.Max(0, System.Math.Min(UEInterpreter.ToInt(args[1]), s.Length));
                 return s.Substring(0, i);
             });
             // execRight (Core.dll.c:28435) — last `count` chars
-            Pair(234, "Right", (interp, frame, args) => {
+            Pair(234, "Right", (interp, frame, args) =>
+            {
                 var s = Str(args[0]) ?? "";
                 int count = System.Math.Max(0, System.Math.Min(UEInterpreter.ToInt(args[1]), s.Length));
                 return s.Substring(s.Length - count, count);
@@ -591,7 +623,8 @@ namespace HP1.UEScript
             //   Start' = (uint)Start < Len ? Start : Len;
             //   End'   = (uint)End >= Start' ? min((uint)End, Len) : Start'.
             // A negative Start gives an empty string.
-            Pair(127, "Mid", (interp, frame, args) => {
+            Pair(127, "Mid", (interp, frame, args) =>
+            {
                 var s = Str(args[0]) ?? "";
                 int start = UEInterpreter.ToInt(args[1]);
                 int count = (args.Length > 2 && args[2] != null) ? UEInterpreter.ToInt(args[2]) : 0xffff;
@@ -604,13 +637,15 @@ namespace HP1.UEScript
                 (Str(args[0]) ?? "").IndexOf(Str(args[1]) ?? "", StringComparison.Ordinal));
             // execAsc (Core.dll.c:24245): `(ushort)*Str` — the whole first character
             // (16 bits), 0 for an empty string.
-            Pair(237, "Asc", (interp, frame, args) => {
+            Pair(237, "Asc", (interp, frame, args) =>
+            {
                 var s = Str(args[0]) ?? "";
                 return s.Length > 0 ? (int)s[0] : 0;
             });
             // execChr (Core.dll.c:43715): character `A & 0xffff`; for a zero
             // character the string is EMPTY (length by appStrlen), not "\0".
-            Pair(236, "Chr", (interp, frame, args) => {
+            Pair(236, "Chr", (interp, frame, args) =>
+            {
                 int c = UEInterpreter.ToInt(args[0]) & 0xffff;
                 return c == 0 ? "" : new string((char)c, 1);
             });
@@ -652,7 +687,8 @@ namespace HP1.UEScript
         {
             // Core.dll execAbs (0x10139549): `fcomp 0.0; test ah,1; jne -> fchs`
             // — the sign flips only when A < 0 (and for NaN); Abs(-0.0) = -0.0.
-            Pair(186, "Abs", (interp, frame, args) => {
+            Pair(186, "Abs", (interp, frame, args) =>
+            {
                 float a = UEInterpreter.AsFloat(args[0]);
                 return a < 0f || float.IsNaN(a) ? -a : a;
             });
@@ -683,7 +719,8 @@ namespace HP1.UEScript
             // execSqrt (Core.dll.c:43915 / 0x10139a00) / execSquare (:7049 / 0x10139ab0)
             Pair(193, "Sqrt", (interp, frame, args) =>
                 X87.Sqrt(UEInterpreter.AsFloat(args[0])));
-            Pair(194, "Square", (interp, frame, args) => {
+            Pair(194, "Square", (interp, frame, args) =>
+            {
                 float a = UEInterpreter.AsFloat(args[0]);
                 return a * a;
             });
@@ -694,7 +731,8 @@ namespace HP1.UEScript
             Pair(250, "Max", (interp, frame, args) =>
                 System.Math.Max(UEInterpreter.ToInt(args[0]), UEInterpreter.ToInt(args[1])));
             // execClamp (Core.dll.c:24065) — `clamp(V, A, B)`
-            Pair(251, "Clamp", (interp, frame, args) => {
+            Pair(251, "Clamp", (interp, frame, args) =>
+            {
                 int v = UEInterpreter.ToInt(args[0]);
                 int lo = UEInterpreter.ToInt(args[1]);
                 int hi = UEInterpreter.ToInt(args[2]);
@@ -703,19 +741,22 @@ namespace HP1.UEScript
             // Core.dll execFMax (0x10139d13): `fcomp; test ah,1; jne` — A when
             // A >= B (including equal ±0), otherwise and for NaN — B.
             // System.Math.Max would pick +0 and NaN.
-            Pair(245, "FMax", (interp, frame, args) => {
+            Pair(245, "FMax", (interp, frame, args) =>
+            {
                 float a = UEInterpreter.AsFloat(args[0]), b = UEInterpreter.AsFloat(args[1]);
                 return a >= b ? a : b;
             });
             // Core.dll execFMin (0x10139c33): `test ah,0x41; je` — B only when
             // A > B; when equal or unordered — A.
-            Pair(244, "FMin", (interp, frame, args) => {
+            Pair(244, "FMin", (interp, frame, args) =>
+            {
                 float a = UEInterpreter.AsFloat(args[0]), b = UEInterpreter.AsFloat(args[1]);
                 return a > b ? b : a;
             });
             // execFClamp (Core.dll.c:46203; disasm 0x10139e11..0x10139e5f) — float `clamp(V, A, B)`: `fld V; fcomp A;
             // test ah, 1` (V < A or unordered) -> A; else `fld V; fcomp B; test ah, 1` (V < B or unordered) -> V; else B.
-            Pair(246, "FClamp", (interp, frame, args) => {
+            Pair(246, "FClamp", (interp, frame, args) =>
+            {
                 float v = UEInterpreter.AsFloat(args[0]);
                 float lo = UEInterpreter.AsFloat(args[1]);
                 float hi = UEInterpreter.AsFloat(args[2]);
@@ -730,7 +771,8 @@ namespace HP1.UEScript
             // Core.dll execRand (0x10138255): `A > 0 ? appRand() % A : 0` (idiv,
             // A unbounded; for A <= 0 rand() is not called). Clamping to
             // Min(A, 32767) would give 0 instead of 32767 when A > 32767 and rand() = 32767.
-            Pair(167, "Rand", (interp, frame, args) => {
+            Pair(167, "Rand", (interp, frame, args) =>
+            {
                 int max = UEInterpreter.ToInt(args[0]);
                 return max > 0 ? NextRandomInt15() % max : 0;
             });
@@ -770,11 +812,13 @@ namespace HP1.UEScript
             // (X87Equal: a NaN component compares equal; 0x1013be60). An approximate
             // (~1e-5 epsilon) comparison would turn sub-milliunit residuals (Harry.uc:910 `Acceleration ==
             // vect(0,0,0)`) into false equality. Same fix as VectorToBool above.
-            Pair(217, "EqualEqual_VectorVector", (interp, frame, args) => { // A==B
+            Pair(217, "EqualEqual_VectorVector", (interp, frame, args) =>
+            { // A==B
                 var a = UEInterpreter.AsVector3(args[0]); var b = UEInterpreter.AsVector3(args[1]);
                 return X87Equal(a.x, b.x) && X87Equal(a.y, b.y) && X87Equal(a.z, b.z);
             });
-            Pair(218, "NotEqual_VectorVector", (interp, frame, args) => {   // A!=B
+            Pair(218, "NotEqual_VectorVector", (interp, frame, args) =>
+            {   // A!=B
                 var a = UEInterpreter.AsVector3(args[0]); var b = UEInterpreter.AsVector3(args[1]);
                 return !(X87Equal(a.x, b.x) && X87Equal(a.y, b.y) && X87Equal(a.z, b.z));
             });
@@ -810,7 +854,8 @@ namespace HP1.UEScript
             // rotator component (Pitch, Yaw, Roll) is `& 0xffff`, and values above 0x7fff
             // are reduced by 0x10000, i.e. wrapped into [−32768, 32767]. Called
             // by name (HPBase.spellVoldemortTracking.Tick, the Hub5 final fight).
-            Pair(0, "Normalize", (interp, frame, args) => {
+            Pair(0, "Normalize", (interp, frame, args) =>
+            {
                 UERotator r = UEInterpreter.AsRotator(args[0]);
                 static int Wrap(int c) { int w = c & 0xffff; return w > 0x7fff ? w - 0x10000 : w; }
                 return new UERotator(Wrap(r.Pitch), Wrap(r.Yaw), Wrap(r.Roll));
@@ -822,7 +867,8 @@ namespace HP1.UEScript
             // VSize2D (native 271) — no execVSize2D body found by name in the Core/Engine
             // decompiles; not verified. Length of the horizontal (XY) components.
             // Our Vector3 holds raw UE (X,Y,Z); UE's 2D plane is XY (Z is up).
-            Pair(271, "VSize2D", (interp, frame, args) => {
+            Pair(271, "VSize2D", (interp, frame, args) =>
+            {
                 var v = UEInterpreter.AsVector3(args[0]);
                 return (float)Math.Sqrt(v.x * v.x + v.y * v.y);
             });
@@ -835,7 +881,8 @@ namespace HP1.UEScript
             // frame's 3 world-space axis vectors (Coords::Rotation(R).GetAxes); X is
             // forward. UEValue.GetAxes is the 1:1 Coords::Rotation port. X/Y/Z are
             // `out` params (Object.uc) → flow back via the native out-arg writeback.
-            Pair(229, "GetAxes", (interp, frame, args) => {
+            Pair(229, "GetAxes", (interp, frame, args) =>
+            {
                 var (X, Y, Z) = UEValue.GetAxes(UEInterpreter.AsRotator(args[0]));
                 if (args.Length > 1) args[1] = X;
                 if (args.Length > 2) args[2] = Y;
@@ -847,14 +894,16 @@ namespace HP1.UEScript
                 X87.ComplementEqual(UEInterpreter.AsFloat(args[0]), UEInterpreter.AsFloat(args[1])));
             Pair(248, "Smerp", (interp, frame, args) =>
                 X87.Smerp(UEInterpreter.AsFloat(args[0]), UEInterpreter.AsFloat(args[1]), UEInterpreter.AsFloat(args[2])));
-            Pair(230, "GetUnAxes", (interp, frame, args) => {
+            Pair(230, "GetUnAxes", (interp, frame, args) =>
+            {
                 var (X, Y, Z) = UEValue.GetUnAxes(UEInterpreter.AsRotator(args[0]));
                 if (args.Length > 1) args[1] = X;
                 if (args.Length > 2) args[2] = Y;
                 if (args.Length > 3) args[3] = Z;
                 return null;
             });
-            Pair(227, "Invert", (interp, frame, args) => {
+            Pair(227, "Invert", (interp, frame, args) =>
+            {
                 var (X, Y, Z) = X87.Invert(UEInterpreter.AsVector3(args[0]), UEInterpreter.AsVector3(args[1]),
                     UEInterpreter.AsVector3(args[2]));
                 args[0] = X; args[1] = Y; args[2] = Z;
@@ -865,19 +914,23 @@ namespace HP1.UEScript
                     UEInterpreter.AsVector3(args[2])));
 
             // ── Vector in-place (arg 0 OutParm) ───────────────────────────
-            Pair(221, "MultiplyEqual_VectorFloat", (interp, frame, args) => {
+            Pair(221, "MultiplyEqual_VectorFloat", (interp, frame, args) =>
+            {
                 var v = X87.Mul(UEInterpreter.AsVector3(args[0]), UEInterpreter.AsFloat(args[1]));
                 args[0] = v; return v;
             });
-            Pair(222, "DivideEqual_VectorFloat", (interp, frame, args) => {
+            Pair(222, "DivideEqual_VectorFloat", (interp, frame, args) =>
+            {
                 var v = X87.DivVectorFloat(UEInterpreter.AsVector3(args[0]), UEInterpreter.AsFloat(args[1]));
                 args[0] = v; return v;
             });
-            Pair(223, "AddEqual_VectorVector", (interp, frame, args) => {
+            Pair(223, "AddEqual_VectorVector", (interp, frame, args) =>
+            {
                 var v = UEInterpreter.AsVector3(args[0]) + UEInterpreter.AsVector3(args[1]);
                 args[0] = v; return v;
             });
-            Pair(224, "SubtractEqual_VectorVector", (interp, frame, args) => {
+            Pair(224, "SubtractEqual_VectorVector", (interp, frame, args) =>
+            {
                 var v = UEInterpreter.AsVector3(args[0]) - UEInterpreter.AsVector3(args[1]);
                 args[0] = v; return v;
             });
@@ -885,7 +938,8 @@ namespace HP1.UEScript
             // (Hadamard, in-place). Tut1: Harry.uc:1555 `Acceleration *= vect(0,0,1)`
             // in state Hit.Begin zeroes the knockback X/Y accel, keeps Z (live on a
             // Peeves hit). Was native idx=297 unimplemented → Accel X/Y not cleared.
-            Pair(297, "MultiplyEqual_VectorVector", (interp, frame, args) => {
+            Pair(297, "MultiplyEqual_VectorVector", (interp, frame, args) =>
+            {
                 var v = Vector3.Scale(UEInterpreter.AsVector3(args[0]), UEInterpreter.AsVector3(args[1]));
                 args[0] = v; return v;
             });
@@ -913,39 +967,46 @@ namespace HP1.UEScript
             // execNotEqual (0x1013cf30) identical inverted. Same as UT-public FRotator.
             // SurrealEngine's rotator.h:88-89 uint16 casts (0 == 65536) are its own deviation —
             // native wins by source priority (the shipped engine says 0 != 65536).
-            Pair(142, "EqualEqual_RotatorRotator", (interp, frame, args) => {
+            Pair(142, "EqualEqual_RotatorRotator", (interp, frame, args) =>
+            {
                 var a = UEInterpreter.AsRotator(args[0]); var b = UEInterpreter.AsRotator(args[1]);
                 return a.Pitch == b.Pitch && a.Yaw == b.Yaw && a.Roll == b.Roll;
             });
-            Pair(203, "NotEqual_RotatorRotator", (interp, frame, args) => {
+            Pair(203, "NotEqual_RotatorRotator", (interp, frame, args) =>
+            {
                 var a = UEInterpreter.AsRotator(args[0]); var b = UEInterpreter.AsRotator(args[1]);
                 return a.Pitch != b.Pitch || a.Yaw != b.Yaw || a.Roll != b.Roll;
             });
             // ── Rotator in-place (arg 0 OutParm) ──────────────────────────
-            Pair(318, "AddEqual_RotatorRotator", (interp, frame, args) => {
+            Pair(318, "AddEqual_RotatorRotator", (interp, frame, args) =>
+            {
                 var v = RotAdd(UEInterpreter.AsRotator(args[0]), UEInterpreter.AsRotator(args[1]), 1);
                 args[0] = v; return v;
             });
-            Pair(319, "SubtractEqual_RotatorRotator", (interp, frame, args) => {
+            Pair(319, "SubtractEqual_RotatorRotator", (interp, frame, args) =>
+            {
                 var v = RotAdd(UEInterpreter.AsRotator(args[0]), UEInterpreter.AsRotator(args[1]), -1);
                 args[0] = v; return v;
             });
-            Pair(290, "MultiplyEqual_RotatorFloat", (interp, frame, args) => {
+            Pair(290, "MultiplyEqual_RotatorFloat", (interp, frame, args) =>
+            {
                 var v = RotScale(UEInterpreter.AsRotator(args[0]), UEInterpreter.AsFloat(args[1]));
                 args[0] = v; return v;
             });
-            Pair(291, "DivideEqual_RotatorFloat", (interp, frame, args) => {
+            Pair(291, "DivideEqual_RotatorFloat", (interp, frame, args) =>
+            {
                 var v = RotDiv(UEInterpreter.AsRotator(args[0]), UEInterpreter.AsFloat(args[1]));
                 args[0] = v; return v;
             });
             // Shipped Core.dll.c:57626-57634 — yaw consumes the first appRand,
             // pitch the second, and roll the optional third. Each component is
             // `(rand()<<1) % 0xffff`, hence the exact even range [0,65534].
-            Pair(320, "RotRand", (interp, frame, args) => {
+            Pair(320, "RotRand", (interp, frame, args) =>
+            {
                 bool bRoll = args.Length > 0 && args[0] != null && UEInterpreter.ToBool(args[0]);
-                int yaw   = (NextRandomInt15() << 1) % 0xffff;
+                int yaw = (NextRandomInt15() << 1) % 0xffff;
                 int pitch = (NextRandomInt15() << 1) % 0xffff;
-                int roll  = bRoll ? (NextRandomInt15() << 1) % 0xffff : 0;
+                int roll = bRoll ? (NextRandomInt15() << 1) % 0xffff : 0;
                 return new UERotator(pitch, yaw, roll);
             });
         }
@@ -977,7 +1038,8 @@ namespace HP1.UEScript
             // execIsA (Core.dll.c:44651) — `Self->IsA(ClassName)`. Delegates to the
             // shared name-based walk (which stitches cross-package import
             // stubs via CanonicalSuper).
-            Pair(303, "IsA", (interp, frame, args) => {
+            Pair(303, "IsA", (interp, frame, args) =>
+            {
                 string nm = NameOf(args[0]);
                 if (string.IsNullOrEmpty(nm)) return false;
                 var self = frame.Context ?? frame.Object;
@@ -1012,7 +1074,8 @@ namespace HP1.UEScript
             // (0x10141bb4 cmp). Import stubs resolve to the real class of
             // THE SAME package (the linker binds them before the call); matching by
             // name would confuse same-named classes of different packages (HPModels/HProps).
-            Pair(258, "ClassIsChildOf", (interp, frame, args) => {
+            Pair(258, "ClassIsChildOf", (interp, frame, args) =>
+            {
                 return UEClassRegistry.Shared.IsChildOfClass(AsClass(args[0]), AsClass(args[1]));
             });
 
@@ -1022,7 +1085,8 @@ namespace HP1.UEScript
             // Class when not found/None), so the chain walks class
             // names; a state node walks ancestor states (`extends` and
             // same-named states of parent classes).
-            Pair(281, "IsInState", (interp, frame, args) => {
+            Pair(281, "IsInState", (interp, frame, args) =>
+            {
                 var self = frame.Context ?? frame.Object;
                 string target = NameOf(args[0]);
                 if (self?.Class is null || string.IsNullOrEmpty(target)) return false;
@@ -1034,7 +1098,8 @@ namespace HP1.UEScript
             // execGetStateName (Core.dll 0x10142da0..0x10142de3): name of the frame's
             // state node; for an object without a state the node is the class, so
             // the answer is the CLASS NAME (not 'None').
-            Pair(284, "GetStateName", (interp, frame, args) => {
+            Pair(284, "GetStateName", (interp, frame, args) =>
+            {
                 var self = frame.Context ?? frame.Object;
                 if (self?.Class is null) return new UEName("None");
                 string s = self.CurrentStateName;
@@ -1208,7 +1273,8 @@ namespace HP1.UEScript
             // ONLY for a different name (otherwise no End/BeginState and no mask
             // recompute — Disable() survives GotoState into the same state); on
             // success — GotoLabel(L == None ? Begin : L).
-            Pair(113, "GotoState", (interp, frame, args) => {
+            Pair(113, "GotoState", (interp, frame, args) =>
+            {
                 var self = frame.Context ?? frame.Object;
                 string current = self?.CurrentStateName;
                 string state = NameOf(args.Length > 0 ? args[0] : null);
@@ -1239,7 +1305,8 @@ namespace HP1.UEScript
             // execPollSleep with a 0.5·dt threshold, so breaking writes the same -1.0.
             //
             // ONE body for both frontends: in Tut2 (BroomHarry) this native is live.
-            Pair(0, "StopWaiting", (interp, frame, args) => {
+            Pair(0, "StopWaiting", (interp, frame, args) =>
+            {
                 var self = frame.Context ?? frame.Object;
                 UEFrame sf = self?.StateFrame;
                 if (sf is not null && sf.LatentState == LatentRunState.Sleep)
@@ -1258,7 +1325,8 @@ namespace HP1.UEScript
             // execEnable: the bit is restored ONLY if the class or state actually
             // defines it and it is not in ignores — the mask is recomputed with the
             // same formula as in GotoState.
-            Pair(117, "Enable", (interp, frame, args) => {
+            Pair(117, "Enable", (interp, frame, args) =>
+            {
                 var self = frame.Context ?? frame.Object;
                 string probe = NameOf(args.Length > 0 ? args[0] : null);
                 if (self?.StateFrame is UEFrame sf && UEProbe.TryBit(probe, out int onBit))
@@ -1268,7 +1336,8 @@ namespace HP1.UEScript
             });
 
             // execDisable: the bit is simply cleared.
-            Pair(118, "Disable", (interp, frame, args) => {
+            Pair(118, "Disable", (interp, frame, args) =>
+            {
                 var self = frame.Context ?? frame.Object;
                 string probe = NameOf(args.Length > 0 ? args[0] : null);
                 if (self?.StateFrame is UEFrame sf && UEProbe.TryBit(probe, out int offBit))

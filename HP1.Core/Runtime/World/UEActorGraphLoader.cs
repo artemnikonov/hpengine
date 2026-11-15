@@ -352,19 +352,19 @@ namespace HP1.UEScript
                 case 3: return tag.BoolValue;
                 case 4: return raw.Length >= 4 ? BitConverter.ToSingle(raw, 0) : 0f;
                 case 5:
-                {
-                    int pos = 0; return ResolveObjectRef(ReadCompactIndex(raw, ref pos), package, byExport);
-                }
+                    {
+                        int pos = 0; return ResolveObjectRef(ReadCompactIndex(raw, ref pos), package, byExport);
+                    }
                 case 6:
-                {
-                    int pos = 0; return new UEName(ReadName(raw, ref pos, package));
-                }
+                    {
+                        int pos = 0; return new UEName(ReadName(raw, ref pos, package));
+                    }
                 case 9: return DecodeDynamicArray(ownerClass, tag.Name, raw, package, byExport);
                 case 10: return DecodeStruct(tag.StructName, raw, package, byExport, ownerClass);
                 case 13:
-                {
-                    int pos = 0; return ReadString(raw, ref pos);
-                }
+                    {
+                        int pos = 0; return ReadString(raw, ref pos);
+                    }
                 default:
                     throw new NotSupportedException(
                         $"instance property {ownerClass.Name}.{tag.Name}: walker type {tag.Type}");
@@ -404,13 +404,13 @@ namespace HP1.UEScript
                 case UStrProperty: return ReadString(raw, ref pos);
                 case UObjectProperty: return ResolveObjectRef(ReadCompactIndex(raw, ref pos), package, byExport);
                 case UArrayProperty ap:
-                {
-                    int num = ReadCompactIndex(raw, ref pos);
-                    if (num < 0) throw new InvalidDataException($"array<> {decl.Name}: count {num}");
-                    var list = new List<object>(num);
-                    for (int i = 0; i < num; i++) list.Add(ReadItem(ap.InnerProperty, raw, ref pos, package, byExport));
-                    return list;
-                }
+                    {
+                        int num = ReadCompactIndex(raw, ref pos);
+                        if (num < 0) throw new InvalidDataException($"array<> {decl.Name}: count {num}");
+                        var list = new List<object>(num);
+                        for (int i = 0; i < num; i++) list.Add(ReadItem(ap.InnerProperty, raw, ref pos, package, byExport));
+                        return list;
+                    }
                 case UStructProperty sp when sp.Struct is not null: return ReadStruct(sp.Struct, raw, ref pos, package, byExport);
                 default:
                     throw new NotSupportedException($"instance property element {decl.Name}: {decl.GetType().Name}");
@@ -458,17 +458,17 @@ namespace HP1.UEScript
                 case PropertyType.FloatProperty: return raw.Length >= 4 ? BitConverter.ToSingle(raw, 0) : 0f;
                 case PropertyType.BoolProperty: return tag.BoolValue ?? false;
                 case PropertyType.NameProperty:
-                {
-                    int pos = 0; return new UEName(ReadName(raw, ref pos, package));
-                }
+                    {
+                        int pos = 0; return new UEName(ReadName(raw, ref pos, package));
+                    }
                 case PropertyType.StrProperty:
-                {
-                    int pos = 0; return ReadString(raw, ref pos);
-                }
+                    {
+                        int pos = 0; return ReadString(raw, ref pos);
+                    }
                 case PropertyType.ObjectProperty:
-                {
-                    int pos = 0; return ResolveObjectRef(ReadCompactIndex(raw, ref pos), package, byExport);
-                }
+                    {
+                        int pos = 0; return ResolveObjectRef(ReadCompactIndex(raw, ref pos), package, byExport);
+                    }
                 case PropertyType.StructProperty:
                     return DecodeStruct(tag.StructName?.ToString(), raw, package, byExport, ownerClass);
                 case PropertyType.ArrayProperty:
@@ -688,11 +688,11 @@ namespace HP1.UEScript
                 case "vector": return new Vector3(ReadSingle(raw, ref pos), ReadSingle(raw, ref pos), ReadSingle(raw, ref pos));
                 case "rotator": return new UERotator(ReadInt32(raw, ref pos), ReadInt32(raw, ref pos), ReadInt32(raw, ref pos));
                 case "plane":
-                {
-                    float pw = ReadSingle(raw, ref pos);   // own field W first
-                    float px = ReadSingle(raw, ref pos), py = ReadSingle(raw, ref pos), pz = ReadSingle(raw, ref pos);
-                    return new UEPlane(px, py, pz, pw);
-                }
+                    {
+                        float pw = ReadSingle(raw, ref pos);   // own field W first
+                        float px = ReadSingle(raw, ref pos), py = ReadSingle(raw, ref pos), pz = ReadSingle(raw, ref pos);
+                        return new UEPlane(px, py, pz, pw);
+                    }
                 default: return null;
             }
         }
@@ -722,13 +722,13 @@ namespace HP1.UEScript
                                   ("Rand", Struct(("R", ReadByte(raw, ref pos)), ("G", ReadByte(raw, ref pos)),
                                                    ("B", ReadByte(raw, ref pos)), ("A", ReadByte(raw, ref pos)))));
                 case "pointregion":
-                {
-                    // The ONE Core Region constructor.
-                    int zone = ReadCompactIndex(raw, ref pos);
-                    return UEObject.MakeRegion(
-                        zone > 0 && byExport.TryGetValue(zone, out var z) ? z.Runtime : null,
-                        ReadInt32(raw, ref pos), ReadByte(raw, ref pos));
-                }
+                    {
+                        // The ONE Core Region constructor.
+                        int zone = ReadCompactIndex(raw, ref pos);
+                        return UEObject.MakeRegion(
+                            zone > 0 && byExport.TryGetValue(zone, out var z) ? z.Runtime : null,
+                            ReadInt32(raw, ref pos), ReadByte(raw, ref pos));
+                    }
                 case "scale":
                     return Struct(("Scale", new Vector3(ReadSingle(raw, ref pos), ReadSingle(raw, ref pos), ReadSingle(raw, ref pos))),
                                   ("SheerRate", ReadSingle(raw, ref pos)), ("SheerAxis", ReadByte(raw, ref pos)));
@@ -746,40 +746,40 @@ namespace HP1.UEScript
                                   ("Rotation", new UERotator(ReadInt32(raw, ref pos), ReadInt32(raw, ref pos), ReadInt32(raw, ref pos))),
                                   ("PauseTime", ReadSingle(raw, ref pos)), ("Behavior", ReadByte(raw, ref pos)));
                 case "cutloc":
-                {
-                    int actor = ReadCompactIndex(raw, ref pos);
-                    return Struct(("locName", actor > 0 && byExport.TryGetValue(actor, out var a) ? a.Runtime : null),
-                                  ("alias", ReadString(raw, ref pos)));
-                }
+                    {
+                        int actor = ReadCompactIndex(raw, ref pos);
+                        return Struct(("locName", actor > 0 && byExport.TryGetValue(actor, out var a) ? a.Runtime : null),
+                                      ("alias", ReadString(raw, ref pos)));
+                    }
                 case "cutcast":
-                {
-                    int actor = ReadCompactIndex(raw, ref pos);
-                    return Struct(("actorName", actor > 0 && byExport.TryGetValue(actor, out var a) ? a.Runtime : null),
-                                  ("alias", ReadString(raw, ref pos)), ("nCurAction", ReadInt32(raw, ref pos)),
-                                  ("fNextActionTime", ReadSingle(raw, ref pos)), ("bWaiting", ReadBool(raw, ref pos)),
-                                  ("strWaitingFor", ReadString(raw, ref pos)), ("bFinished", ReadBool(raw, ref pos)));
-                }
+                    {
+                        int actor = ReadCompactIndex(raw, ref pos);
+                        return Struct(("actorName", actor > 0 && byExport.TryGetValue(actor, out var a) ? a.Runtime : null),
+                                      ("alias", ReadString(raw, ref pos)), ("nCurAction", ReadInt32(raw, ref pos)),
+                                      ("fNextActionTime", ReadSingle(raw, ref pos)), ("bWaiting", ReadBool(raw, ref pos)),
+                                      ("strWaitingFor", ReadString(raw, ref pos)), ("bFinished", ReadBool(raw, ref pos)));
+                    }
                 default:
-                {
-                    // Other structs — by DECLARATION, with the same UStruct::SerializeBin walk
-                    // (Core.dll.c:45567-45628) used for class defaults. A struct with an object
-                    // reference (or a nested struct) is not taken by that walk: an instance reference is a
-                    // map actor (byExport), while the shared walk returns package resource markers. Such a
-                    // struct takes the instance walk ReadStruct (D-85b; no shipped instance tag has one).
-                    object generic = UEObject.DecodeInstanceStruct(ownerClass, structName, raw);
-                    if (generic is not null) return generic;
-                    UStruct def = null;
-                    for (UClass c = ownerClass; c is not null && def is null; c = UEInterpreter.CanonicalSuper(c))
-                        foreach (var p in c.EnumerateFields<UStructProperty>())
-                            if (string.Equals(p.Struct?.Name?.ToString(), structName, StringComparison.OrdinalIgnoreCase))
-                            { def = p.Struct; break; }
-                    if (def is null)
-                        throw new NotSupportedException($"struct {structName} size={raw.Length}: no declaration on {ownerClass.Name}");
-                    object walked = ReadStruct(def, raw, ref pos, package, byExport);
-                    if (pos != raw.Length)
-                        throw new InvalidDataException($"struct {structName}: read {pos} of {raw.Length} bytes");
-                    return walked;
-                }
+                    {
+                        // Other structs — by DECLARATION, with the same UStruct::SerializeBin walk
+                        // (Core.dll.c:45567-45628) used for class defaults. A struct with an object
+                        // reference (or a nested struct) is not taken by that walk: an instance reference is a
+                        // map actor (byExport), while the shared walk returns package resource markers. Such a
+                        // struct takes the instance walk ReadStruct (D-85b; no shipped instance tag has one).
+                        object generic = UEObject.DecodeInstanceStruct(ownerClass, structName, raw);
+                        if (generic is not null) return generic;
+                        UStruct def = null;
+                        for (UClass c = ownerClass; c is not null && def is null; c = UEInterpreter.CanonicalSuper(c))
+                            foreach (var p in c.EnumerateFields<UStructProperty>())
+                                if (string.Equals(p.Struct?.Name?.ToString(), structName, StringComparison.OrdinalIgnoreCase))
+                                { def = p.Struct; break; }
+                        if (def is null)
+                            throw new NotSupportedException($"struct {structName} size={raw.Length}: no declaration on {ownerClass.Name}");
+                        object walked = ReadStruct(def, raw, ref pos, package, byExport);
+                        if (pos != raw.Length)
+                            throw new InvalidDataException($"struct {structName}: read {pos} of {raw.Length} bytes");
+                        return walked;
+                    }
             }
         }
 

@@ -288,25 +288,25 @@ namespace HP1.UEScript
                         throw new InvalidDataException(
                             $"FindPath actor {current.GetProp(PK.Name)} Paths[{slot}]={specIndex} outside ReachSpecs[{ReachSpecs.Count}]");
                     LevelReachSpecRef spec = ReachSpecs[specIndex];
-                // Shipped Logf pair (Engine.dll.c:99677-99684): BOTH endpoint
-                // names of every spec the walk considers, before any decision
-                // about it. Journalled rather than dropped — the port's Log is
-                // where shipped Logf sites land, and losing them would make the
-                // original's output and this one diverge for no stated reason.
-                // ... and that Logf pair is where the original DIES on a spec with a None endpoint: Engine
-                // 0x1040264e..0x10402655 (`mov eax,[eax+4*edx+4]; add eax,0x20; mov eax,[eax]`) reads Start->Name
-                // with no null test, 0x1040267a..0x10402683 the same for End -> access violation at address 0x20.
-                // There is no behaviour to port past this point, so the port stops here too, saying why.
-                if (spec.StartExport == 0 || spec.EndExport == 0)
-                    throw new InvalidDataException(
-                        $"FindPath: {System.IO.Path.GetFileName(LoadedMapPath)} ReachSpec[{specIndex}] has a None endpoint "
-                        + $"(Start={spec.StartExport}, End={spec.EndExport}; a path node deleted in the editor without "
-                        + "rebuilding paths). The original game crashes here (access violation in APawn::findPath, "
-                        + "Engine 0x1040264e): the map needs its paths rebuilt");
-                ActorsByExport.TryGetValue(spec.StartExport, out UEObject logStart);
-                ActorsByExport.TryGetValue(spec.EndExport, out UEObject logEnd);
-                Journal?.Invoke($"find_path_spec startname={logStart?.GetProp(PK.Name) ?? "None"}"
-                    + $" endname={logEnd?.GetProp(PK.Name) ?? "None"}");
+                    // Shipped Logf pair (Engine.dll.c:99677-99684): BOTH endpoint
+                    // names of every spec the walk considers, before any decision
+                    // about it. Journalled rather than dropped — the port's Log is
+                    // where shipped Logf sites land, and losing them would make the
+                    // original's output and this one diverge for no stated reason.
+                    // ... and that Logf pair is where the original DIES on a spec with a None endpoint: Engine
+                    // 0x1040264e..0x10402655 (`mov eax,[eax+4*edx+4]; add eax,0x20; mov eax,[eax]`) reads Start->Name
+                    // with no null test, 0x1040267a..0x10402683 the same for End -> access violation at address 0x20.
+                    // There is no behaviour to port past this point, so the port stops here too, saying why.
+                    if (spec.StartExport == 0 || spec.EndExport == 0)
+                        throw new InvalidDataException(
+                            $"FindPath: {System.IO.Path.GetFileName(LoadedMapPath)} ReachSpec[{specIndex}] has a None endpoint "
+                            + $"(Start={spec.StartExport}, End={spec.EndExport}; a path node deleted in the editor without "
+                            + "rebuilding paths). The original game crashes here (access violation in APawn::findPath, "
+                            + "Engine 0x1040264e): the map needs its paths rebuilt");
+                    ActorsByExport.TryGetValue(spec.StartExport, out UEObject logStart);
+                    ActorsByExport.TryGetValue(spec.EndExport, out UEObject logEnd);
+                    Journal?.Invoke($"find_path_spec startname={logStart?.GetProp(PK.Name) ?? "None"}"
+                        + $" endname={logEnd?.GetProp(PK.Name) ?? "None"}");
                     if (!ActorsByExport.TryGetValue(spec.StartExport, out UEObject specStart)
                         || !ActorsByExport.TryGetValue(spec.EndExport, out UEObject specEnd))
                         throw new InvalidDataException(

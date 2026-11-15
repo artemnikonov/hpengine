@@ -36,7 +36,8 @@ namespace HP1.UEScript
         {
             if (o?.Class == null || o.Destroyed) return false;
             if (baseClass != null && !UEClassRegistry.Shared.IsChildOfClass(o.Class, baseClass)) return false;
-            if (tag != null) {
+            if (tag != null)
+            {
                 var at = o.GetProp(PK.Tag);
                 string atName = at is UEName un ? un.Value : at?.ToString();
                 if (string.IsNullOrEmpty(atName)
@@ -47,7 +48,8 @@ namespace HP1.UEScript
         public override bool MoveNext(UEInterpreter interp, UEFrame frame)
         {
             if (_items != null)
-                while (_index < _items.Count) {
+                while (_index < _items.Count)
+                {
                     var o = _items[_index++];
                     if (!Matches(o, _baseClass, _tag)) continue;
                     interp.WriteLValue(frame, LoopVar, o);
@@ -76,7 +78,8 @@ namespace HP1.UEScript
         public override bool MoveNext(UEInterpreter interp, UEFrame frame)
         {
             if (_items != null)
-                while (_index < _items.Count) {
+                while (_index < _items.Count)
+                {
                     var o = _items[_index++];
                     if (!UEAllActorsIterator.Matches(o, _baseClass, null) || !_test(o)) continue;
                     interp.WriteLValue(frame, LoopVar, o);
@@ -225,9 +228,11 @@ namespace HP1.UEScript
         {
             // Out-params in arg order: 1st=Actor, 2nd=HitLocation, 3rd=HitNormal.
             UELValueRef? aRef = LoopVar, locRef = null, normRef = null;
-            if (OutRefs != null) {
+            if (OutRefs != null)
+            {
                 int seen = 0;
-                for (int i = 0; i < OutRefs.Count; i++) {
+                for (int i = 0; i < OutRefs.Count; i++)
+                {
                     if (!OutRefs[i].HasValue) continue;
                     if (seen == 0) aRef = OutRefs[i];
                     else if (seen == 1) locRef = OutRefs[i];
@@ -235,10 +240,11 @@ namespace HP1.UEScript
                     seen++;
                 }
             }
-            if (_hits != null && _index < _hits.Count) {
+            if (_hits != null && _index < _hits.Count)
+            {
                 var h = _hits[_index++];
-                if (aRef.HasValue)    interp.WriteLValue(frame, aRef.Value,    h.Actor);
-                if (locRef.HasValue)  interp.WriteLValue(frame, locRef.Value,  h.HitLoc);
+                if (aRef.HasValue) interp.WriteLValue(frame, aRef.Value, h.Actor);
+                if (locRef.HasValue) interp.WriteLValue(frame, locRef.Value, h.HitLoc);
                 if (normRef.HasValue) interp.WriteLValue(frame, normRef.Value, h.HitNorm);
                 return true;
             }
