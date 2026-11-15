@@ -53,10 +53,22 @@ namespace HP1.UEScript
         }
 
         // Lines for the game's log: the port's script overrides whose function the loaded scripts (a mod's) do not have,
-        // so the override does not apply there (UEPortScriptOverrides.AbsentTargets). Text only, no behaviour.
-        public static List<string> ScriptOverrideWarnings() =>
-            HP1.UEScript.UEPortScriptOverrides.AbsentTargets()
-                .Select(t => $"{t.Class}.{t.Function} is not in the loaded scripts: the port's override of it does not apply").ToList();
+        // so the override does not apply there (UEPortScriptOverrides.AbsentTargets), and those whose function in the
+        // install's scripts is not the shipped one, so the override hides what a mod did to it (ChangedTargets).
+        // Text only, no behaviour; a package that cannot be read is named, not hashed.
+        public static List<string> ScriptOverrideWarnings()
+        {
+            var unhashed = new List<string>();
+            return HP1.UEScript.UEPortScriptOverrides.AbsentTargets()
+                .Select(t => $"{t.Class}.{t.Function} is not in the loaded scripts: the port's override of it does not apply")
+                .Concat(HP1.UEScript.UEPortScriptOverrides.ChangedTargets(null, unhashed)
+                    .Select(t => $"{t.Class}.{t.Function} differs from the shipped game's function (a mod's scripts): the port's override of it still applies, so the mod's change to it may not take effect"))
+                .Concat(unhashed.Select(u => $"{u} (the package could not be read, its functions were not compared with the shipped game's)"))
+                .Concat(HP1.UEScript.UEPortScriptOverrides.ReleaseChangedTargets() is { Count: > 0 } release
+                    ? new[] { $"this modified re-release changes {release.Count} functions the port overrides ({string.Join(", ", release)}): the port's overrides of them apply, so the re-release's changes to them do not take effect" }
+                    : Array.Empty<string>())
+                .ToList();
+        }
 
         // forceSurfaceLightmapsInFrame — the game always enables per-frame surface lightmaps
         // and publishes the world static before the post-load frame (RunOwedLoadFrame). A test harness passes
@@ -75,7 +87,7 @@ namespace HP1.UEScript
             UELevelRuntime.AppInit(systemDir, configStore);
             foreach (string name in CorePackages)
             {
-                string path = UEInstallPath.File(Path.Combine(systemDir, name + ".u"));
+                string path = UEInstallPath.ScriptPackageFile(gameRoot, name);
                 if (path is not null) UEClassRegistry.Shared.GetOrLoadPackage(path);
             }
             if (stops?.PackagesLoaded is { } afterPackages && !afterPackages(interp)) return null;
@@ -137,6 +149,32 @@ namespace HP1.UEScript
             Interp.Invoke(victim, Interp.FindEventFunction(victim, "KillHarry")
                 ?? throw new System.IO.InvalidDataException("KillPlayerProbe: the player has no KillHarry"), true);
             return victim.GetProp(PK.Name)?.ToString();
+        }
+        // Menu click probe (window script verb `click <text>`): the control of the open menu book page whose Text is the
+        // given one gets Notify(DE_Click = 2), the call UWindowButton.Click makes for a mouse click (no cursor position
+        // involved). Returns "<page class>.<control name>"; when the page has no such control, "NO SUCH CONTROL" and the
+        // texts the page does have.
+        public string MenuClickProbe(string text)
+        {
+            UEObject page = (Runtime.ViewportConsole?.GetProp("menuBook") as UEObject)?.GetProp("curPage") as UEObject;
+            var texts = new List<string>();
+            UEObject Find(UEObject w, int depth)
+            {
+                for (UEObject c = w?.GetProp("FirstChildWindow") as UEObject; c is not null && depth < 6; c = c.GetProp("NextSiblingWindow") as UEObject)
+                {
+                    if (UEInterpreter.ClassIsA(c.Class, "UWindowDialogControl"))
+                    {
+                        if (string.Equals(c.GetProp("Text")?.ToString(), text, StringComparison.OrdinalIgnoreCase)) return c;
+                        texts.Add(c.GetProp("Text")?.ToString());
+                    }
+                    if (Find(c, depth + 1) is UEObject deeper) return deeper;
+                }
+                return null;
+            }
+            if (Find(page, 0) is not UEObject control)
+                return $"NO SUCH CONTROL on {page?.Class?.Name.ToString() ?? "no page"}; it has: {string.Join(" | ", texts)}";
+            Interp.Invoke(control, Interp.FindGlobalFunction(control, "Notify"), (byte)2);
+            return $"{page.Class?.Name}.{control.GetProp(PK.Name)}";
         }
         // Snapshot probe (the live original probe's `causeevent <Tag>` exec): Trigger(player, player)
         // on every actor whose Tag is the name, in actor-list order. Not a console command of the port (UEConsoleCommand).

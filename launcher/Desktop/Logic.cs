@@ -6,8 +6,10 @@ using System.Text.Json;
 
 namespace HPEngine.Launcher;
 
-// A matching engine family does not identify a disc's region. In particular, the Nordic multilingual CD uses
-// the same native/script hashes as the family called UK 1.1. Its language files differ from that reference manifest.
+// The installed edition's name and tier as the Game card shows them. A matching engine family does not identify a disc's
+// region: the Nordic multilingual CD uses the same native/script hashes as the family called UK 1.1, and its language
+// files differ from that reference manifest. The title stays GameTitle.For(edition) (by the DLL set). Desktop only: the
+// macOS Launcher has no language chooser and shows the HP1Setup edition text as it is.
 public static class EditionLabel
 {
     public sealed record Display(string Name, string Tier, string Detail);
@@ -22,14 +24,14 @@ public static class EditionLabel
         bool nordic = codes.SetEquals(new[] { "dan", "eng", "fin", "nor", "swe" });
         string detail = (string.IsNullOrEmpty(name) ? "" : "Engine family: " + name + ". ")
             + "Languages: " + string.Join(", ", languages.Select(l => l.Label)) + ".";
-        // Keep the engine's identity/support decisions intact. The UI reports the manifest difference without
+        // The engine's identity/support decisions stay intact. The UI reports the manifest difference without
         // implying that a genuine multilingual disc was patched. This does not authenticate an exact disc image.
         return new(nordic ? "Nordic multilingual data" : "Multilingual game data",
             nordic && name == "UK 1.1" && tier == "modified" ? "different data" : tier, detail);
     }
 }
 
-public enum SetupKind { Step, Progress, Error, Warning, Edition, Done, Malformed }
+public enum SetupKind { Step, Progress, Error, Warning, Edition, Report, Done, Malformed }
 
 // One line of HP1Setup's stdout (launcher/HP1Setup/Program.cs header). Key: ERROR/WARNING key, EDITION id, STEP key;
 // Text: the player's text, DONE root. Malformed: Text holds the reason, Raw the line; the caller shows it, never drops it.
@@ -61,12 +63,31 @@ public static class SetupProtocol
                 if (k <= 0 || k == arg.Length - 1) return Bad($"{cmd} without '<key> <text>'");
                 return new(cmd == "ERROR" ? SetupKind.Error : cmd == "WARNING" ? SetupKind.Warning : SetupKind.Edition,
                            arg[..k], arg[(k + 1)..], -1, 0, line);
+            case "REPORT":   // a new-issue link for an unrecognised release (UEEdition.ReportUrl)
+                return arg.StartsWith("https://", StringComparison.Ordinal) ? new(SetupKind.Report, "", arg, -1, 0, line) : Bad("REPORT without an https link");
             case "DONE":
                 return arg.Length == 0 ? Bad("DONE without a root") : new(SetupKind.Done, "", arg, -1, 0, line);
             default:
                 return Bad("unknown line");
         }
     }
+}
+
+// The game's title by installed edition (HP1Setup's EDITION text "<name>: <tier>", kept in the marker; names: HP1Setup Program.cs
+// Editions and its unlisted-set names), by the DLL set the name stands for (UEEdition.Sets): US 1.53 and the two re-releases on
+// its DLLs (City, Modded) are "Sorcerer's Stone", UK 1.1 "Philosopher's Stone"; the Russian EA release keeps the title the Launcher
+// always showed (Philosopher's). A game not identified (nothing installed, a game folder without the Launcher's marker, a
+// "Modified release" or "Unknown release", whose text does not say which DLL set it has): the neutral "Harry Potter".
+// Same in Launcher.swift gameTitle.
+public static class GameTitle
+{
+    public const string Neutral = "Harry Potter", Philosopher = "Harry Potter and the Philosopher's Stone", Sorcerer = "Harry Potter and the Sorcerer's Stone";
+    public static string For(string edition) => edition == null ? Neutral : edition.Split(": ")[0] switch
+    {
+        "US 1.53" or "City re-release" or "Modded re-release" => Sorcerer,
+        "UK 1.1" or "RU EA" => Philosopher,
+        _ => Neutral,
+    };
 }
 
 public sealed record ModEntry(string Name, bool Enabled, bool Present);
@@ -319,7 +340,8 @@ public static class DataDir
             OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 }
 
-public sealed record Release(string Version, string Page);
+// Archive/Sig: download URLs of this platform's release archive and its signature (null: the release has none, the page opens).
+public sealed record Release(string Version, string Page, string Archive = null, string Sig = null);
 
 public static class Updates
 {
@@ -355,7 +377,7 @@ public static class Updates
 
     // The newest release in the feed (GitHub lists newest first) this build may take, if newer than `current`: drafts
     // never; pre-releases only for a pre-release build. Throws JsonException/InvalidOperationException on a bad feed.
-    public static Release Pick(string json, string current)
+    public static Release Pick(string json, string current, string archiveName = null)
     {
         using var doc = JsonDocument.Parse(json);
         foreach (var rel in doc.RootElement.EnumerateArray())
@@ -364,7 +386,11 @@ public static class Updates
             if (Flag("draft") || (Flag("prerelease") && !current.Contains('-'))) continue;
             if (!rel.TryGetProperty("tag_name", out var tag) || !rel.TryGetProperty("html_url", out var page)) continue;
             var v = tag.GetString().TrimStart('v');
-            return Older(current, v) ? new Release(v, page.GetString()) : null;
+            if (!Older(current, v)) return null;
+            string Asset(string n) => n != null && rel.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array
+                ? assets.EnumerateArray().Where(a => a.TryGetProperty("name", out var an) && an.GetString() == n)
+                    .Select(a => a.TryGetProperty("browser_download_url", out var u) ? u.GetString() : null).FirstOrDefault() : null;   // no url: absent
+            return new Release(v, page.GetString(), Asset(archiveName), Asset(archiveName == null ? null : archiveName + ".sig"));
         }
         return null;
     }

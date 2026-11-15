@@ -623,8 +623,8 @@ namespace HP1.UEScript
         //   and hands the remainder to physFalling THIS tick; a flying exit
         //   sets Velocity=(0,0,AirSpeed)/Acceleration=(0,0,AccelRate) and
         //   hands the remainder to physFlying (136141-136158, a branch added by
-        //   KnowWonder); PHYS_Projectile returns; PHYS_Swimming is a loud
-        //   STOP; ANY OTHER mode (Walking, Flying set by a HitWall handler,
+        //   KnowWonder); PHYS_Projectile returns; PHYS_Swimming goes to
+        //   startSwimming (UELevelRuntime.PhysSwimming.cs); ANY OTHER mode (Walking, Flying set by a HitWall handler,
         //   None…) continues into the auto-jump and step-down below —
         //   shipped has no «Physics≠Walking → return» here (0x103e9222 →
         //   0x103e9293); the bAutoJump walking-player ledge jump is ported
@@ -934,9 +934,14 @@ namespace HP1.UEScript
                 // Other modes (except 2/6 above and 3 below) do NOT exit: shipped goes on
                 // to auto-jump and step-down (0x103e9222 → 0x103e9293, 136159-136176).
             }
-            if (UEInterpreter.ToInt(actor.GetProp(PK.Physics)) == 3)
-                throw new NotSupportedException(
-                    $"physWalking startSwimming reached (Engine.dll.c:136170) actor={actor.GetProp(PK.Name)} — port the shipped swim entry before using it");
+            // 0x103e922a..0x103e927b: IsA(Pawn) && Physics == 3 -> startSwimming(Velocity, substep, remaining,
+            // Iterations); return.
+            if (UEInterpreter.ClassIsA(actor.Class, "Pawn") && UEInterpreter.ToInt(actor.GetProp(PK.Physics)) == 3)
+            {
+                StartSwimming(interp, actor, UEInterpreter.AsVector3(actor.GetProp(PK.Velocity)), walk.Sub, walk.Remaining,
+                    walk.Iteration);
+                return WalkGateResult.Return;
+            }
             // bAutoJump BRANCH (Engine.dll.c:136196-136305) — UELevelRuntime.Trajectory.cs,
             // matched bit for bit against the real physWalking fragment.
             // Armed by the "Auto Jump" options menu checkbox (PlayerPawn.AutoJump); the flag
@@ -1074,9 +1079,14 @@ namespace HP1.UEScript
                     UEObject floorActor = time < 1f ? hitActor ?? level : null;
                     if (!ReferenceEquals(floorActor, actor.GetProp(PK.Base) as UEObject))
                         SetBase(interp, actor, floorActor, notify: true);
-                    if (UEInterpreter.ToInt(actor.GetProp(PK.Physics)) == 3)
-                        throw new NotSupportedException(
-                            $"physWalking startSwimming reached (Engine.dll.c:136377) actor={actor.GetProp(PK.Name)} — port the shipped swim entry before using it");
+                    // 0x103e9e7c..0x103e9ed5: IsA(Pawn) && Physics == 3 -> startSwimming(Velocity, substep, remaining,
+                    // Iterations); return.
+                    if (UEInterpreter.ClassIsA(actor.Class, "Pawn") && UEInterpreter.ToInt(actor.GetProp(PK.Physics)) == 3)
+                    {
+                        StartSwimming(interp, actor, UEInterpreter.AsVector3(actor.GetProp(PK.Velocity)), walk.Sub, walk.Remaining,
+                            walk.Iteration);
+                        return WalkGateResult.Return;
+                    }
                 }
             }
 
@@ -1168,9 +1178,14 @@ namespace HP1.UEScript
             {
                 if (slipMove)
                     WalkMove(interp, actor, nonNormal, walk.Hit);
-                if (UEInterpreter.ToInt(actor.GetProp(PK.Physics)) == 3)
-                    throw new NotSupportedException(
-                        $"physWalking startSwimming reached (Engine.dll.c:136458) actor={actor.GetProp(PK.Name)} — port the shipped swim entry before using it");
+                // 0x103e9e7c..0x103e9ed5: IsA(Pawn) && Physics == 3 -> startSwimming(Velocity, substep, remaining,
+                // Iterations); return.
+                if (UEInterpreter.ClassIsA(actor.Class, "Pawn") && UEInterpreter.ToInt(actor.GetProp(PK.Physics)) == 3)
+                {
+                    StartSwimming(interp, actor, UEInterpreter.AsVector3(actor.GetProp(PK.Velocity)), walk.Sub, walk.Remaining,
+                        walk.Iteration);
+                    return WalkGateResult.Return;
+                }
             }
             return WalkGateResult.Continue;
         }

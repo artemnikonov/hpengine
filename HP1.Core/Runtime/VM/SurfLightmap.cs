@@ -169,15 +169,16 @@ namespace HP1.UEScript
         //     0x10b0ca70), 8,12 -> 0x10b05710 (Spot), 13 -> 0x10b05dc0
         //     (NonIncidence), 17 -> 0x10b05ae0 (Cylinder), 5 -> 0x10b04360
         //     (SlowWave), 16 -> 0x10b05330 (Interference);
-        //   NOT PORTED (loud refusal): 4 -> 0x10b03bc0, 6 -> 0x10b04700,
-        //     9 -> 0x10b04aa0, 10 -> 0x10b04ea0, 18 -> 0x10b03f80, 14 -> 0x10b06090
-        //     (Shell). Census (41 maps, --dump-lightworld + defaults of
+        //   6 -> 0x10b04700 (FastWave = SlowWave body, sin scale 512);
+        //   4 -> 0x10b03bc0 (Searchlight), 18 -> 0x10b03f80 (Rotor), 14 -> 0x10b06090 (Shell), 9 -> 0x10b04aa0 (Shock), 10 -> 0x10b04ea0 (Disco);
+        //   every effect 0..19 now has its filler (4/6/9/10/14/18 ported 2026-11-13 for mods, each judged
+        //     under unicorn); an index outside the table is a loud refusal. Census (41 maps, --dump-lightworld + defaults of
         //     363 placed classes + .uc defaults): NO carriers of 4/6/9/10/14/18;
         //     5 — 42 lights (Lev2_fire1/Fire2, Lev3_Dungeon, Lev3_Quid2,
         //     Lev4_Sneak2), 16 — 3 (Lev2_HogFront*).
         // Effects 1/2/3 use the radial body but are modulated per texel
         // during merge (Merge, FUN_10b03430).
-        enum Filler { Radial, Spot, NonIncidence, Cylinder, SlowWave, Interference, Unported }
+        enum Filler { Radial, Spot, NonIncidence, Cylinder, SlowWave, FastWave, Interference, Searchlight, Rotor, Shell, Shock, Disco, Unported }
 
         static Filler FillerFor(byte effect)
         {
@@ -188,24 +189,19 @@ namespace HP1.UEScript
                 case 13: return Filler.NonIncidence;
                 case 17: return Filler.Cylinder;
                 case 5: return Filler.SlowWave;
+                case 6: return Filler.FastWave;
+                case 4: return Filler.Searchlight;
+                case 18: return Filler.Rotor;
+                case 14: return Filler.Shell;
+                case 9: return Filler.Shock;
+                case 10: return Filler.Disco;
                 case 16: return Filler.Interference;
                 default: return Filler.Unported;
             }
         }
 
-        static string UnportedFiller(byte effect)
-        {
-            switch (effect)
-            {
-                case 4: return "0x10b03bc0 (Searchlight)";
-                case 6: return "0x10b04700 (FastWave)";
-                case 9: return "0x10b04aa0 (Shock)";
-                case 10: return "0x10b04ea0 (Disco)";
-                case 14: return "0x10b06090 (Shell)";
-                case 18: return "0x10b03f80 (Rotor)";
-                default: return "outside table 0x10b38110 (shipped -> writes 0, R:19262; not present in the data)";
-            }
-        }
+        static string UnportedFiller(byte effect) =>
+            "outside table 0x10b38110 (shipped -> writes 0, R:19262; not present in the data)";
 
         // Whether the LightEffect has a ported filler. Effects that need
         // frame state (NeedsFrame) are also "supported", but FillLight
@@ -219,9 +215,9 @@ namespace HP1.UEScript
             return f != Filler.Unported;
         }
 
-        // The effect reads frame state: per-texel modulation 1/2/3
-        // (FGlobalRandoms tables) or time/phase of fillers 5/16.
-        public static bool NeedsFrame(byte effect) => effect == 1 || effect == 2 || effect == 3 || effect == 5 || effect == 16;
+        // The effect reads frame state: per-texel modulation 1/2/3 (FGlobalRandoms tables) or the time/phase of the
+        // fillers 4 Searchlight, 5 SlowWave, 6 FastWave, 9 Shock, 10 Disco, 16 Interference, 18 Rotor.
+        public static bool NeedsFrame(byte effect) => effect == 1 || effect == 2 || effect == 3 || effect == 4 || effect == 5 || effect == 6 || effect == 9 || effect == 10 || effect == 16 || effect == 18;
 
         // INVERSE SQRT VIA GMath TABLES — as built by the static
         // FGlobalMath constructor (Core.dll.c:47319, tail of FUN_1014e350(-0.5)):
@@ -443,10 +439,24 @@ namespace HP1.UEScript
             if (illum == null || illum.Length < rw * rh) _illum = illum = new byte[Math.Max(rw * rh, 1024)];
             Array.Clear(illum, 0, rw * rh);
 
-            if (kind == Filler.SlowWave || kind == Filler.Interference)
-            {
+            bool own = true;
+            if (kind == Filler.Disco)
+                FillDisco(illum, rw, W, in bs, in L, radius, inner, field44, table, mask, col0, col1, row0, row1, fx);
+            else if (kind == Filler.Shock)
+                FillShock(illum, rw, W, in bs, in L, radius, inner, field44, table, mask, col0, col1, row0, row1, fx);
+            else if (kind == Filler.Shell)
+                FillShell(illum, rw, W, in bs, in L, radius, mask, col0, col1, row0, row1);
+            else if (kind == Filler.Rotor)
+                FillRotor(illum, rw, W, in bs, in L, radius, inner, field44, table, mask, col0, col1, row0, row1, fx);
+            else if (kind == Filler.Searchlight)
+                FillSearchlight(illum, rw, W, in bs, in L, radius, inner, field44, table, mask, col0, col1, row0, row1, fx);
+            else if (kind == Filler.SlowWave || kind == Filler.FastWave || kind == Filler.Interference)
                 FillWave(illum, rw, W, in bs, in L, radius, inner, field44, table, mask,
-                         col0, col1, row0, row1, fx, kind == Filler.Interference);
+                         col0, col1, row0, row1, fx, kind == Filler.Interference,
+                         kind == Filler.FastWave ? FastWaveScale : SlowWaveScale);
+            else own = false;
+            if (own)
+            {
                 Merge(acc, W, illum, col0, col1, row0, row1, stepR, stepG, stepB, L.DarkLight, L.Effect, fx);
                 return true;
             }
@@ -576,6 +586,10 @@ namespace HP1.UEScript
         //                   v = (((cos[q] + 1)·0.5)·mask)·f          0x10b055bd-0x10b05663
         //     byte = low byte of float(v + 2^23)                     fadd 0x10b385e0
         //   D += US per column, row += VS                            0x10b04675-0x10b046ea
+        // FastWave (effect 6, FUN_10b04700) is SlowWave's body instruction for instruction (291 instructions, the same
+        // out-of-body targets) except the fmul operand at instruction 219: [0x10b38638] = 512.0 instead of
+        // [0x10b38634] = 1024.0.
+        static readonly float SlowWaveScale = 1024f, FastWaveScale = 512f;
         static readonly float PhaseToRad = BitConverter.Int32BitsToSingle(0x38c90fdb); // 0x10b38100 = 2π/65536
         static HP1.Core.X87Ext R24(HP1.Core.X87Ext v) => HP1.Core.X87Ext.Round24(v);
         static readonly float InvTwoPi = BitConverter.Int32BitsToSingle(0x3e22f983);   // 0x10b385f0 = 1/(2π)
@@ -590,14 +604,15 @@ namespace HP1.UEScript
                 * HP1.Core.X87Ext.From(InvTwoPi)).ToFloat();
         }
 
-        static void FillWave(byte[] illum, int rw, int W, in Basis bs, in Light L, float radius, float inner,
-                             float field44, float[] table, float[] mask,
-                             int col0, int col1, int row0, int row1, FrameFx fx, bool interference)
+        // THE WALK every own filler shares (Searchlight, Rotor, Shell, Shock, Disco, SlowWave/FastWave/Interference — each
+        // disassembly has the same frame): start point D = (US·c0) + ((VS·r0) + Start), minus Location; k = 4093/(R·R);
+        // per texel the shadow-mask byte, the filler's value (0 when it rejects the texel), then US per column and VS
+        // per row. Only the per-texel value differs between fillers (ITexel.At, which also counts the texels it lit).
+        interface ITexel { byte At(float px, float py, float pz, int mv, float k, ref long lit); }
+
+        static void Walk<T>(ref T texel, byte[] illum, int rw, int W, in Basis bs, in Light L, float radius, float[] mask,
+                            int col0, int col1, int row0, int row1, ref long texels) where T : struct, ITexel
         {
-            float local70 = (field44 * radius) / (radius - inner);
-            float t = L.Period != 0 ? (fx.TimeSeconds * 1048576f) / (float)L.Period : 0f;
-            int phaseT = unchecked((int)UEGlobalRandoms.FtolLow(t) + (L.Phase << 8));
-            float tf = interference ? MulIntFloat(phaseT, PhaseToRad) : 0f;   // fild; fmul [0x10b38100]
             float c0 = col0, r0 = row0;
             float ax = bs.UsX * c0, ay = bs.UsY * c0, az = bs.UsZ * c0;
             float bx = bs.VsX * r0, by = bs.VsY * r0, bz = bs.VsZ * r0;
@@ -605,42 +620,268 @@ namespace HP1.UEScript
             float dx = ax + cx, dy = ay + cy, dz = az + cz;
             float rx = dx - L.Pos.x, ry = dy - L.Pos.y, rz = dz - L.Pos.z;
             float k = 4093f / (radius * radius);
-            long nWave = 0;
+            long lit = 0;
             for (int j = row0; j < row1; j++)
             {
                 float px = rx, py = ry, pz = rz;
                 for (int i = col0; i < col1; i++)
                 {
                     int mv = mask == null ? NoShadowMask : (int)mask[j * W + i];
-                    float ss = (px * px + py * py) + pz * pz;
-                    int idx = unchecked((int)Fistp(ss * k));
-                    byte o = 0;
-                    if (idx < 0x1000 && mv != 0)
-                    {
-                        float f = local70 * table[idx];
-                        if ((uint)BitConverter.SingleToInt32Bits(f) >= 0x3f800000u) f = 1f;
-                        float w;
-                        if (!interference)
-                        {
-                            int q = unchecked((int)Fistp(FogMap.FastSqrt(ss) * 1024f));
-                            w = BrushCoords.SinAngle(unchecked(q - phaseT)) * 0.3f + 0.7f;
-                        }
-                        else
-                        {
-                            float xy = py * py + px * px;
-                            int q = unchecked((int)Fistp(InterferenceAngle(FogMap.FastSqrt(xy), pz, tf)));
-                            w = (BrushCoords.CosAngle(q) + 1f) * 0.5f;
-                        }
-                        nWave++;
-                        float v = (w * mv) * f + 8388608f;
-                        o = (byte)(BitConverter.SingleToInt32Bits(v) & 0xff);
-                    }
-                    illum[(j - row0) * rw + (i - col0)] = o;
+                    illum[(j - row0) * rw + (i - col0)] = texel.At(px, py, pz, mv, k, ref lit);
                     px += bs.UsX; py += bs.UsY; pz += bs.UsZ;
                 }
                 rx += bs.VsX; ry += bs.VsY; rz += bs.VsZ;
             }
-            if (nWave != 0) Interlocked.Add(ref WaveTexels, nWave);
+            if (lit != 0) Interlocked.Add(ref texels, lit);
+        }
+
+        // The timed fillers' prologue (FUN_10b0c9b0): local70 = (field44·R)/(R − inner); t = Period ? (TimeSeconds·2^20)/Period
+        // : 0; phaseT = _ftol(t) + (LightPhase << 8).
+        static float Local70(float field44, float radius, float inner) => (field44 * radius) / (radius - inner);
+        static int PhaseT(in Light L, FrameFx fx)
+        {
+            float t = L.Period != 0 ? (fx.TimeSeconds * 1048576f) / (float)L.Period : 0f;
+            return unchecked((int)UEGlobalRandoms.FtolLow(t) + (L.Phase << 8));
+        }
+        // idx = fistp(ss·k); idx >= 0x1000 (signed) or mask 0 -> rejected.
+        static bool InRange(float ss, float k, int mv, out int idx)
+        {
+            idx = unchecked((int)Fistp(ss * k));
+            return idx < 0x1000 && mv != 0;
+        }
+        // f = local70·table[idx]; bits of f >= 0x3f800000 (unsigned) -> 1.0.
+        static float Falloff(float local70, float[] table, int idx)
+        {
+            float f = local70 * table[idx];
+            return (uint)BitConverter.SingleToInt32Bits(f) >= 0x3f800000u ? 1f : f;
+        }
+        // byte = low byte of float(v + 2^23) (fadd 0x10b385e0).
+        static byte LowByte(float v) => (byte)(BitConverter.SingleToInt32Bits(v + 8388608f) & 0xff);
+
+        // SEARCHLIGHT (effect 4, FUN_10b03bc0) — from the DISASSEMBLY 0x10b03bc0..0x10b03f7f, PC24 (DrawWorld window).
+        // Prologue = FUN_10b0c9b0 (as FillWave): local70, table, phaseT, tf = (float)phaseT·2π/65536; then
+        // tf' = tf + π/2 (0x10b38610), k = 4093/(R·R), the start point D − Location as FillWave. Per texel (x, y, z):
+        //   a = appAtan2(x, y) (fpatan, args pushed as qwords, 0x10b03d9d..0x10b03db9), fadd tf' (24 bits),
+        //   fmul qword 4.0; m = appFmod(·, 8π qword 0x403921FB60000000) — exact remainder, kept unrounded in st0;
+        //   m < π (fcomp on the UNROUNDED m, 0x10b03dd7) or (float)m > 3π (0x10b03dee, equality passes) -> 0;
+        //   idx = fistp(((z² + y²) + x²)·k) (y², x² stored as floats first, 0x10b03dff..0x10b03e26);
+        //   idx >= 0x1000 (signed) or mask 0 -> 0;  f = local70·table[idx], bits >= 0x3f800000 -> 1.0;
+        //   q = fistp(float((float)m·65536·(1/2π)));  s = (sin[((q + 0x4000) >> 2) & 0x3fff] + 1)·0.5;
+        //   r2 = (y² + x²)·6e-5 (0x10b385e8); r2 < 1 -> s = r2·s;  byte = low byte of float((s·mask)·f + 2^23).
+        static readonly double EightPi = BitConverter.Int64BitsToDouble(0x403921FB60000000);  // pushed at 0x10b03da0
+        static readonly float HalfPi = BitConverter.Int32BitsToSingle(0x3fc90fdb);             // 0x10b38610
+        static readonly float PiF = BitConverter.Int32BitsToSingle(0x40490fdb);                // 0x10b385fc
+        static readonly float ThreePiF = BitConverter.Int32BitsToSingle(0x4116cbe4);           // 0x10b385f8
+        static readonly float SearchlightFalloff = BitConverter.Int32BitsToSingle(0x387ba882);  // 0x10b385e8 = 6e-5
+        public static long SearchlightTexels;
+
+        static void FillSearchlight(byte[] illum, int rw, int W, in Basis bs, in Light L, float radius, float inner,
+                                    float field44, float[] table, float[] mask, int col0, int col1, int row0, int row1, FrameFx fx)
+        {
+            var t = new SearchlightTexel { Local70 = Local70(field44, radius, inner), Table = table,
+                Tfp = MulIntFloat(PhaseT(in L, fx), PhaseToRad) + HalfPi };
+            Walk(ref t, illum, rw, W, in bs, in L, radius, mask, col0, col1, row0, row1, ref SearchlightTexels);
+        }
+
+        struct SearchlightTexel : ITexel
+        {
+            public float Local70, Tfp; public float[] Table;
+            public byte At(float px, float py, float pz, int mv, float k, ref long lit)
+            {
+                HP1.Core.X87Ext at = HP1.Core.UEX87Transcendental.Fpatan(HP1.Core.X87Ext.From((double)px), HP1.Core.X87Ext.From((double)py));
+                double a4 = (double)R24(R24(at + HP1.Core.X87Ext.From(Tfp)) * HP1.Core.X87Ext.From(4.0)).ToFloat();
+                double m = a4 % EightPi;
+                float mf = (float)m;
+                if (m < PiF || mf > ThreePiF) return 0;
+                float yy = py * py, xx = px * px;
+                if (!InRange(pz * pz + yy + xx, k, mv, out int idx)) return 0;
+                float f = Falloff(Local70, Table, idx);
+                int q = unchecked((int)Fistp(mf * 65536f * InvTwoPi));
+                float sv = (BrushCoords.CosAngle(q) + 1f) * 0.5f;
+                float r2 = (yy + xx) * SearchlightFalloff;
+                if (r2 < 1f) sv = r2 * sv;
+                lit++;
+                return LowByte((sv * mv) * f);
+            }
+        }
+
+        // ROTOR (effect 18, FUN_10b03f80) — from the DISASSEMBLY 0x10b03f80..0x10b0434a, PC24. Prologue as FillWave
+        // (local70 0x10b03f92..0x10b03fb0, t/phaseT 0x10b03fb3..0x10b03fef, tf = fild phaseT·[0x10b38100], k = 4093/(R·R)).
+        // Per texel (x, y, z): idx = fistp(float(SizeSquared·k)) (call 0x10b74510); idx >= 0x1000 or mask 0 -> 0;
+        //   f = local70·table[idx] clamped by bits; a = appAtan2(x, y) (0x10b0420d..0x10b0421f);
+        //   q = fistp(float(((a·6.0 qword [0x10b38620]) + tf)·65536·(1/2π)));  s = (sin[((q + 0x4000) >> 2)] + 1)·0.5;
+        //   r2 = (y² + x²)·1e-4 ([0x10b38618]); r2 < 1 -> s = (s·r2) + (1 − r2) (0x10b04292..0x10b0429e);
+        //   byte = low byte of float((s·mask)·f + 2^23).
+        static readonly float RotorFalloff = BitConverter.Int32BitsToSingle(0x38d1b717);   // 0x10b38618 = 1e-4
+        public static long RotorTexels;
+
+        static void FillRotor(byte[] illum, int rw, int W, in Basis bs, in Light L, float radius, float inner,
+                              float field44, float[] table, float[] mask, int col0, int col1, int row0, int row1, FrameFx fx)
+        {
+            var t = new RotorTexel { Local70 = Local70(field44, radius, inner), Table = table, Tf = MulIntFloat(PhaseT(in L, fx), PhaseToRad) };
+            Walk(ref t, illum, rw, W, in bs, in L, radius, mask, col0, col1, row0, row1, ref RotorTexels);
+        }
+
+        struct RotorTexel : ITexel
+        {
+            public float Local70, Tf; public float[] Table;
+            public byte At(float px, float py, float pz, int mv, float k, ref long lit)
+            {
+                if (!InRange((px * px + py * py) + pz * pz, k, mv, out int idx)) return 0;
+                float f = Falloff(Local70, Table, idx);
+                HP1.Core.X87Ext at = HP1.Core.UEX87Transcendental.Fpatan(HP1.Core.X87Ext.From((double)px), HP1.Core.X87Ext.From((double)py));
+                float ang = R24(R24(R24(R24(at * HP1.Core.X87Ext.From(6.0)) + HP1.Core.X87Ext.From(Tf)) * HP1.Core.X87Ext.From(65536f))
+                    * HP1.Core.X87Ext.From(InvTwoPi)).ToFloat();
+                int q = unchecked((int)Fistp(ang));
+                float sv = (BrushCoords.CosAngle(q) + 1f) * 0.5f;
+                float r2 = (py * py + px * px) * RotorFalloff;
+                if (r2 < 1f) sv = sv * r2 + (1f - r2);
+                lit++;
+                return LowByte((sv * mv) * f);
+            }
+        }
+
+        // SHELL (effect 14, FUN_10b06090) — from the DISASSEMBLY 0x10b06090..0x10b06364, PC24. Start point and
+        // k = 4093/(R·R) as FillWave; no local70, no time. Per texel (x, y, z):
+        //   idx = fistp(float(((y² + z²) + x²)·k)) (0x10b06252..0x10b06271); idx >= 0x1000 (signed) or mask 0 -> 0;
+        //   d = H[idx] − 0.1 ([0x10b38640]; H = the falloff table 0x10b43320 = _tableH); d < 0 -> −d (fchs);
+        //   v = 1 − d·10 ([0x10b38660]); 0 >= v -> 0 (fcomp 0.0 st1, 0x10b062ac..0x10b062bd);
+        //   byte = low byte of float(mask·v + 2^23).
+        static readonly float ShellCenter = BitConverter.Int32BitsToSingle(0x3dcccccd);   // 0x10b38640 = 0.1
+        public static long ShellTexels;
+
+        static void FillShell(byte[] illum, int rw, int W, in Basis bs, in Light L, float radius, float[] mask,
+                              int col0, int col1, int row0, int row1)
+        {
+            var t = new ShellTexel();
+            Walk(ref t, illum, rw, W, in bs, in L, radius, mask, col0, col1, row0, row1, ref ShellTexels);
+        }
+
+        struct ShellTexel : ITexel
+        {
+            public byte At(float px, float py, float pz, int mv, float k, ref long lit)
+            {
+                if (!InRange(py * py + pz * pz + px * px, k, mv, out int idx)) return 0;
+                float d = _tableH[idx] - ShellCenter;
+                if (d < 0f) d = -d;
+                float v = 1f - d * 10f;
+                if (!(0f < v)) v = 0f;
+                lit++;
+                return LowByte(mv * v);
+            }
+        }
+
+        // SHOCK (effect 9, FUN_10b04aa0) — from the DISASSEMBLY 0x10b04aa0..0x10b04e9f, PC24. Prologue as Rotor
+        // (local70, phaseT 0x10b04ab2..0x10b04b1a, k). Per texel: idx/f as Rotor (SizeSquared·k, 0x10b04ccd..0x10b04d1e);
+        //   n = _ftol(FastSqrt(SizeSquared)·8.0) ([0x10b38644], call 0x10b352c4, 0x10b04d28..0x10b04d61);
+        //   A = sin[(((n + 0x400) << 4) + phaseT) >> 2]·0.1 + 0.9; B = sin[((n << 5) − phaseT) >> 2]·0.1 + 0.9;
+        //   C = sin[((n >> 3) − phaseT) >> 2]·0.1 + 0.9 (sar: arithmetic); byte = low byte of float((((A·B)·C)·mask)·f + 2^23).
+        static readonly float ShockGain = BitConverter.Int32BitsToSingle(0x3f666666);      // 0x10b3863c = 0.9
+        public static long ShockTexels;
+
+        static float ShockTerm(int index) => BrushCoords.SinAngle(index) * ShellCenter + ShockGain;   // sin·0.1 + 0.9
+
+        static void FillShock(byte[] illum, int rw, int W, in Basis bs, in Light L, float radius, float inner,
+                              float field44, float[] table, float[] mask, int col0, int col1, int row0, int row1, FrameFx fx)
+        {
+            var t = new ShockTexel { Local70 = Local70(field44, radius, inner), Table = table, PhaseT = PhaseT(in L, fx) };
+            Walk(ref t, illum, rw, W, in bs, in L, radius, mask, col0, col1, row0, row1, ref ShockTexels);
+        }
+
+        struct ShockTexel : ITexel
+        {
+            public float Local70; public int PhaseT; public float[] Table;
+            public byte At(float px, float py, float pz, int mv, float k, ref long lit)
+            {
+                float ss = (px * px + py * py) + pz * pz;
+                if (!InRange(ss, k, mv, out int idx)) return 0;
+                float f = Falloff(Local70, Table, idx);
+                int n = unchecked((int)UEGlobalRandoms.FtolLow(FogMap.FastSqrt(ss) * 8f));
+                float a = ShockTerm(unchecked(((n + 0x400) << 4) + PhaseT));
+                float b = ShockTerm(unchecked((n << 5) - PhaseT));
+                float c = ShockTerm(unchecked((n >> 3) - PhaseT));
+                lit++;
+                return LowByte((((a * b) * c) * mv) * f);
+            }
+        }
+
+        // DISCO (effect 10, FUN_10b04ea0) — from the DISASSEMBLY 0x10b04ea0..0x10b0532f, PC24. Prologue as Rotor
+        // (local70 [ebp-0x7c], tf = fild phaseT·2π/65536 [ebp-0x70], k). Per texel: idx/f as Rotor; then
+        //   A1 = float(appAtan2(x, y)·11.0 qword [0x10b38650])  (0x10b0512d..0x10b05157);
+        //   A2 = float(appAtan2(FastSqrt(y² + x²), z)·11.0)       (0x10b0515a..0x10b051a8);
+        //   s_i = (sin[((fistp(float((tf + A_i)·65536·(1/2π))) + 0x4000) >> 2)] + 1)·0.5;
+        //   u = (s2 + s1) − s2·s1 (0x10b05237..0x10b05241); r2 = (y² + x²)·5e-5 ([0x10b38648]); r2 < 1 -> u = r2·u;
+        //   byte = low byte of float(((1 − u)·mask)·f + 2^23).
+        static readonly float DiscoFalloff = BitConverter.Int32BitsToSingle(0x3851b717);   // 0x10b38648 = 5e-5
+        public static long DiscoTexels;
+
+        static float DiscoLobe(float tf, float a)
+        {
+            int q = unchecked((int)Fistp((tf + a) * 65536f * InvTwoPi));
+            return (BrushCoords.CosAngle(q) + 1f) * 0.5f;
+        }
+
+        static void FillDisco(byte[] illum, int rw, int W, in Basis bs, in Light L, float radius, float inner,
+                              float field44, float[] table, float[] mask, int col0, int col1, int row0, int row1, FrameFx fx)
+        {
+            var t = new DiscoTexel { Local70 = Local70(field44, radius, inner), Table = table, Tf = MulIntFloat(PhaseT(in L, fx), PhaseToRad) };
+            Walk(ref t, illum, rw, W, in bs, in L, radius, mask, col0, col1, row0, row1, ref DiscoTexels);
+        }
+
+        struct DiscoTexel : ITexel
+        {
+            public float Local70, Tf; public float[] Table;
+            public byte At(float px, float py, float pz, int mv, float k, ref long lit)
+            {
+                if (!InRange((px * px + py * py) + pz * pz, k, mv, out int idx)) return 0;
+                float f = Falloff(Local70, Table, idx);
+                var eleven = HP1.Core.X87Ext.From(11.0);
+                float a1 = R24(HP1.Core.UEX87Transcendental.Fpatan(HP1.Core.X87Ext.From((double)px), HP1.Core.X87Ext.From((double)py)) * eleven).ToFloat();
+                float sq = FogMap.FastSqrt(py * py + px * px);
+                float a2 = R24(HP1.Core.UEX87Transcendental.Fpatan(HP1.Core.X87Ext.From((double)sq), HP1.Core.X87Ext.From((double)pz)) * eleven).ToFloat();
+                float s1 = DiscoLobe(Tf, a1), s2 = DiscoLobe(Tf, a2);
+                float u = (s2 + s1) - s2 * s1;
+                float r2 = (py * py + px * px) * DiscoFalloff;
+                if (r2 < 1f) u = u * r2;
+                lit++;
+                return LowByte(((1f - u) * mv) * f);
+            }
+        }
+
+        static void FillWave(byte[] illum, int rw, int W, in Basis bs, in Light L, float radius, float inner,
+                             float field44, float[] table, float[] mask,
+                             int col0, int col1, int row0, int row1, FrameFx fx, bool interference, float waveScale)
+        {
+            int phaseT = PhaseT(in L, fx);
+            var t = new WaveTexel { Local70 = Local70(field44, radius, inner), Table = table, PhaseT = phaseT,
+                Tf = interference ? MulIntFloat(phaseT, PhaseToRad) : 0f,   // fild; fmul [0x10b38100]
+                Interference = interference, WaveScale = waveScale };
+            Walk(ref t, illum, rw, W, in bs, in L, radius, mask, col0, col1, row0, row1, ref WaveTexels);
+        }
+
+        struct WaveTexel : ITexel
+        {
+            public float Local70, Tf, WaveScale; public int PhaseT; public bool Interference; public float[] Table;
+            public byte At(float px, float py, float pz, int mv, float k, ref long lit)
+            {
+                float ss = (px * px + py * py) + pz * pz;
+                if (!InRange(ss, k, mv, out int idx)) return 0;
+                float f = Falloff(Local70, Table, idx);
+                float w;
+                if (!Interference)
+                {
+                    int q = unchecked((int)Fistp(FogMap.FastSqrt(ss) * WaveScale));
+                    w = BrushCoords.SinAngle(unchecked(q - PhaseT)) * 0.3f + 0.7f;
+                }
+                else
+                {
+                    float xy = py * py + px * px;
+                    int q = unchecked((int)Fistp(InterferenceAngle(FogMap.FastSqrt(xy), pz, Tf)));
+                    w = (BrushCoords.CosAngle(q) + 1f) * 0.5f;
+                }
+                lit++;
+                return LowByte((w * mv) * f);
+            }
         }
 
         // (float)(n·c) with a single rounding, like `fild n; fmul c` at 24-bit

@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.3.0-beta — 2026-11-15
+
+New:
+
+- UK edition: the British release ("Philosopher's Stone") installs and plays with its own logo and British voice-over;
+  the launchers show the game's title by edition.
+- Large mod packs: Restored + Free Play starts its New Game route; 169 of its 170 maps load (`Entry` has no player
+  start, and the original stops on it too). Mods that bring their own classes inside a map or carry lists in placed
+  actors now load (were refused before).
+- Launcher self-update on Windows and Linux (signed, as on macOS). The Linux launcher offers to add HPEngine to Steam
+  (only while Steam is closed, with a backup).
+- An unrecognised release of the game still plays; the launcher now offers a one-click **Report** with the file hashes
+  so the release can be checked and added.
+- Any key skips the start-up splash screens, and Space turns a story-book page from the second page on once it has
+  been shown for 2 seconds; the first page and one-page stories turn by themselves (not original: in the original only
+  the hidden debug mode allows both). "Reset to defaults" of the keys also restores the gamepad's default buttons.
+- Travel to another map at a named spot (`Map#Portal`, used by some mods) works.
+- Swimming (not used by the original maps; for mods with water) is ported from the original engine.
+- All 20 light effects of the original renderer are ported (Searchlight, FastWave, Shock, Disco, Shell, Rotor were
+  missing; used by mods), each checked against the original code.
+- More script functions of the original engine are available to mods (colour arithmetic, actor iterators, property
+  text get/set, enum names, wind, warnings/errors).
+- Game language: the Windows/Linux launcher lists the languages in your game files (multilingual discs such as the
+  Nordic CD) and starts the game in the chosen one; the Nordic set is labelled as multilingual data of the UK 1.1 engine
+  family. Contributed by Rasmus Kemiläinen (ranpekemi).
+
+Fixed:
+
+- A save-slot picture in `Save/` that is not a valid BMP no longer crashes Start Game: the slot shows without
+  its picture, as in the original (issue #4).
+- Mouse capture returns after switching window mode or focus (macOS with several monitors, Steam Deck windowed).
+- Gamepad in Options: no double stop on a setting in the left column; a mouse click no longer flips the Controls page to
+  the keyboard view. The two gamepad hint lines on the Controls page are removed.
+- A missing texture or sound is logged and skipped like in the original instead of stopping the game; an unknown console
+  command answers like the original.
+- A thin crack of light along coplanar walls (Christmas Night mod; the same spot in Lev2_Inc_B) is gone.
+
 ## 0.2.0-beta — 2026-11-13
 
 **The project is renamed: OpenHP1 is now HPEngine.** Everything of 0.1.0 keeps working where it is, but 0.2.0 uses

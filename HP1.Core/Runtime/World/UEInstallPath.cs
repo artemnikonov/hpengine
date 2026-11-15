@@ -5,13 +5,14 @@
 // Lev2_Quid1 threw "TraceTexture: package SkyBox not found" on the Deck (D-22).
 // Exact path first (one stat, nothing else where the file system already ignores case); otherwise each component that
 // does not exist is matched OrdinalIgnoreCase in its parent directory. null when there is no such file (Dir: directory).
-// THE ONE OWNER of install file lookups.
+// THE ONE OWNER of install file lookups. Which file is package X: UEInstallPath.Packages.cs (HP1Setup links this
+// file alone).
 using System;
 using System.IO;
 
 namespace HP1.UEScript
 {
-    public static class UEInstallPath
+    public static partial class UEInstallPath
     {
         public static string File(string path)
         {

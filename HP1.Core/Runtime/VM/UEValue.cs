@@ -486,6 +486,13 @@ namespace HP1.UEScript
             return (c.X, c.Y, c.Z);
         }
 
+        // GetUnAxes (native 230, execGetUnAxes 0x1013dd80): axes of UnitCoords * R (yaw, pitch, roll steps inline).
+        public static (Vector3 X, Vector3 Y, Vector3 Z) GetUnAxes(UERotator r)
+        {
+            var c = CoordsMul(r);
+            return (c.X, c.Y, c.Z);
+        }
+
         public static void WriteLValue(UEFrame frame, UELValueRef lref, object value)
         {
             if (UEVmPool.Verify) { if (frame.PoolReleased) UEVmPool.LateRead(frame, "WriteLValue"); UEVmPool.CheckRef(lref); UEVmPool.CheckValue(value); }

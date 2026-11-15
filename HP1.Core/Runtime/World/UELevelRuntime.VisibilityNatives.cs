@@ -191,6 +191,50 @@ namespace HP1.UEScript
             return null;
         }
 
+        // ChildActors 305 (0x1040d990): the actor matches when `this` is on its Owner (+0x38) chain, the actor
+        // itself included (0x1040da89..0x1040da94). BasedActors 306 (0x1040db90): actor Base (+0x9c) == this
+        // (0x1040dc81..0x1040dc8b).
+        public object ChildActorsNative(UEInterpreter interp, UEFrame frame, object[] args)
+        {
+            UEObject self = frame.Context ?? frame.Object;
+            interp.PendingIterator = new UEActorWalkIterator(Actors, ClassArg(args, 0), a =>
+            {
+                for (UEObject o = a; o is not null; o = o.GetProp(PK.Owner) as UEObject)
+                    if (ReferenceEquals(o, self)) return true;
+                return false;
+            });
+            return null;
+        }
+
+        public object BasedActorsNative(UEInterpreter interp, UEFrame frame, object[] args)
+        {
+            UEObject self = frame.Context ?? frame.Object;
+            interp.PendingIterator = new UEActorWalkIterator(Actors, ClassArg(args, 0),
+                a => ReferenceEquals(a.GetProp(PK.Base) as UEObject, self));
+            return null;
+        }
+
+        // TouchingActors 307 (0x1040dd90): this->Touching[0..3] read live (0x1040de36..0x1040de76), empty slot skipped, IsA.
+        public object TouchingActorsNative(UEInterpreter interp, UEFrame frame, object[] args)
+        {
+            UEObject self = frame.Context ?? frame.Object;
+            interp.PendingIterator = new UEActorWalkIterator(self.TouchList(), ClassArg(args, 0), _ => true);
+            return null;
+        }
+
+        // ZoneActors 308 (0x1040ed10): IsInZone — actor Region.Zone (+0xa0) == its Level (+0x7c), i.e. the actor sits in
+        // the LevelInfo zone and counts for every zone, OR Region.Zone == this (0x1040edf4..0x1040ee0e).
+        public object ZoneActorsNative(UEInterpreter interp, UEFrame frame, object[] args)
+        {
+            UEObject self = frame.Context ?? frame.Object;
+            interp.PendingIterator = new UEActorWalkIterator(Actors, ClassArg(args, 0), a =>
+            {
+                object zone = (a.GetProp(PK.Region) as UEObject)?.GetProp(PK.Zone);
+                return ReferenceEquals(zone, a.GetProp(PK.Level)) || ReferenceEquals(zone, self);
+            });
+            return null;
+        }
+
         // ── Trace (277) and TraceActors (309): ONE WORLD FOR ALL FRONTENDS ──────
         //
         // The bodies below are the only owner (the authoritative actor set and the

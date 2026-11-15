@@ -156,11 +156,15 @@ namespace HP1.UEScript
             int length = data.Length;
             if (length < 0x36 || data[0] != (byte)'B' || data[1] != (byte)'M')
             {
-                // Not BMP: the PCX branch (0x10425e2b, first byte 0x0a) and the "unknown format" refusal are not
-                // reached by the campaign (scripts load .bmp).
-                throw new NotSupportedException(
-                    $"CreateTextureFromBMP {name}: the file is not a BMP — the PCX/unknown format branches "
-                    + "of EngineTextureFactory (0x10425e2b..0x1042649d) are not ported, §8");
+                // Not BMP (0x10425a88/0x10425a91 -> 0x10425e2b): PCX needs Length >= 0x80 and first byte 0x0a
+                // (0x10425e2b/0x10425e36); anything else -> 0x1042649d: Warn->Logf("Bad image format for texture
+                // import") (0x104dbd60), NULL. Players hit it with a broken Save\SGS file (issue #4).
+                if (length >= 0x80 && data[0] == 0x0a)
+                    throw new NotSupportedException(
+                        $"CreateTextureFromBMP {name}: PCX branch of EngineTextureFactory (0x10425e3f) not ported — "
+                        + "scripts load only .bmp, §8");
+                log?.Invoke("Bad image format for texture import");
+                return null;
             }
             int w = I32(data, 0x12), h = I32(data, 0x16);
             if ((w & (w - 1)) != 0 || (h & (h - 1)) != 0)

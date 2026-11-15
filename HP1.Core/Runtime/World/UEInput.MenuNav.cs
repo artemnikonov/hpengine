@@ -29,6 +29,11 @@
 //     UWindowSmallButton.Paint adds LookAndFeel.Button_DrawSmallButton, an empty body in UWindowWin95LookAndFeel): the
 //     folio's small cards on Harry's page (DisplayHarryPage clears their textures) and FEBook.DismissButton, the 10x10
 //     corner hot spot that closes the book (B / Escape does that);
+//   * a control whose class blanks an inherited drawing Paint with an empty script body is not a target:
+//     HPMenuOptionComboButton (the 12x10 arrow of every Options combo, Paint { return; } over UWindowButton.Paint) shows
+//     nothing of its own, and its row is already one stop on the combo's EditBox, whose click opens the same list. A
+//     clickable window that only inherits UWindowWindow's empty Paint is kept (no shipped one; a mod's hot spot its
+//     parent draws). Across the shipped FE pages and classes only the four combo arrows drop out;
 //   * not bDisabled;
 //   * a click at its centre reaches it: Root.FindWindowUnder(centre) (the script function the click path uses, through
 //     MessageClients) returns this window — so covered, pass-through and off-Root controls drop out;
@@ -248,6 +253,7 @@ namespace HP1.UEScript
                     float cx = x + UEInterpreter.AsFloat(w.GetProp("WinWidth")) / 2f, cy = y + UEInterpreter.AsFloat(w.GetProp("WinHeight")) / 2f;
                     if (HandlesClick(interp, w) && !UEInterpreter.ToBool(w.GetProp("bDisabled"))
                         && (!IsNotifyOnlyButton(interp, w) || (NotifiedWindowReadsIt(w) && ButtonDraws(interp, w)))
+                        && !PaintsNothing(interp, w)
                         && cx >= 0f && cy >= 0f && cx <= rootW && cy <= rootH
                         && ReferenceEquals(interp.Invoke(root, under, cx, cy), w))
                         found.Add((w, cx, cy));
@@ -334,6 +340,19 @@ namespace HP1.UEScript
             if (!string.IsNullOrEmpty(w.GetProp("Text") as string)) return true;
             foreach (string t in new[] { "UpTexture", "DownTexture", "OverTexture", "DisabledTexture" })
                 if (w.GetProp(t) is not null) return true;
+            return false;
+        }
+
+        // Its class blanks a drawing Paint: the most-derived Paint is an empty script body and overrides an inherited one
+        // that is not (HPMenuOptionComboButton's `return;` over UWindowButton.Paint). A clickable window that only inherits
+        // UWindowWindow's empty Paint (a hot spot its parent draws) never had a drawing to blank and stays a target.
+        internal static bool PaintsNothing(UEInterpreter interp, UEObject w)
+        {
+            if (interp.FindGlobalFunction(w, "Paint") is not UFunction paint || !UEInterpreter.IsEmptyScriptBody(paint)) return false;
+            for (UClass c = paint.Outer is UClass owner ? UEInterpreter.CanonicalSuper(owner) : null; c is not null; c = UEInterpreter.CanonicalSuper(c))
+                foreach (UFunction fn in c.EnumerateFields<UFunction>())
+                    if (string.Equals(fn.Name?.ToString(), "Paint", StringComparison.OrdinalIgnoreCase))
+                        return !UEInterpreter.IsEmptyScriptBody(fn);
             return false;
         }
 

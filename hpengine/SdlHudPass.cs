@@ -147,6 +147,11 @@ namespace HPEngine
             string key = (source == HudQuadSource.Glyph ? "font|" : "hud|") + path;
             if (_hudTex.TryGetValue(key, out nint t)) return t;
             UETextureSource.TextureData d = _src.Get(path);
+            if (d is not null && d.State == "EXPORTED_RGBA" && source != HudQuadSource.Glyph)
+            {
+                // Non-P8 tile: the same D3DDrv 0x100022c0 texels as in the world (Core UETextureSource.ReadDirect).
+                return _hudTex[key] = (nint)UploadExportedRgba(d);
+            }
             if (d is null || d.State != "EXPORTED" || d.Levels is null || d.Levels.Length == 0) { HudMissing++; _hudTex[key] = (nint)_hudWhite; return (nint)_hudWhite; }
             var (u, v, p8) = d.Levels[0];
             var rgba = new byte[u * v * 4];

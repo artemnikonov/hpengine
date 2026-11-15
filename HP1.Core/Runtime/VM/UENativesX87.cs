@@ -187,6 +187,68 @@ namespace HP1.UEScript
             return Ftol(Window ? X87Ext.Round24(q) : q);
         }
 
+        // ── v030 area B: Core math natives with no shipped call site (bodies from the disassembly) ──
+        // Every operation runs in X87Ext at the window's precision (RW); NaN/inf flow as on the FPU.
+
+        // execComplementEqual_FloatFloat 0x101390a0 (native 210, `~=`): fld A; fsub B; fcom 0.0f; C0 -> fchs;
+        // fcomp qword 0.0001 (0x1017efe8); C0 -> 1 else 0. Unordered sets C0 in both compares: NaN ~= x is true.
+        public static bool ComplementEqual(float a, float b)
+        {
+            X87Ext d = RW(E(a) - E(b));
+            if ((X87Ext.Fcom(d, X87Ext.From(0f)) & 1) != 0) d = -d;
+            return (X87Ext.Fcom(d, X87Ext.From(0.0001)) & 1) != 0;
+        }
+
+        // execSmerp 0x10139fd0 (native 248): a2 = α·α; h = a2·3.0f (0x1017eff4) − (a2·α + a2·α); fstp dword(A + (B − A)·h).
+        public static float Smerp(float alpha, float a, float b)
+        {
+            X87Ext a2 = RW(E(alpha) * E(alpha));
+            X87Ext t = RW(a2 * E(3f));
+            X87Ext a3 = RW(a2 * E(alpha));
+            X87Ext h = RW(t - RW(a3 + a3));
+            return RW(RW(RW(E(b) - E(a)) * h) + E(a)).ToFloat();
+        }
+
+        // execInvert 0x1013c8d0 (native 227): FCoords(0, X, Y, Z).Inverse() (0x1014e700), the axes written back.
+        // Inverse: RDet = 1.0f / ((Y.z·Z.x − Y.x·Z.z)·X.y + (Z.y·Y.x − Y.y·Z.x)·X.z + (Y.y·Z.z − Z.y·Y.z)·X.x) (fdivr,
+        // kept in the register). Each result axis is a row (a, b, c)·RDet, a from the register, b and c stored as dwords
+        // first; X' = row3, Y' = row2, Z' = row1 (stores 0x1014e74e..0x1014e842).
+        public static (Vector3 X, Vector3 Y, Vector3 Z) Invert(Vector3 x, Vector3 y, Vector3 z)
+        {
+            X87Ext P(float p, float q) => RW(E(p) * E(q));
+            X87Ext D(float p, float q, float r, float s) => RW(P(p, q) - P(r, s));
+            X87Ext det = RW(RW(RW(D(y.z, z.x, y.x, z.z) * E(x.y)) + RW(D(z.y, y.x, y.y, z.x) * E(x.z)))
+                + RW(D(y.y, z.z, z.y, y.z) * E(x.x)));
+            X87Ext rdet = Window ? X87Ext.Div24(E(1f), det) : X87Ext.Div64(E(1f), det);
+            Vector3 Row(X87Ext a, X87Ext b, X87Ext c) => new Vector3(RW(a * rdet).ToFloat(),
+                RW(E(b.ToFloat()) * rdet).ToFloat(), RW(E(c.ToFloat()) * rdet).ToFloat());
+            Vector3 r1 = Row(D(z.y, y.x, y.y, z.x), D(z.x, x.y, x.x, z.y), D(x.x, y.y, y.x, x.y));
+            Vector3 r2 = Row(D(y.z, z.x, z.z, y.x), D(z.z, x.x, x.z, z.x), D(x.z, y.x, y.z, x.x));
+            Vector3 r3 = Row(D(z.z, y.y, y.z, z.y), D(x.z, z.y, z.z, x.y), D(y.z, x.y, x.z, y.y));
+            return (r3, r2, r1);
+        }
+
+        // FCoords::OrthoRotation 0x1014ed10 (execOrthoRotation 0x1013e1b0, FCoords(0, X, Y, Z)). Its own scale
+        // C = qword [0x1017fa50] = 10430.37806021874 (NOT FVector::Rotation's 0x1017fa40). Yaw = _ftol(appAtan2(X.y, X.x)·C);
+        // Pitch = _ftol(appAtan2(X.z, appSqrt(X.y·X.y + X.x·X.x))·C), the sum and the root stored as qwords; Y' = YAxis of
+        // GMath.UnitCoords / (Pitch, Yaw, 0) (0x10103369, the GetAxes body); Roll = _ftol(appAtan2(Y'·Z, Y'·Y)·C), each
+        // dot in (z, y, x) order stored as a qword. appAtan2 = fpatan (0x101260f0), _ftol 0x10176f72. Every register
+        // operation at the window's precision.
+        static readonly X87Ext OrthoScale = X87Ext.From(BitConverter.Int64BitsToDouble(0x40C45F306446F9B4));
+        public static UERotator OrthoRotation(Vector3 x, Vector3 y, Vector3 z)
+        {
+            static int FtolAny(X87Ext v) => v.IsNaN || v.IsInfinity ? 0 : Ftol(v);
+            static X87Ext Q(X87Ext v) => v.IsNaN || v.IsInfinity ? v : X87Ext.From(v.ToDouble());   // fstp qword
+            int yaw = FtolAny(RW(UEX87Transcendental.Fpatan(E(x.y), E(x.x)) * OrthoScale));
+            X87Ext xy = Q(RW(RW(E(x.y) * E(x.y)) + RW(E(x.x) * E(x.x))));
+            X87Ext d = Q(RW(X87Ext.Sqrt64(xy)));
+            int pitch = FtolAny(RW(UEX87Transcendental.Fpatan(E(x.z), d) * OrthoScale));
+            Vector3 c = UEValue.GetAxes(new UERotator(pitch, yaw, 0)).Y;
+            X87Ext Dot(Vector3 a) => Q(RW(RW(RW(E(c.z) * E(a.z)) + RW(E(c.y) * E(a.y))) + RW(E(c.x) * E(a.x))));
+            X87Ext dy = Dot(y), dz = Dot(z);
+            return new UERotator(pitch, yaw, FtolAny(RW(UEX87Transcendental.Fpatan(dz, dy) * OrthoScale)));
+        }
+
         // _ftol of a finite register value: truncation; outside int64 -> 0x8000000000000000 (low dword 0), otherwise
         // the low dword.
         static int Ftol(X87Ext v)

@@ -23,7 +23,7 @@ reads the maps, UnrealScript code, textures, sounds and music from a copy you ow
 
 Until version 0.2.0 this project was called OpenHP1.
 
-Status: **beta (0.2.0)**. Only Harry Potter 1 is playable; Harry Potter 2 is planned. The full campaign was completed
+Status: **beta (0.3.0)**. Only Harry Potter 1 is playable; Harry Potter 2 is planned. The full campaign was completed
 on 0.1.0. Coming from 0.1.0? See [CHANGELOG.md](CHANGELOG.md) for how to move your saves.
 
 ## Quick start
@@ -171,13 +171,15 @@ does not update to HPEngine: download this one once.)
 3. Add your game with **Add folder…** or **Add file…**, click **Install**, then **Play**. A disc image: mount it
    first (Steam Deck: right-click in Dolphin → **Mount**), then add the mounted folder.
 
-Steam Deck: in Desktop Mode, Steam → **Add a Game → Add a Non-Steam Game…** → browse to `HPEngine-Launcher`, and
+Steam Deck: in Desktop Mode, close Steam and choose **More → Add to Steam…** in the launcher (it keeps a backup of
+Steam's shortcut list), or in Steam → **Add a Game → Add a Non-Steam Game…** → browse to `HPEngine-Launcher`. Then
 start it from the Steam library (in Game Mode, and in Desktop Mode too). Started from Steam, the Deck's controls work
 as a gamepad; started from a desktop shortcut, Steam keeps its desktop layout (trackpad as mouse, triggers as clicks)
 until you hold the **≡** (Options) button.
 
-To update on Windows and Linux, download the new archive and unpack it over the old one: the game data, saves and
-settings are in your user folder and stay. The launcher tells you when a new version is out.
+The launcher keeps itself up to date on Windows and Linux too (signed updates only; the game data, saves and settings
+are in your user folder and stay). A 0.2.0 launcher on Windows or Linux does not update itself: download and unpack
+the new archive over it once.
 
 ### Without the launcher (Windows, Linux)
 
@@ -229,13 +231,15 @@ HPEngine's own format: they stay loadable across HPEngine versions, but saves of
 The launcher's **Game language** chooser lists the languages included in your game files. Select one before pressing
 **Play**; the choice is remembered. For multilingual discs, the language is read from each numbered `System` folder's
 `Default.ini`, rather than assuming folder `0` is the language you want. The corresponding text, dialogue, menu art
-and splash are used together. **Game default** restores the original data selection.
+and splash are used together. **Game default** restores the original data selection. The macOS launcher has no
+chooser yet.
 
 No language files are downloaded. If your copy contains only one language, you need your own game data containing
 another language to use it. Original files stay unchanged: the engine builds a working copy (links where available) in
-`HPEngineData/modroot`, and applies enabled mods after the selected language. Saves stay in the normal `Save` folder;
-selecting a language does not change the list of script mods recorded in saves. Removing a selected language is
-reported as an error until you select an available language or **Game default**.
+`HPEngineData/modroot`, and applies enabled mods after the selected language. As in the original game, a package with
+the language's suffix (such as `AllDialog.fin_uax`) is opened before the plain one (`AllDialog.uax`). Saves stay in the
+normal `Save` folder; selecting a language does not change the list of script mods recorded in saves. Removing a
+selected language is reported as an error until you select an available language or **Game default**.
 
 The launcher separates multilingual data from its engine family. For example, the Nordic language set shares the
 engine family called **UK 1.1**; that match does not identify a UK disc. **Different data** means the Nordic files
@@ -247,6 +251,8 @@ set is detected from installed files; identifying an exact source image requires
 Keyboard and mouse work as in the original (rebind keys in **Options → Controls**); **Alt+Enter** toggles fullscreen.
 A gamepad works out of the box (not original): left stick moves, right stick looks, A jumps, X or the right trigger
 casts, B skips, Start opens the book; **Options → Controls** shows and rebinds the gamepad's buttons while you use it.
+Any key skips the start-up splash screens, and Space turns a story-book page from the second page on once it has been
+shown for 2 seconds (not original: the original allows both only in its hidden debug mode).
 The full layout, interface size, the original-look mode and the other HPEngine settings:
 [docs/settings.md](docs/settings.md).
 
@@ -267,17 +273,17 @@ Your saved games stay in the same place with or without mods. A save made with a
 restarts its level from the beginning, with the progress you had when you entered it; the game says so at the top of
 the screen. A save made by 0.1.0 loads only with the mods off.
 
-This is a beta: mods are not tested by HPEngine and a mod may not work. Small mods (changed scripts, textures,
-translations, single maps) are the ones to expect to work; large conversions such as Restored + Free Play are not
-supported yet. Mods made for the fan 1.55 may misbehave on 1.53. If a mod fails, the launcher shows the reason:
+This is a beta: a mod may not work. Small mods (changed scripts, textures, translations, single maps) are the ones to
+expect to work. Checked on 0.3.0: every map of 11 popular mods, including Restored + Free Play, loads, except two maps
+named `Entry` (they have no player start; the original stops on them too) and Sofas and Armchairs, which needs a class
+from Harry Potter 2. Mods made for the fan 1.55 may misbehave on 1.53. If a mod fails, the launcher shows the reason:
 please report it with the mod's name. Check any other bug without mods before reporting it.
 
 ## Known issues
 
 - Native Windows startup and localized menus were tested on Windows 11 Pro 26H2 (OS build 26300.9818) with the Nordic
   multilingual CD. A full campaign and save/load on Windows still need verification; earlier tests were under CrossOver.
-- Mods are in beta: a mod may not work, and large conversions (Restored + Free Play, HP1 Demo Extended) do not start
-  yet. See [Mods](#mods).
+- Mods are in beta: a mod not listed in [Mods](#mods) has not been checked and may not work.
 - The 0.1.0 launcher and folders (OpenHP1) are not moved to HPEngine automatically: see [CHANGELOG.md](CHANGELOG.md).
 - macOS and Windows builds are not signed: Gatekeeper and SmartScreen warn on first launch.
 - UK 1.1 and Russian: supported, not yet proven exact against those builds. Russian menu text uses a substitute font

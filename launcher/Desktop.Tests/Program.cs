@@ -46,13 +46,16 @@ static partial class T
             Console.WriteLine(EngineError.Banner(File.ReadAllLines(args[2]), int.Parse(args[1]), "L."));
             return 0;
         }
-        Protocol(); Ini(); Dirs(); Releases(); Removal(); Smoke(); Notice(); Errors(); ModProblems(); StartMaps(); OwnGame(); PadResetRule(); Languages();
+        Protocol(); Ini(); Dirs(); Releases(); Removal(); Smoke(); Notice(); Errors(); ModProblems(); StartMaps(); OwnGame(); PadResetRule(); SelfUpdateCases(); SteamCases(); TitleCases(); Languages();
         Console.WriteLine("branches: " + string.Join(" ", fired.OrderBy(x => x)));
         if (fails > 0) return 1;
-        foreach (var b in new[] { "language:overlay", "language:window", "language:missing", "language:default", "language:edition" })
+        foreach (var b in new[] { "language:overlay", "language:window", "language:missing", "language:stale", "language:default", "language:edition" })
             if (!fired.Contains(b)) { Console.WriteLine("NOVERDICT: branch did not execute: " + b); return 3; }
-        foreach (var b in new[] { "proto:all-kinds", "proto:malformed", "ini:roundtrip", "ini:missing-section", "dir:3os", "pick:prerelease-build", "smoke:not-installed", "smoke:installed", "smoke:toggle", "smoke:reorder", "rm:keep", "rm:all", "rm:marker-first", "rm:symlink", "notice:cases", "notice:window", "err:pick", "mods:missing", "mods:misplaced", "mods:play-blocked", "map:list", "map:window", "own:rule", "own:window", "pad:reset", "pad:nothing" })
+        foreach (var b in new[] { "proto:all-kinds", "proto:malformed", "ini:roundtrip", "ini:missing-section", "dir:3os", "pick:prerelease-build", "smoke:not-installed", "smoke:installed", "smoke:toggle", "smoke:reorder", "rm:keep", "rm:all", "rm:marker-first", "rm:symlink", "notice:cases", "notice:window", "err:pick", "mods:missing", "mods:misplaced", "mods:play-blocked", "map:list", "map:window", "own:rule", "own:window", "pad:reset", "pad:nothing", "title:rules", "title:window", "steam:vdf", "steam:running", "steam:add", "steam:damaged", "steam:denied" })
             if (!fired.Contains(b)) { Console.WriteLine("NOVERDICT: branch did not execute: " + b); return 3; }
+        foreach (var b in new[] { "upd:signed-good", "upd:refused", "upd:zip", "upd:apply", "upd:rollback", "upd:rollback-backup", "upd:rollback-incomplete", "upd:marker-shown", "upd:log-denied", "upd:helper-cleanup", "upd:helper", "upd:helper-waits", "upd:helper-timeout", "upd:install-error", "upd:pick" })
+            if (!fired.Contains(b)) { Console.WriteLine("NOVERDICT: branch did not execute: " + b); return 3; }
+        if (!OperatingSystem.IsWindows() && !Environment.IsPrivilegedProcess && !fired.Contains("upd:cleanup-denied")) { Console.WriteLine("NOVERDICT: branch did not execute: upd:cleanup-denied"); return 3; }
         if (!OperatingSystem.IsWindows() && !fired.Contains("map:play-args")) { Console.WriteLine("NOVERDICT: branch did not execute: map:play-args"); return 3; }
         Console.WriteLine("all passed");
         return 0;
@@ -65,12 +68,13 @@ static partial class T
         Eq("PROGRESS 42", 0.42, k("PROGRESS 42").Progress);
         var e = k("ERROR not_ours This folder holds a game.");
         Eq("ERROR key/text", ("not_ours", "This folder holds a game."), (e.Key, e.Text));
+        Eq("REPORT", (SetupKind.Report, "https://github.com/artemnikonov/hpengine/issues/new?title=x"), (k("REPORT https://github.com/artemnikonov/hpengine/issues/new?title=x").Kind, k("REPORT https://github.com/artemnikonov/hpengine/issues/new?title=x").Text));
         Eq("WARNING", (SetupKind.Warning, "modified", "Modified scripts."), (k("WARNING modified Modified scripts.").Kind, k("WARNING modified Modified scripts.").Key, k("WARNING modified Modified scripts.").Text));
         var ed = k("EDITION us153 US 1.53: exact");
         Eq("EDITION", ("us153", "US 1.53: exact"), (ed.Key, ed.Text));
         Eq("DONE", (SetupKind.Done, "/x/game"), (k("DONE /x/game").Kind, k("DONE /x/game").Text));
         fired.Add("proto:all-kinds");
-        foreach (var bad in new[] { "", "HELLO", "STEP", "STEP bogus", "PROGRESS", "PROGRESS x", "PROGRESS 101", "PROGRESS -1", "ERROR", "ERROR keyonly", "WARNING k ", "EDITION", "DONE" })
+        foreach (var bad in new[] { "", "HELLO", "STEP", "STEP bogus", "PROGRESS", "PROGRESS x", "PROGRESS 101", "PROGRESS -1", "ERROR", "ERROR keyonly", "WARNING k ", "EDITION", "DONE", "REPORT", "REPORT http://x" })
             Eq($"malformed '{bad}'", SetupKind.Malformed, k(bad).Kind);
         fired.Add("proto:malformed");
     }
@@ -476,6 +480,10 @@ static partial class T
             var odd = new List<string>();
             w.Handle("WARNING unverified Odd edition.", odd); w.Handle("garbage", odd);
             Check("malformed setup line shown", Find<TextBlock>(w, "WarningText").Text.Contains("garbage") && odd.Count == 1);
+            Check("no Report button without a REPORT line", !Find<Button>(w, "ReportButton").IsVisible);
+            w.Handle("REPORT https://github.com/artemnikonov/hpengine/issues/new?title=x", odd);
+            Check("REPORT line shows the Report button in the warning banner", Find<Button>(w, "ReportButton").IsVisible && odd.Count == 1);
+            fired.Add("smoke:report");
             w.Close();
         }
         finally { Directory.Delete(tmp, true); }
@@ -504,6 +512,7 @@ static partial class T
             Snap(new MainWindow(game, tmp, "0.1.0-beta", false), "avalonia_installed.png");
             var w = new MainWindow(game, tmp, "0.1.0-beta", false);
             w.Handle("WARNING unverified Unknown edition: System/HP.exe SHA-1 0123456789abcdef. Please report the hashes at the issues page so this release can be added.", new List<string>());
+            w.Handle("REPORT https://github.com/artemnikonov/hpengine/issues/new?title=x", new List<string>());
             Snap(w, "avalonia_warning.png");
             Directory.CreateDirectory(Path.Combine(game, "Save"));
             File.WriteAllBytes(Path.Combine(game, "Save", "save0.hp1sav"), SaveHead(5));

@@ -97,7 +97,7 @@ namespace HP1.UEScript
                 // running game. The flag is the rule, not a class-name match.
                 if ((export.ObjectFlags & GameLoadContext) == 0) continue;
                 string className = export.Class?.ObjectName?.ToString() ?? "";
-                UClass cls = ResolveExportClass(export, className);
+                UClass cls = ResolveExportClass(package, export, className);
                 if (cls is null)
                 {
                     // LOUD. Shipped has no such outcome: the actor class is a map import and the
@@ -359,6 +359,7 @@ namespace HP1.UEScript
                 {
                     int pos = 0; return new UEName(ReadName(raw, ref pos, package));
                 }
+                case 9: return DecodeDynamicArray(ownerClass, tag.Name, raw, package, byExport);
                 case 10: return DecodeStruct(tag.StructName, raw, package, byExport, ownerClass);
                 case 13:
                 {
@@ -368,6 +369,74 @@ namespace HP1.UEScript
                     throw new NotSupportedException(
                         $"instance property {ownerClass.Name}.{tag.Name}: walker type {tag.Type}");
             }
+        }
+
+        // ── array<> IN INSTANCE TAGS (D-85b; no shipped map has one) ──
+        // UArrayProperty::SerializeItem (Core 0x1016fee0): `Ar << FCompactIndex(Num)` (0x1016feff); on load the array is
+        // emptied and Num elements are added (0x1016ff10..0x1016ff51) — the instance value REPLACES the default array, it
+        // does not merge into it; then Inner->SerializeItem (vtable +0x7c) once per element (0x1016ff62..0x1016ff79).
+        internal static List<object> DecodeDynamicArray(UClass ownerClass, string name, byte[] raw, UnrealPackage package,
+            IReadOnlyDictionary<int, ActorEntry> byExport)
+        {
+            if (FindProperty(ownerClass, name) is not UArrayProperty decl)
+                throw new NotSupportedException($"instance property {ownerClass.Name}.{name}: ArrayProperty tag without an array<> declaration");
+            int pos = 0;
+            var list = (List<object>)ReadItem(decl, raw, ref pos, package, byExport);
+            if (pos != raw.Length)
+                throw new InvalidDataException($"instance property {ownerClass.Name}.{name}: array<> read {pos} of {raw.Length} bytes");
+            return list;
+        }
+
+        // UProperty::SerializeItem of ONE value, by the declaration — the element walk of array<> and of a struct
+        // (UStruct::SerializeBin, Core.dll.c:45567-45628: members in declaration order, CPF_Native never, CPF_Transient
+        // not on a persistent archive, each ArrayDim times). An instance object reference is a map actor or a package
+        // resource (ResolveObjectRef), a name indexes THE MAP's name table.
+        static object ReadItem(UProperty decl, byte[] raw, ref int pos, UnrealPackage package,
+            IReadOnlyDictionary<int, ActorEntry> byExport)
+        {
+            switch (decl)
+            {
+                case UByteProperty: return ReadByte(raw, ref pos);
+                case UIntProperty: return ReadInt32(raw, ref pos);
+                case UBoolProperty: return ReadBool(raw, ref pos);      // one byte (UBoolProperty::SerializeItem)
+                case UFloatProperty: return ReadSingle(raw, ref pos);
+                case UNameProperty: return new UEName(ReadName(raw, ref pos, package));
+                case UStrProperty: return ReadString(raw, ref pos);
+                case UObjectProperty: return ResolveObjectRef(ReadCompactIndex(raw, ref pos), package, byExport);
+                case UArrayProperty ap:
+                {
+                    int num = ReadCompactIndex(raw, ref pos);
+                    if (num < 0) throw new InvalidDataException($"array<> {decl.Name}: count {num}");
+                    var list = new List<object>(num);
+                    for (int i = 0; i < num; i++) list.Add(ReadItem(ap.InnerProperty, raw, ref pos, package, byExport));
+                    return list;
+                }
+                case UStructProperty sp when sp.Struct is not null: return ReadStruct(sp.Struct, raw, ref pos, package, byExport);
+                default:
+                    throw new NotSupportedException($"instance property element {decl.Name}: {decl.GetType().Name}");
+            }
+        }
+
+        static object ReadStruct(UStruct def, byte[] raw, ref int pos, UnrealPackage package,
+            IReadOnlyDictionary<int, ActorEntry> byExport)
+        {
+            if (ReadIntrinsic(def.Name.ToString(), raw, ref pos) is { } intrinsic) return intrinsic;
+            // An imported struct (e.g. Core Color inside a mod class) is a UELib stub without fields: take the
+            // export with the same full path, as the class-default walk does; no exact match -> loud.
+            var (full, mark) = HP1.UEScript.Render.ShippedLayout.ResolveStruct(def);
+            if (mark is not null) throw new NotSupportedException($"instance struct {def.Name}: {mark}");
+            def = full;
+            var bag = new UEObject(UEPropLayout.ForStruct(def)) { IsStruct = true };
+            foreach (var f in UEObject.SerializeBinFields(def))   // own fields, then the super chain (0x1012e910)
+            {
+                if (f.PropertyFlags.HasFlag(UELib.Flags.PropertyFlag.Native)
+                    || f.PropertyFlags.HasFlag(UELib.Flags.PropertyFlag.Transient)) continue;
+                if (f.ArrayDim <= 1) { bag.Props[f.Name.ToString()] = ReadItem(f, raw, ref pos, package, byExport); continue; }
+                var items = new List<object>(f.ArrayDim);
+                for (int i = 0; i < f.ArrayDim; i++) items.Add(ReadItem(f, raw, ref pos, package, byExport));
+                bag.Props[f.Name.ToString()] = items;
+            }
+            return bag;
         }
 
         private static UProperty FindProperty(UClass cls, string name)
@@ -402,6 +471,8 @@ namespace HP1.UEScript
                 }
                 case PropertyType.StructProperty:
                     return DecodeStruct(tag.StructName?.ToString(), raw, package, byExport, ownerClass);
+                case PropertyType.ArrayProperty:
+                    return DecodeDynamicArray(ownerClass, tag.Name.ToString(), raw, package, byExport);
                 default:
                     // Dynamic arrays and delegates require their own raw layout. None are
                     // needed by the placed-actor lifecycle; keep them loud.
@@ -422,8 +493,8 @@ namespace HP1.UEScript
         // go through their own catalogs and the class registry does not need them.
         public static void LoadImportedScriptPackages(UnrealPackage package, string mapPath)
         {
-            string systemDir = SystemDirFor(mapPath);
-            if (systemDir is null) return;
+            string gameRoot = GameRootFor(mapPath);
+            if (gameRoot is null) return;
             var registry = HP1.Core.UEClassRegistry.Shared;
             var pending = new Queue<UnrealPackage>();
             // Visited packages. An already registered package (e.g. loaded earlier by a frontend
@@ -443,18 +514,15 @@ namespace HP1.UEScript
                     string name = import.ObjectName.ToString();
                     if (!visited.Add(name)) continue;
                     if (registry.HasPackage(name)) { pending.Enqueue(registry.FindPackage(name)); continue; }
-                    string path = UEInstallPath.File(Path.Combine(systemDir, name + ".u"));
+                    string path = UEInstallPath.ScriptPackageFile(gameRoot, name);
                     if (path is null) continue;       // not a script package (utx/uax/…)
                     pending.Enqueue(registry.GetOrLoadPackage(path));
                 }
             }
         }
 
-        static string SystemDirFor(string mapPath)
-        {
-            string gameRoot = Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(mapPath)));
-            return gameRoot is null ? null : UEInstallPath.Dir(Path.Combine(gameRoot, "System"));
-        }
+        static string GameRootFor(string mapPath) =>
+            Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(mapPath)));
 
         // Class of an object from a SAVE — by (package, name). In shipped the save file is a level
         // package and each object's class arrives as an import `Class <Package>.<Name>`: the linker
@@ -477,16 +545,25 @@ namespace HP1.UEScript
         }
 
         // The package a save names (class import or script record), raised the linker way like ResolveSavedClass; null
-        // when the game has no such script package.
+        // when the game has no such script or map package. appFindPackageFile walks every path entry, so a class a map
+        // defines itself (D-85a) names Maps/<map>.unr: that package was released with its level (ResetWorld) and is
+        // catalogued again for the level's lifetime, as OwnClassExport does when the level loads it.
         public static UnrealPackage SavedPackage(string packageName, string mapPath)
         {
             var registry = HP1.Core.UEClassRegistry.Shared;
             if (!string.IsNullOrEmpty(packageName) && !registry.HasPackage(packageName))
             {
-                string systemDir = SystemDirFor(mapPath);
-                string path = systemDir is null ? null : UEInstallPath.File(Path.Combine(systemDir, packageName + ".u"));
-                if (path is not null)
+                string gameRoot = GameRootFor(mapPath);
+                if (gameRoot is null) return null;
+                if (UEInstallPath.ScriptPackageFile(gameRoot, packageName) is string path)
                     LoadImportedScriptPackages(registry.GetOrLoadPackage(path), mapPath);
+                else if (UEInstallPath.MapPackageFile(gameRoot, packageName) is string map)
+                {
+                    var package = UnrealLoader.LoadPackage(Path.GetFullPath(map), FileAccess.Read);
+                    package.InitializePackage(UnrealPackage.InitFlags.All);
+                    registry.RegisterLevelPackage(package);   // released with the level (UELevelRuntime.ResetWorld)
+                    LoadImportedScriptPackages(package, mapPath);
+                }
             }
             return registry.FindPackage(packageName);
         }
@@ -494,9 +571,17 @@ namespace HP1.UEScript
         // Export class by the import PACKAGE, not the short name: the shipped data has same-named
         // classes in different packages (HPModels/HProps: hagridhutrock, levshadow,
         // savepointfloatbook), and a short name would pick the last registered one.
-        static UClass ResolveExportClass(UExportTableItem export, string className)
+        //
+        // A CLASS DEFINED IN THE MAP PACKAGE ITSELF (D-85a; no shipped map has one, community maps do). ULinkerLoad::
+        // CreateExport takes `LoadClass = IndexToObject(Export.ClassIndex)` (Core 0x1014a75b..0x1014a760) with no import
+        // restriction, and IndexToObject sends a POSITIVE index to CreateExport of the same linker (0x1014aa91..0x1014aace):
+        // the class is the map's own export, created from the map linker like any script class. The port makes the class
+        // known to the registry (script, defaults, super chain) by cataloguing the map package (idempotent) and takes the
+        // class by its export INDEX, not by name.
+        internal static UClass ResolveExportClass(UnrealPackage package, UExportTableItem export, string className)
         {
             var registry = HP1.Core.UEClassRegistry.Shared;
+            if (export.Class is UExportTableItem own) return OwnClassExport(package, own.Index);
             UnrealPackage home = registry.FindPackage(ImportPackageName(export));
             if (home is not null)
                 foreach (var e in home.Exports)
@@ -508,6 +593,17 @@ namespace HP1.UEScript
                 + "in the import package (VerifyImport; D-14 item 23 — short-name matching removed)");
         }
 
+        // Class export #exportIndex0 (0-based) of `package`, through the catalogued instance of that package.
+        static UClass OwnClassExport(UnrealPackage package, int exportIndex0)
+        {
+            var registry = HP1.Core.UEClassRegistry.Shared;
+            registry.RegisterLevelPackage(package);   // released with the level (UELevelRuntime.ResetWorld)
+            if (registry.FindPackage(package.PackageName).Exports[exportIndex0].Object is UClass c && c.Super is not null)
+                return c;
+            throw new InvalidDataException($"export {package.PackageName}#{exportIndex0 + 1} is not a class (ULinkerLoad::"
+                + "CreateExport check(LoadClass->GetClass()==UClass::StaticClass()), Core 0x1014a78d)");
+        }
+
         static string ImportPackageName(UExportTableItem export)
         {
             UObjectTableItem item = export.Class;
@@ -516,7 +612,7 @@ namespace HP1.UEScript
         }
 
         // Object reference by compact index — shared by UELib tags and our own walker's tags.
-        private static object ResolveObjectRef(
+        internal static object ResolveObjectRef(
             int index, UnrealPackage package, IReadOnlyDictionary<int, ActorEntry> byExport)
         {
             if (index == 0) return null;
@@ -531,6 +627,9 @@ namespace HP1.UEScript
                 var exportRef = package.Exports[index - 1];
                 if (string.Equals(exportRef.Class?.ObjectName?.ToString(), "Model", StringComparison.OrdinalIgnoreCase))
                     return new UEModelRef(exportRef.ObjectName.ToString(), index);
+                // ClassIndex 0 is UClass (CreateExport 0x1014a767..0x1014a76b): a class literal naming a class the map
+                // defines itself is that class, as for an imported one (D-85a).
+                if (exportRef.Class is null) return OwnClassExport(package, index - 1);
                 // Any other export of the map package: shipped hands the property the loaded object
                 // itself (the linker resolves the export), never None. Kept as a resource reference
                 // with its full export path, like an import. Campaign census:
@@ -547,16 +646,21 @@ namespace HP1.UEScript
                     return HP1.Core.UEClassRegistry.Shared.Find(
                         HP1.Core.UEClassRegistry.ImportPackageName(package, import), objectName);
                 }
-                return new Hp1ExactResourceRef(import.ClassName?.ToString() ?? "Object", objectName,
-                    ResolveImportObjectPath(package, index));
+                // null: VerifyImport leaves a missing CLASS_SafeReplace import (Texture, Sound…) None.
+                string path = ResolveImportObjectPath(package, index);
+                return path is null ? null : new Hp1ExactResourceRef(import.ClassName?.ToString() ?? "Object", objectName, path);
             }
             return null;
         }
 
-        private static string ResolveImportObjectPath(UnrealPackage package, int index)
+        internal static string ResolveImportObjectPath(UnrealPackage package, int index)
         {
             if (index >= 0 || -index - 1 >= package.Imports.Count)
                 throw new InvalidDataException($"invalid import index {index}");
+            // The answer for (package, import) is fixed while the catalogue is (the registry clears the table on every
+            // change): a map names the same texture from thousands of surfaces and mover polys.
+            Dictionary<int, string> known = HP1.Core.UEClassRegistry.Shared.ImportPaths(package);
+            if (known.TryGetValue(index, out string cached)) return cached;
             var chain = new List<(string Name, string ClassName, string ClassPackage)>();
             int current = index;
             while (current < 0)
@@ -569,30 +673,38 @@ namespace HP1.UEScript
             }
             chain.Reverse();
             // ULinkerLoad::VerifyImport — a single body in the Core registry.
-            return HP1.Core.UEClassRegistry.Shared.VerifyImportPath(chain)
-                ?? string.Join('.', chain.ConvertAll(c => c.Name));
+            return known[index] = HP1.Core.UEClassRegistry.Shared.ResolveImportPath(chain);
         }
 
-        private static object DecodeStruct(
+        // The VM's value intrinsics (Vector, Rotator, Plane): the one decoder of an instance tag's and an instance struct
+        // member's bytes; null when the struct is not one of them.
+        // Core.u: Plane extends Vector. UStruct::SerializeBin's field iterator (0x1012e910..0x1012e965: Children +0x38
+        // first, then GetInheritanceSuper vtable +0x6c) walks the struct's own field W BEFORE the super's X,Y,Z. No shipped
+        // .unr has the name Plane in its name table, so instance Plane tags come from mod maps only.
+        static object ReadIntrinsic(string structName, byte[] raw, ref int pos)
+        {
+            switch (structName?.ToLowerInvariant())
+            {
+                case "vector": return new Vector3(ReadSingle(raw, ref pos), ReadSingle(raw, ref pos), ReadSingle(raw, ref pos));
+                case "rotator": return new UERotator(ReadInt32(raw, ref pos), ReadInt32(raw, ref pos), ReadInt32(raw, ref pos));
+                case "plane":
+                {
+                    float pw = ReadSingle(raw, ref pos);   // own field W first
+                    float px = ReadSingle(raw, ref pos), py = ReadSingle(raw, ref pos), pz = ReadSingle(raw, ref pos);
+                    return new UEPlane(px, py, pz, pw);
+                }
+                default: return null;
+            }
+        }
+
+        internal static object DecodeStruct(
             string structName, byte[] raw, UnrealPackage package,
             IReadOnlyDictionary<int, ActorEntry> byExport, UClass ownerClass)
         {
             int pos = 0;
+            if (ReadIntrinsic(structName, raw, ref pos) is { } intrinsic) return intrinsic;
             switch (structName?.ToLowerInvariant())
             {
-                case "vector":
-                    return new Vector3(ReadSingle(raw, ref pos), ReadSingle(raw, ref pos), ReadSingle(raw, ref pos));
-                // FPlane = FVector(12) + float W(4): UStruct::SerializeBin
-                // (Core.dll.c:45567-45628) reads all four fields. Sharing the vector case would lose
-                // W of placed actors (ZoneInfo.ViewFog/ViewFlash, PlayerPawn.FlashFog…) and mismatch
-                // the type of class defaults (UEObject.DecodeStructDefault returns UEPlane).
-                case "plane":
-                {
-                    float px = ReadSingle(raw, ref pos), py = ReadSingle(raw, ref pos), pz = ReadSingle(raw, ref pos);
-                    return new UEPlane(px, py, pz, ReadSingle(raw, ref pos));
-                }
-                case "rotator":
-                    return new UERotator(ReadInt32(raw, ref pos), ReadInt32(raw, ref pos), ReadInt32(raw, ref pos));
                 case "coords":
                     return Struct(
                         ("Origin", new Vector3(ReadSingle(raw, ref pos), ReadSingle(raw, ref pos), ReadSingle(raw, ref pos))),
@@ -651,12 +763,22 @@ namespace HP1.UEScript
                 {
                     // Other structs — by DECLARATION, with the same UStruct::SerializeBin walk
                     // (Core.dll.c:45567-45628) used for class defaults. A struct with an object
-                    // reference is not allowed here: an instance reference is a map actor (byExport),
-                    // while the shared walk returns package resource markers.
+                    // reference (or a nested struct) is not taken by that walk: an instance reference is a
+                    // map actor (byExport), while the shared walk returns package resource markers. Such a
+                    // struct takes the instance walk ReadStruct (D-85b; no shipped instance tag has one).
                     object generic = UEObject.DecodeInstanceStruct(ownerClass, structName, raw);
-                    if (generic is null)
-                        throw new NotSupportedException($"struct {structName} size={raw.Length}");
-                    return generic;
+                    if (generic is not null) return generic;
+                    UStruct def = null;
+                    for (UClass c = ownerClass; c is not null && def is null; c = UEInterpreter.CanonicalSuper(c))
+                        foreach (var p in c.EnumerateFields<UStructProperty>())
+                            if (string.Equals(p.Struct?.Name?.ToString(), structName, StringComparison.OrdinalIgnoreCase))
+                            { def = p.Struct; break; }
+                    if (def is null)
+                        throw new NotSupportedException($"struct {structName} size={raw.Length}: no declaration on {ownerClass.Name}");
+                    object walked = ReadStruct(def, raw, ref pos, package, byExport);
+                    if (pos != raw.Length)
+                        throw new InvalidDataException($"struct {structName}: read {pos} of {raw.Length} bytes");
+                    return walked;
                 }
             }
         }

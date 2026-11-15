@@ -37,7 +37,7 @@
 // Save/ is merged: files already there are kept.
 //
 // Output, one per line (read by launcher/Launcher.swift): STEP <find|unpack|check|copy>, PROGRESS <0..100>,
-// EDITION <UEEdition id> <edition: support tier>, WARNING <key> <text for the player>, ERROR <key> <text for the player>, DONE <dest>. Exit code: 0 done, 2 the source was rejected, 1 other failure.
+// EDITION <UEEdition id> <edition: support tier>, WARNING <key> <text for the player>, REPORT <https new-issue link> (an unrecognised release), ERROR <key> <text for the player>, DONE <dest>. Exit code: 0 done, 2 the source was rejected, 1 other failure.
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Reflection;
@@ -522,6 +522,7 @@ static class Program
             Console.WriteLine($"WARNING modified {differ.Count} game file(s) differ from {ed.name} (for example "
                 + $"{string.Join(", ", differ.Take(3))}). " + UEEdition.ModifiedWarning);
         else if (id.Warning is string w) Console.WriteLine($"WARNING {tier.ToString().ToLowerInvariant()} " + w);
+        if (id.ReportUrl is string report) Console.WriteLine("REPORT " + report);
         _data = id.Data;
         return manifest;
     }

@@ -1326,8 +1326,17 @@ namespace HP1.UEScript
         // scripts, and ServerTravel would refuse in that window). TryTakeLevelTravel takes the request (block 0x103a1346).
         public void RequestOpen(UEInterpreter interp, string url)
         {
-            _openRequestUrl = url ?? "";
+            RequestClientTravel(url, UEUrl.Partial, false);
             Log($"open_request url={url}");
+        }
+
+        // UGameEngine::SetClientTravel (0x103a0480; Engine.dll.c:133138): Viewport.TravelURL / TravelType / bTravelItems.
+        // OPEN passes (TRAVEL_Partial, 0); PlayerPawn.ClientTravel passes its own.
+        internal void RequestClientTravel(string url, int travelType, bool items)
+        {
+            _openRequestUrl = url ?? "";
+            _openRequestType = travelType;
+            _openRequestItems = items;
         }
 
         // GameSaveInfo (natives 325/326 — AActor::execSaveGameSaveInfo 138213 /

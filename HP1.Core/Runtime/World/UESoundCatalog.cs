@@ -44,6 +44,7 @@ namespace HP1.UEScript
         private string _root;
 
         public string Root => _root;
+        internal IReadOnlyDictionary<string, string> PackageFilesForTest => _packageFiles;
 
         // Changing the root resets the caches; the same root is a no-op.
         public void SetSource(string installRoot)
@@ -63,21 +64,10 @@ namespace HP1.UEScript
             _sounds.Clear();
             _leafPaths = null;
             _root = full;
-            foreach (string dir in new[] { UEInstallPath.Dir(Path.Combine(full, "System")), UEInstallPath.Dir(Path.Combine(full, "Sounds")) })
-            {
-                if (dir is null) continue;
-                // A listing, keyed OrdinalIgnoreCase — the UEInstallPath rule applied to every package of the directory.
-                foreach (string file in Directory.EnumerateFiles(dir)
-                             .Where(x => Path.GetExtension(x).Equals(".u", StringComparison.OrdinalIgnoreCase)
-                                      || Path.GetExtension(x).Equals(".uax", StringComparison.OrdinalIgnoreCase))
-                             .OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
-                {
-                    string package = Path.GetFileNameWithoutExtension(file);
-                    if (_packageFiles.ContainsKey(package))
-                        throw new InvalidDataException($"duplicate shipped sound package {package}");
-                    _packageFiles.Add(package, file);
-                }
-            }
+            // The sound packages the game can open (UEInstallPath: with System/HPSounds.u and Sounds/HPSounds.uax both
+            // present every `HPSounds.*` reference is served by System/HPSounds.u and the .uax is never opened).
+            foreach (string file in UEInstallPath.PackageFiles(full, "System", "Sounds"))
+                _packageFiles.Add(Path.GetFileNameWithoutExtension(file), file);
         }
 
         // The catalog is called from TWO threads: the Core step (GetSoundDuration, sound path) and the frontend's
@@ -205,7 +195,7 @@ namespace HP1.UEScript
             var seen = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             var names = new List<string>();
             if (_packageFiles.ContainsKey("HPSounds")) names.Add("HPSounds");
-            names.AddRange(_packageFiles.Where(kv => Path.GetExtension(kv.Value).Equals(".uax", StringComparison.OrdinalIgnoreCase))
+            names.AddRange(_packageFiles.Where(kv => Path.GetExtension(kv.Value).EndsWith("uax", StringComparison.OrdinalIgnoreCase))   // .uax or .<lang>_uax
                 .Select(kv => kv.Key).OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
             foreach (string name in names)
                 foreach (var e in OpenPackage(name).Exports)

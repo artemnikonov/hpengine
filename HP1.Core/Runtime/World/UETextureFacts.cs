@@ -235,16 +235,6 @@ namespace HP1.UEScript
             return facts;
         }
 
-        // PACKAGE SEARCH ORDER COMES FROM THE GAME ITSELF: `System/0/Default.ini`, section [Core.System]. Texture
-        // references are not only .utx: measured over 41 maps, surfaces reference objects in HPParticle.u, HProps.u,
-        // HPBase.u and Engine.u, and a "<root>/Textures/<package>.utx" rule would answer "no package" for them
-        // (37 references).
-        internal static readonly string[] PackagePaths =
-        {
-            "System/{0}.u", "Maps/{0}.unr", "Textures/{0}.utx",
-            "Sounds/{0}.uax", "Music/{0}.umx", "save/{0}.usa",
-        };
-
         private UnrealPackage Package(SurfMaterialRef material)
         {
             string packageName = material.SourcePackage ?? "<map>";
@@ -259,12 +249,8 @@ namespace HP1.UEScript
             {
                 string root = _installRoot ?? throw new NotSupportedException(
                     "TraceTexture: install root not set");
-                foreach (string pattern in PackagePaths)
-                {
-                    path = UEInstallPath.File(Path.Combine(root,
-                        string.Format(pattern, material.SourcePackage)));
-                    if (path is not null) break;
-                }
+                // Not only .utx: surfaces reference objects in HPParticle.u, HProps.u, HPBase.u and Engine.u.
+                path = UEInstallPath.PackageFile(root, material.SourcePackage);
                 if (path is null)
                     throw new NotSupportedException(
                         $"TraceTexture: package {material.SourcePackage} not found on any "

@@ -20,11 +20,14 @@
 //
 // Native stage words are taken from the ParseCommand calls in their bodies. A command
 // taken by a native stage is NOT silently executed by some other script in this chain:
-// the port does not route key-bound native commands (DefUser.ini has none), so such a
-// command is a loud refusal. The last stage (UEngine::Exec) further dispatches to
-// sub-executors (Core StaticExec, USystem, Audio, Client, Render, FMemCache) whose
-// tables are not listed here; a command taken by no listed stage stays in the log as
-// unrecognised (shipped ExecInputCommands does not check it).
+// the port does not route key-bound native commands (DefUser.ini has none). The original
+// executes such a binding; the port cannot, and a key press must not end the session, so the
+// command stops at its stage with a loud line (journal input_exec_native_unported + a warning
+// once per command) and nobody takes it. A script/console call of the same word
+// (UEConsoleCommand) stays a STOP. The last stage (UEngine::Exec) further dispatches to
+// sub-executors (Core StaticExec, USystem, Audio, Client, Render, FMemCache; table
+// SubExecutorWords) and HP.exe's GExec (words unknown: packed exe); a command taken by no
+// listed stage stays in the log as unrecognised (shipped ExecInputCommands does not check it).
 using System;
 using System.Collections.Generic;
 using UELib.Core;
@@ -41,6 +44,18 @@ namespace HP1.UEScript
         static readonly string[] EngineWords = { "OPEN", "START", "SERVERTRAVEL", "DISCONNECT", "RECONNECT", "EXIT", "QUIT",
             "GETCURRENTTICKRATE", "GETMAXTICKRATE", "GSPYLITE", "OBJCLEAN", "SAVEGAME", "CANCEL",   // UGameEngine::Exec
             "FLUSH", "CRACKURL", "DUMPCACHE" };                                                      // UEngine::Exec, FMemCache
+        // UEngine::Exec's sub-executors (Engine 0x103932e0, asked before its own FLUSH/CRACKURL): GSys = USystem::Exec
+        // (Core FUN_10173280), UObject::StaticExec (Core 0x1015cde0), GCache = FMemCache::Exec (Core 0x10128350,
+        // DUMPCACHE above), GExec, Client = UWindowsClient::Exec -> UClient::Exec (Engine 0x10386cf0), Render =
+        // URender::Exec (Render FUN_10b1f240), Audio = Galaxy Exec. Their top-level ParseCommand words, the counts and
+        // the pushed UTF-16 constants checked against the disassembly. GExec is HP.exe's FExecHook::Exec: the shipped
+        // HP.exe is packed (BitArts sections), its words cannot be read from the file — not listed (unknown).
+        static readonly string[] SubExecutorWords = {
+            "MEMSTAT", "CONFIGHASH", "RELAUNCH", "DEBUG",                 // USystem::Exec
+            "MEM", "DUMPNATIVES", "GET", "SET", "OBJ", "GTIME",           // UObject::StaticExec
+            "BRIGHTNESS",                                                 // UClient::Exec
+            "STAT", "REND", "TLOD", "MLOD", "MLMODE", "MLFIX",            // URender::Exec
+            "CDTRACK", "CDVOLUME", "MUSICORDER", "ASTAT" };               // Galaxy (audio subsystem) Exec
         static readonly string[] WinDrvWords = { "EndFullscreen", "ToggleFullscreen", "GetCurrentRes", "GetCurrentColorDepth",
             "GetColorDepths", "GetCurrentRenderDevice", "GetRes", "SetRes", "Preferences" };
 
@@ -48,36 +63,55 @@ namespace HP1.UEScript
         // Returns the object whose exec function took the command (null = nobody).
         public static UEObject ExecAfterInput(UEInterpreter interp, UEObject actor, string command, Action<string> log)
         {
-            NativeStage(command, RenDevWords, "RenDev->Exec (URenderDevice/UD3DRenderDevice)");
-            NativeStage(command, ViewportWords, "UViewport::Exec");
+            if (NativeStage(command, RenDevWords, "RenDev->Exec (URenderDevice/UD3DRenderDevice)", log)) return null;
+            if (NativeStage(command, ViewportWords, "UViewport::Exec", log)) return null;
             UEObject console = (actor?.GetProp(PK.Player) as UEObject)?.GetProp(PK.Console) as UEObject;
             if (console is not null && ScriptConsoleExec(interp, console, command, actor, log)) return console;
-            NativeStage(command, LevelWords, "ULevel::Exec");
+            if (NativeStage(command, LevelWords, "ULevel::Exec", log)) return null;
             if (actor?.GetProp(PK.Level) is UEObject level && level.GetProp(PK.Game) is UEObject game
                 && ScriptConsoleExec(interp, game, command, actor, log)) return game;
             if (actor?.GetProp(PK.myHUD) is UEObject hud && ScriptConsoleExec(interp, hud, command, actor, log)) return hud;
             if (actor is not null && ScriptConsoleExec(interp, actor, command, actor, log)) return actor;
             for (UEObject inv = actor?.GetProp(PK.Inventory) as UEObject; inv is not null; inv = inv.GetProp(PK.Inventory) as UEObject)
                 if (ScriptConsoleExec(interp, inv, command, actor, log)) return inv;
-            NativeStage(command, EngineWords, "UGameEngine::Exec/UEngine::Exec");
-            NativeStage(command, WinDrvWords, "UWindowsViewport::Exec");
+            if (NativeStage(command, EngineWords, "UGameEngine::Exec/UEngine::Exec", log)) return null;
+            if (NativeStage(command, SubExecutorWords, "a UEngine::Exec sub-executor (USystem, StaticExec, Client, Render, Audio)", log)) return null;
+            if (NativeStage(command, WinDrvWords, "UWindowsViewport::Exec", log)) return null;
             log?.Invoke($"input_exec_unrecognized command=\"{command}\" "
-                + "(none of the listed stages; UEngine::Exec sub-executors are not listed)");
+                + "(none of the listed stages; HP.exe's GExec words are unknown)");
             return null;
         }
 
         // ParseCommand: the word at the start of the line (after spaces/tabs), case-insensitive,
         // followed by end of line, a space or a tab.
-        static void NativeStage(string command, string[] words, string stage)
+        // True = the stage takes the command (the chain stops here); the port does not execute it — loud, not fatal.
+        // NOT ORIGINAL (the original runs such a binding): kept by the author's decision 2026-11-15 (D-89 (2)).
+        static bool NativeStage(string command, string[] words, string stage, Action<string> log)
+        {
+            if (WordOf(command, words) is not string w) return false;
+            log?.Invoke($"input_exec_native_unported command=\"{command}\" stage=\"{stage}\" word={w}");
+            if (_nativeNoted.Add(command))   // once per distinct command: a held key repeats it
+                HP1.Core.UETrace.Warn($"[input] key-bound command \"{command}\" is taken by native stage {stage} "
+                    + $"(word {w}), which the port does not execute; the key does nothing");
+            return true;
+        }
+
+        static readonly HashSet<string> _nativeNoted = new(StringComparer.OrdinalIgnoreCase);
+
+        static string WordOf(string command, string[] words)
         {
             string s = command.TrimStart(' ', '\t');
             foreach (string w in words)
                 if (s.Length >= w.Length && string.Compare(s, 0, w, 0, w.Length, StringComparison.OrdinalIgnoreCase) == 0
                     && (s.Length == w.Length || s[w.Length] == ' ' || s[w.Length] == '\t'))
-                    throw new NotSupportedException(
-                        $"command \"{command}\" is taken by native stage {stage} (word {w}); "
-                        + "key-bound native commands are not routed in the port");
+                    return w;
+            return null;
         }
+
+        // A word of one of the listed native executors (the tables above), or null.
+        public static string KnownNativeWord(string command)
+            => WordOf(command, RenDevWords) ?? WordOf(command, ViewportWords) ?? WordOf(command, LevelWords)
+               ?? WordOf(command, EngineWords) ?? WordOf(command, SubExecutorWords) ?? WordOf(command, WinDrvWords);
 
         // ── UObject::ScriptConsoleExec (Core.dll.c:16255-16398) ────────────────
         // Token (ParseToken, 0x40, escape) -> function by name (FindObjectField:

@@ -1,5 +1,6 @@
 # Harry Potter (2001) PC, UK 1.1: SHA-1, size and path of every file the port loads by package name from the
-# install root (System/*.u *.dll, Maps/*.unr, Textures/*.utx, Sounds/*.uax, Music/*.umx; top level only).
+# install root (System/*.u *.dll, Maps/*.unr, Textures/*.utx, Sounds/*.uax, Music/*.umx; top level only), and the
+# Language=eng files appFindPackageFile opens instead of three of them (<Name>.eng_<ext>: MenuArt, AllDialog, AllEmote).
 # Hashes only: no game bytes.
 20d1d7e85a8808dbb3fd2d90f88fbff99d09255b 2387 Maps/Entry.unr
 01fa023d5abc95db3cdd76744a66988599651578 4927232 Maps/Lev2_fire1.unr
@@ -133,7 +134,9 @@ ad899356257ac465db7c6d44ed8af7c944c2a57d 561963 Music/SecretCauldron.umx
 fbb65a4e1100a6980832572dcf7097181377c1e1 308048 Music/Troll_awake.umx
 f83157d61e2d93d9482cc9dd95e6e0814c75cf2f 602710 Music/Troll_chase.umx
 81cfd156c584057d49b236a60e9056457510f5bf 969474 Music/Voldemort_Pillar.umx
+01f5ecc5d41b4edda887292819f288ad869f08b1 34906941 Sounds/AllDialog.eng_uax
 9991785ffdc9689ab57669f5ec02d07d1b9cc169 35120049 Sounds/AllDialog.uax
+99ae1b4390be4f7e87ca591ead4f2bca8dd35029 1857811 Sounds/AllEmote.eng_uax
 99ae1b4390be4f7e87ca591ead4f2bca8dd35029 1857811 Sounds/AllEmote.uax
 ba966eca09cfcc81ba0142bb8a9b5ea2613acc97 2137968 Sounds/Ambient.uax
 bd367f7205231b8cb40e48c3d2a011466fb5686b 1421396 Sounds/Critters.uax
@@ -248,6 +251,7 @@ ab3fff87853816a9abbd76f3ac90c41c44dd6676 1189249 Textures/Hub_3_troll.utx
 d4edb2fea00293008d90dfa6009d4974030781ec 162152 Textures/Jump.utx
 6d88cf56cc7048b6d0b55665e78406e887102489 91635 Textures/Lev5_flyingKeys.utx
 d34fe4685e675780d6c25ff24ad0f13bfe6b8b8a 14013 Textures/Liquids.utx
+e08360c9d458a0545cac04b5848ee7e7bf30bbcb 709669 Textures/MenuArt.eng_utx
 ea6f3ff1f44c13dd576dc8b0817c15b25610c84b 577843 Textures/MenuArt.utx
 ad5a33fa0298dd2fe5419d6c2487b8ebacee79bc 421024 Textures/Palettes.utx
 9aa25052516a0626edf7d223bc5c35bc12acf775 179422 Textures/Particles.utx

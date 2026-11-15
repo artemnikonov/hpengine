@@ -52,6 +52,12 @@ namespace HP1.UEScript
                 _ => null,
             };
 
+            // A new-issue link with the hashes filled in (only file hashes of the game: nothing about the player), so that
+            // an unrecognised release can be reported in one click and accepted by adding its row to Sets.
+            public string ReportUrl => Tier != Support.Unverified ? null
+                : Issues + "/new?title=" + Uri.EscapeDataString("Unrecognised release: " + (ExeSha1 ?? "no exe")[..Math.Min(12, (ExeSha1 ?? "no exe").Length)])
+                + "&body=" + Uri.EscapeDataString("Release of the game (language, CD/download, patch): \n\n" + Hashes.Replace(", ", "\n"));
+
             string Hashes => $"System/{ExeName ?? "HP.exe"} {ExeSha1 ?? "(not found)"}, "
                 + $"System/Engine.dll {EngineSha1 ?? "(not found)"}, System/Render.dll {RenderSha1 ?? "(not found)"}, "
                 + $"System/HPBase.u {HPBaseSha1 ?? "(not found)"} — {Issues}";

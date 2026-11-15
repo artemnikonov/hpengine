@@ -20,8 +20,7 @@ namespace HP1.UEScript
     // appSin/appCos: IAT slots 0x10b74574/0x10b74650, resolved via the PE import table to Core.dll `fsin`/`fcos`
     // (x87). TimeSeconds = LevelInfo+0x3b4, TexU/VPanSpeed = ZoneInfo+0x2e0/+0x2e4 (shipped layout).
     // Zone = draw record +0x34: ZoneActor of the node's zone on the camera side; without a ZoneActor, Actors(0)
-    // (Render.dll.c:6548-6563).
-    // ZoneActor — Actors(0) (Render.dll.c:6548-6563).
+    // (Render.dll.c:6548-6563; rule and addresses at ZoneSpeeds below).
     //
     // Bit 0x1000 (PF_BigWavy in UE1) is PF_SpecialPoly in HP1: read only by APawn::Mount (Engine.dll 0x103ec133)
     // and a walking helper (0x103e6831); Render/D3DDrv/SoftDrv never test it on a surface (disassembly scan
@@ -51,6 +50,40 @@ namespace HP1.UEScript
         {
             int f = fpolyFlags & 0x3cffffff;
             return moverSpecialLit ? f | PF_SpecialLit : f;
+        }
+
+        // ZONE ACTOR OF A DRAW RECORD -> PAN SPEED OF EVERY ZONE. OccludeBsp (Render.dll 0x10b24867..0x10b248dd) fills
+        // draw record +0x34 with Model->Zones[iZone[side]].ZoneActor (mov eax,[ecx+8*eax+0x104], stride 0x18) and, when
+        // that pointer is null, with Level->Actors(0), the LevelInfo (asserts UnLevel.h 0xf7/0xf8, 0x10b248d2).
+        // UModel.Zones is a FIXED 64-entry array inside the object (Model+0x104..+0x704). UModel::EmptyModel (Engine
+        // 0x103bc61d..0x103bc65c, called by UModel::UModel() at 0x10310e9c) writes ZoneActor = null into all 64 entries;
+        // UModel::Serialize (Engine 0x103bbabb..0x103bbad8) then loads only entries 0..NumZones-1 (Model+0x100). No
+        // other Engine code writes a ZoneActor (the only indexed write to +0x104 with another stride is AMover::PostLoad's
+        // FPoly.iLink, 0x103be5b8). So a node whose zone byte is NumZones..63 reads the null EmptyModel left there and
+        // gets the LevelInfo, exactly like a loaded zone without a ZoneInfo. A zone byte >= 64 reads past the array
+        // into other UModel fields: not resolved here (false), the caller refuses loudly.
+        // A ZoneActor that is not among the frame's actors is not resolved either.
+        public const int MaxZones = 64;
+        public static bool[] ZoneSpeeds(StaticGeometry g, WorldFrame frame, out float[] u, out float[] v)
+        {
+            var byExport = new System.Collections.Generic.Dictionary<int, ActorSnapshot>();
+            ActorSnapshot? levelInfo = null;
+            foreach (ActorSnapshot a in frame.Actors)
+            {
+                if (!a.Placed || a.ExportIndex <= 0) continue;
+                byExport[a.ExportIndex] = a;
+                if (levelInfo is null && HP1.Core.UEClassRegistry.Shared?.Find(a.Class) is { } c && UEInterpreter.ClassIsA(c, "LevelInfo")) levelInfo = a;
+            }
+            int loaded = g.ZoneActorExports?.Length ?? 0;
+            u = new float[MaxZones]; v = new float[MaxZones]; var ok = new bool[MaxZones];
+            for (int z = 0; z < MaxZones; z++)
+            {
+                int ex = z < loaded ? g.ZoneActorExports[z] : 0;
+                ActorSnapshot? za = ex <= 0 ? levelInfo : byExport.TryGetValue(ex, out var x) ? x : null;
+                if (za is null) continue;
+                u[z] = za.Value.TexUPanSpeed; v[z] = za.Value.TexVPanSpeed; ok[z] = true;
+            }
+            return ok;
         }
 
         // Full DrawFrame fragment: PanU/PanV in TEXELS after the shift. A frontend whose base Pan is already baked

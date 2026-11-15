@@ -225,6 +225,27 @@ public class UEGameEngineNatives : UENativesCore
     internal readonly HashSet<string> _journaledNatives = new(StringComparer.OrdinalIgnoreCase);
     private string _registering = "headless";
 
+    // Color = R,G,B,A bytes (Core.u); the bag holds them as ints. The result is a copy of the operand whose A survives.
+    // UE1 zero-fills a struct: the VM's unassigned Color is null and a partly assigned one is a bag without the unset
+    // channels (UEValue.SetStructMember) — both read as 0.
+    static UEObject ColorOperand(object v) => v as UEObject ?? UEObject.MakeColorBag(0, 0, 0, 0);
+
+    internal static UEObject ColorOp(object first, object second, Func<int, int, int> op)
+    {
+        var a = ColorOperand(first); var b = ColorOperand(second); var r = a.CloneStruct();
+        foreach (string ch in new[] { "R", "G", "B" })
+            r.Props[ch] = op(UEInterpreter.ToInt(a.GetProp(ch)), UEInterpreter.ToInt(b.GetProp(ch))) & 0xff;
+        return r;
+    }
+
+    internal static UEObject ColorScale(object color, float f)
+    {
+        var c = ColorOperand(color); var r = c.CloneStruct();
+        foreach (string ch in new[] { "R", "G", "B" })
+            r.Props[ch] = X87.MulIntFloatFtol(UEInterpreter.ToInt(c.GetProp(ch)) & 0xff, f) & 0xff;
+        return r;
+    }
+
     protected override void Pair(int idx, string name, UENativeHandler handler)
     {
         string provider = _registering;
@@ -366,6 +387,20 @@ public class UEGameEngineNatives : UENativesCore
             journal.Add("log " + (args.Length > 0 ? args[0]?.ToString() ?? "" : ""));
             return null;
         });
+        // UObject::execWarn 232 (Core 0x10140b50): arg eval, FOutputDevice::Logf, FString free, asserts — no world effect.
+        Pair(232, "Warn", (interp, frame, args) =>
+        {
+            journal.Add("warn " + (args.Length > 0 ? args[0]?.ToString() ?? "" : ""));
+            return null;
+        });
+        // AActor::execError 233 (Engine.dll.c:27538): FOutputDevice::Log(Stack, S), then
+        // XLevel(+0x80) vtable +0x98 DestroyActor(this, 0) — the same call as Destroy (279).
+        Pair(233, "Error", (interp, frame, args) =>
+        {
+            journal.Add("error " + (args.Length > 0 ? args[0]?.ToString() ?? "" : ""));
+            DestroyActorCore(interp, frame.Context ?? frame.Object);
+            return null;
+        });
         // UObject::execDynamicLoadObject (Core.dll.c:63931): StaticLoadObject
         // with LOAD_NoWarn only when MayFail is true. The current gameplay path
         // requests Engine.Sound, so resolve the exact package/export path from
@@ -438,6 +473,76 @@ public class UEGameEngineNatives : UENativesCore
         // answer to "what is Level.Actors"; see the comment in Core.
         Pair(304, "AllActors", (interp, frame, args) =>
             Runtime.AllActorsNative(interp, frame, args));
+        Pair(305, "ChildActors", (interp, frame, args) => Runtime.ChildActorsNative(interp, frame, args));
+        Pair(306, "BasedActors", (interp, frame, args) => Runtime.BasedActorsNative(interp, frame, args));
+        // APlayerPawn::execResetKeyboard (Engine.dll.c, export 0x23a1): Player (+0x4bc) IsA Viewport and its Input (+0x58)
+        // set -> UObject::ResetConfig(Input->Class) (Core 0x1ac3: the class section of DefUser.ini over the live config,
+        // then LoadConfig of the class defaults and of every Input object). Otherwise nothing.
+        Pair(544, "ResetKeyboard", (interp, frame, args) =>
+        {
+            UEObject self = frame.Context ?? frame.Object;
+            if (self?.GetProp(PK.Player) is UEObject player && UEInterpreter.ClassIsA(player.Class, "Viewport") && Runtime.Input is { } input)
+                input.ResetKeyboard(Runtime.Config);
+            return null;
+        });
+        // UObject::execResetConfig (Core.dll.c:19367, export 0x1a5f): ResetConfig(this->Class) (UEObjectConfig.ResetConfig).
+        Pair(0, "ResetConfig", (interp, frame, args) =>
+        {
+            UEObject self = frame.Context ?? frame.Object;
+            UEObjectConfig.ResetConfig(UEConfig.Global, self?.Class, interp, Runtime.Actors);
+            return null;
+        });
+        // APlayerPawn::execGetDefaultURL (export 0x4ca5): FURL u(NULL); u.LoadURLConfig("DefaultPlayer", "User") (every line of
+        // the live section — AddOption); return u.GetOption(Option + "=", "").
+        Pair(0, "GetDefaultURL", (interp, frame, args) =>
+        {
+            var u = new UEUrl();
+            foreach (KeyValuePair<string, string> kv in Runtime.Config.Section(UEConfig.ScopeUser, "DefaultPlayer"))
+                u.AddOption(kv.Key + "=" + kv.Value);
+            return u.GetOption(((args.Length > 0 ? args[0] : null)?.ToString() ?? "") + "=", "");
+        });
+        // APlayerPawn::execUpdateURL (Engine 546, Engine.dll.c ~24620-24690): XLevel->Engine (IsA UGameEngine) LastURL.
+        // AddOption(NewOption + "=" + NewValue); bSaveDefault -> LastURL.SaveURLConfig("DefaultPlayer", NewOption, "User").
+        Pair(546, "UpdateURL", (interp, frame, args) =>
+        {
+            string opt = (args.Length > 0 ? args[0] : null)?.ToString() ?? "", val = (args.Length > 1 ? args[1] : null)?.ToString() ?? "";
+            bool save = args.Length > 2 && UEInterpreter.ToBool(args[2]);
+            // CastChecked<UGameEngine>(XLevel->Engine): a non-game engine is a GError (0x103d3c25); the port's twin is
+            // no adopted LastURL — loud, as GetURLMap and LoginPortal.
+            UEUrl last = Runtime.LastUrl ?? throw new InvalidOperationException("UpdateURL: LastURL not set (level not loaded)");
+            last.AddOption(opt + "=" + val);
+            if (save) last.SaveURLConfig(Runtime.Config, UEConfig.ScopeUser, "DefaultPlayer", opt);
+            return null;
+        });
+        // APlayerPawn::execClientTravel (URL, TravelType, bItems): with a Player — ProcessEvent PreClientTravel, then
+        // Engine->SetClientTravel(Player, URL, bItems, TravelType) (vtable +0x8c). Without a Player nothing.
+        Pair(0, "ClientTravel", (interp, frame, args) =>
+        {
+            UEObject self = frame.Context ?? frame.Object;
+            if (self?.GetProp(PK.Player) is not UEObject) return null;
+            UELifecycle.CallEventArgs(interp, self, "PreClientTravel", Array.Empty<object>());
+            Runtime.RequestClientTravel((args.Length > 0 ? args[0] : null)?.ToString() ?? "",
+                args.Length > 1 ? UEInterpreter.ToInt(args[1]) : UEUrl.Absolute, args.Length > 2 && UEInterpreter.ToBool(args[2]));
+            return null;
+        });
+        // AActor::execGetNextInt (Engine.dll.c:86454, export 0x304e): MetaClass = StaticFindObjectChecked(UClass,
+        // ANY_PACKAGE, ClassName); List = GetRegistryObjects(UClass::StaticClass(), MetaClass, 0); Num < List.Num ?
+        // List(Num).Object : "". execGetNextIntDesc (Engine.dll.c:6343, export 0x1096): the same list; out Entry =
+        // List(Num).Object, out Description = List(Num).Description, both "" past the end. No return value.
+        Pair(0, "GetNextInt", (interp, frame, args) =>
+            NextInt(args) is UERegistry.ObjectInfo e ? e.Object : "");
+        Pair(0, "GetNextIntDesc", (interp, frame, args) =>
+        {
+            UERegistry.ObjectInfo e = NextInt(args);
+            if (args.Length > 2) args[2] = e?.Object ?? "";
+            if (args.Length > 3) args[3] = e?.Description ?? "";
+            return null;
+        });
+        Pair(547, "GetURLMap", (interp, frame, args) => Runtime.UrlMapNative());
+        Pair(425, "GetWind", (interp, frame, args) =>
+            Runtime.WindNative(frame.Context ?? frame.Object, UEInterpreter.AsVector3(args.Length > 0 ? args[0] : null)));
+        Pair(307, "TouchingActors", (interp, frame, args) => Runtime.TouchingActorsNative(interp, frame, args));
+        Pair(308, "ZoneActors", (interp, frame, args) => Runtime.ZoneActorsNative(interp, frame, args));
         Pair(262, "SetCollision", (interp, frame, args) =>
         {
             UEObject self = frame.Context ?? frame.Object;
@@ -509,6 +614,14 @@ public class UEGameEngineNatives : UENativesCore
                 UEInterpreter.AsRotator(args.Length > 0 ? args[0] : null),
                 bTest: false, bIgnorePawns: false, bIgnoreBases: false, bNoFail: false);
         });
+        // Color operators (Engine.Actor 549-552). Add 0x10413410 / Sub 0x104134b0: R,G,B bytewise with 8-bit wrap,
+        // A kept from the FIRST operand. Color*Float 0x10413230 / Float*Color 0x10413320: per R,G,B channel
+        // `fild dword(byte); fmul dword f; call _ftol 0x10459c18`, low byte stored; A kept from the color.
+        Pair(551, "Add_ColorColor", (interp, frame, args) => ColorOp(args[0], args[1], (a, b) => a + b));
+        Pair(549, "Subtract_ColorColor", (interp, frame, args) => ColorOp(args[0], args[1], (a, b) => a - b));
+        Pair(552, "Multiply_ColorFloat", (interp, frame, args) => ColorScale(args[0], UEInterpreter.AsFloat(args[1])));
+        Pair(550, "Multiply_FloatColor", (interp, frame, args) => ColorScale(args[1], UEInterpreter.AsFloat(args[0])));
+
         // Sound natives — BODIES IN CORE (UELevelRuntime.SoundNatives.cs): the
         // PlaySound/PlayOwnedSound listener walk, AActor::CheckHearSound, the
         // ClientHearSound event and its native (APawn::execClientHearSound, by name),
@@ -545,6 +658,67 @@ public class UEGameEngineNatives : UENativesCore
         Pair(553, "FindPath", (interp, frame, args) => Runtime.FindPath(
             args.Length > 0 ? args[0] as UEObject : null,
             NameArg(args, 1)));
+        // Path search natives (UELevelRuntime.NavNatives: ClearPaths, RequireNoPathNetwork, NoPathTail).
+        // execFindPathTo 0x103d7f80 / execFindPathToward 0x103d8130: a null target returns None before any write;
+        // otherwise the search, then NoPathTail. execFindRandomDest 0x103d82e0: clearPaths when bClearPaths
+        // (default 1), then the search. execFindBestInventoryPath 0x103d4b70: weight 0.0f (0x1040230f) replaces
+        // MinWeight only when strictly greater (`fcom; test ah,0x41; jne`, NaN keeps it), then NoPathTail.
+        Pair(517, "FindPathToward", (interp, frame, args) =>
+        {
+            UEObject self = frame.Context ?? frame.Object;
+            if (self is null || args.Length == 0 || args[0] is not UEObject) return null;
+            Runtime.RequireNoPathNetwork(interp, "FindPathToward");
+            UELevelRuntime.NoPathTail(self);
+            return null;
+        });
+        Pair(518, "FindPathTo", (interp, frame, args) =>
+        {
+            UEObject self = frame.Context ?? frame.Object;
+            if (self is null) return null;
+            Runtime.RequireNoPathNetwork(interp, "FindPathTo");
+            UELevelRuntime.NoPathTail(self);
+            return null;
+        });
+        Pair(525, "FindRandomDest", (interp, frame, args) =>
+        {
+            UEObject self = frame.Context ?? frame.Object;
+            if (self is null) return null;
+            if (args.Length == 0 || args[0] is null || UEInterpreter.ToBool(args[0])) Runtime.ClearPaths(interp, self);
+            Runtime.RequireNoPathNetwork(interp, "FindRandomDest");
+            return null;
+        });
+        Pair(540, "FindBestInventoryPath", (interp, frame, args) =>
+        {
+            UEObject self = frame.Context ?? frame.Object;
+            if (self is null) return null;
+            Runtime.RequireNoPathNetwork(interp, "FindBestInventoryPath");
+            if (args.Length > 0 && 0f > UEInterpreter.AsFloat(args[0]))
+            {
+                args[0] = 0f;
+                UELevelRuntime.NoPathTail(self);
+            }
+            return null;
+        });
+        Pair(522, "ClearPaths", (interp, frame, args) =>
+        {
+            UEObject self = frame.Context ?? frame.Object;
+            if (self is not null) Runtime.ClearPaths(interp, self);
+            return null;
+        });
+        Pair(519, "describeSpec", (interp, frame, args) =>
+        {
+            Runtime.DescribeSpecNative(args);
+            return null;
+        });
+        // EAdjustJump (523): execEAdjustJump 0x103d78d0 — SuggestJumpVelocity(Destination, a COPY of Velocity);
+        // Velocity itself is not written.
+        Pair(523, "EAdjustJump", (interp, frame, args) =>
+        {
+            UEObject self = frame.Context ?? frame.Object;
+            if (self is null) return UEVector.zero;
+            return Runtime.SuggestJumpVelocity(self, UEInterpreter.AsVector3(self.GetProp(PK.Destination)),
+                UEInterpreter.AsVector3(self.GetProp(PK.Velocity)).z);
+        });
         // Pawn.uc native(521) final function bool pointReachable(Vector aPoint).
         // APawn::execpointReachable (Engine.dll.c:99183) is the whole wrapper:
         // read the vector, call the mode dispatcher with bKnowVisible = 0, and
@@ -658,6 +832,30 @@ public class UEGameEngineNatives : UENativesCore
             if (args.Length == 0 || args[0] is not UEObject target) return null;
             float speed = args.Length > 1 && args[1] is not null ? UEInterpreter.AsFloat(args[1]) : 1f;
             UEPawnMovement.EnterMoveToward(self, frame, target, speed, interp);
+            return null;
+        });
+        // StrafeTo (504) / StrafeFacing (506) / WaitForLanding (527), latent: bodies in UEPawnMovement
+        // (EnterStrafeTo / EnterStrafeFacing / EnterWaitForLanding), polls in ProcessState.
+        Pair(504, "StrafeTo", (interp, frame, args) =>
+        {
+            UEObject self = frame.Context ?? frame.Object;
+            if (self is null) return null;
+            UEPawnMovement.EnterStrafeTo(self, frame, UEInterpreter.AsVector3(args.Length > 0 ? args[0] : null),
+                UEInterpreter.AsVector3(args.Length > 1 ? args[1] : null), interp);
+            return null;
+        });
+        Pair(506, "StrafeFacing", (interp, frame, args) =>
+        {
+            UEObject self = frame.Context ?? frame.Object;
+            if (self is null) return null;
+            UEPawnMovement.EnterStrafeFacing(self, frame, UEInterpreter.AsVector3(args.Length > 0 ? args[0] : null),
+                args.Length > 1 ? args[1] as UEObject : null, interp);
+            return null;
+        });
+        Pair(527, "WaitForLanding", (interp, frame, args) =>
+        {
+            UEObject self = frame.Context ?? frame.Object;
+            if (self is not null) UEPawnMovement.EnterWaitForLanding(self);
             return null;
         });
         // MoveSmooth (3969, bound by name): shipped execMoveSmooth
@@ -794,6 +992,46 @@ public class UEGameEngineNatives : UENativesCore
     private static string NameArg(object[] args, int index)
         => args.Length <= index || args[index] is null ? "None"
          : args[index] is UEName name ? name.Value : args[index].ToString();
+
+    // execGetNextInt/execGetNextIntDesc: the class lookup, the registry list and List(Num) (null = past the end).
+    // StaticFindObjectChecked(UClass, ANY_PACKAGE, Name): "Pkg.Class" resolves the package (ResolveName), a bare name
+    // takes the first object of its GObjHash chain; a miss is appErrorf (fatal). The port has no hash chain order, so a
+    // bare name naming classes in two packages is refused, as is a miss. Num < 0 reads outside the TArray (no check
+    // in the shipped body): refused.
+    // The class resolution and its filtered list are cached per name (case-insensitive, like the FName lookup) while the
+    // class catalogue (UEClassRegistry.Generation) and the driver lists (UERegistry.Generation) are unchanged.
+    private static readonly Dictionary<string, (UEClassRegistry Reg, int RegGen, int DrvGen, List<UERegistry.ObjectInfo> List)> _nextIntCache
+        = new(StringComparer.OrdinalIgnoreCase);
+
+    private static UERegistry.ObjectInfo NextInt(object[] args)
+    {
+        string name = (args.Length > 0 ? args[0] : null)?.ToString() ?? "";
+        int num = args.Length > 1 ? UEInterpreter.ToInt(args[1]) : 0;
+        UERegistry.CacheDrivers(false);
+        UEClassRegistry reg = UEClassRegistry.Shared;
+        if (_nextIntCache.TryGetValue(name, out var hit) && ReferenceEquals(hit.Reg, reg) && hit.RegGen == reg.Generation
+            && hit.DrvGen == UERegistry.Generation)
+        {
+            if (num < 0) throw new InvalidOperationException($"GetNextInt('{name}', {num}): negative Num reads outside the list in the shipped body");
+            return num < hit.List.Count ? hit.List[num] : null;
+        }
+        int dot = name.LastIndexOf('.');
+        string pkg = dot < 0 ? null : name.Substring(0, dot), leaf = name.Substring(dot + 1);
+        var hits = new List<string>();
+        foreach (var p in reg.Packages.Distinct())
+            if (pkg is null || string.Equals(p.PackageName, pkg, StringComparison.OrdinalIgnoreCase))
+                foreach (var ex in p.Exports)
+                    if (ex.Object is UClass c && !UEClassRegistry.IsImportStub(c) && string.Equals(c.Name, leaf, StringComparison.OrdinalIgnoreCase))
+                        hits.Add(p.PackageName + "." + c.Name);
+        if (hits.Count != 1)
+            throw new InvalidOperationException($"GetNextInt('{name}'): StaticFindObjectChecked(UClass, ANY_PACKAGE) found "
+                + (hits.Count == 0 ? "no class (shipped: appErrorf, fatal)" : "classes in several packages: " + string.Join(", ", hits)
+                + " (shipped takes the first of its GObjHash chain; the port has no such order)"));
+        if (num < 0) throw new InvalidOperationException($"GetNextInt('{name}', {num}): negative Num reads outside the list in the shipped body");
+        List<UERegistry.ObjectInfo> list = UERegistry.GetRegistryObjects("Class", hits[0]);
+        _nextIntCache[name] = (reg, reg.Generation, UERegistry.Generation, list);
+        return num < list.Count ? list[num] : null;
+    }
 
     // Arg parsing only — AActor::CreateAnimChannel itself is Core
     // (UELevelRuntime.CreateAnimChannel): a channel is a spawned actor, so the
@@ -1027,6 +1265,7 @@ public class UEGameEngineNatives : UENativesCore
                         // Damaged or newer-build save, or one of other scripts without a level-entry set: LoadMap's catch,
                         // the old level plays on (UELevelRuntime.LoadMapBadSave). The reason also goes to the run log.
                         Runtime.LoadMapBadSave(interp, map, badReason);
+                        Runtime.ReleaseRefusedSaveMap(savedMap, interp);
                         _journal.Add($"loadmap_failed url_map={map} file={Path.GetFileName(targetPath)} reason={badReason}");
                         UETrace.Info($"[Save] {map} not loaded: {badReason}");
                         // Old-format save of other scripts while mods are on: the old level plays on, with the notice.

@@ -51,6 +51,7 @@ final class LineReader: @unchecked Sendable {
   @Published var progress = 0.0
   @Published var error: String?
   @Published var warning: String?  // HP1Setup's WARNING line (an unverified edition): shown, the install goes on
+  @Published var report: URL?      // HP1Setup's REPORT line: a new-issue link for an unrecognised release (UEEdition.ReportUrl)
   @Published var running = false
   @Published var playing = false
   @Published var installed = Launcher.isInstalled()
@@ -106,7 +107,7 @@ final class LineReader: @unchecked Sendable {
 
   func install() {
     guard !inputs.isEmpty, !running, !playing, !updating, unquarantine() else { return }  // nothing swaps the data or the app under it
-    running = true; error = nil; warning = nil; step = 0; progress = 0
+    running = true; error = nil; warning = nil; report = nil; step = 0; progress = 0
     let p = Process()
     current = p
     p.executableURL = Launcher.runtimeURL.appendingPathComponent("HP1Setup")
@@ -143,6 +144,7 @@ final class LineReader: @unchecked Sendable {
     case "ERROR":  // "<key> <text>": the text is for the player; the installed edition is still the marker's
       error = String(arg.drop(while: { $0 != " " }).dropFirst()); edition = Launcher.installedEdition()
     case "WARNING": warning = String(arg.drop(while: { $0 != " " }).dropFirst())  // "<key> <text>"
+    case "REPORT": if arg.hasPrefix("https://") { report = URL(string: arg) }
     case "EDITION": edition = String(arg.drop(while: { $0 != " " }).dropFirst())  // "<id> <edition: tier>"
     case "DONE": step = steps.count; installed = true; inputs = []
     default: break
@@ -276,7 +278,7 @@ final class LineReader: @unchecked Sendable {
     guard a.runModal() == .alertFirstButtonReturn else { return }
     do {
       try Launcher.removeGame(root: Launcher.gameURL, all: cb.state == .on) { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }
-      installed = Launcher.isInstalled(); edition = nil; step = -1; error = nil; warning = nil
+      installed = Launcher.isInstalled(); edition = nil; step = -1; error = nil; warning = nil; report = nil
     } catch {
       installed = Launcher.isInstalled()
       self.error = "Could not remove the game: \(error.localizedDescription)"
@@ -572,11 +574,24 @@ final class LineReader: @unchecked Sendable {
     return lines.joined(separator: nl) + nl
   }
 
+  // The game's title by installed edition (HP1Setup's EDITION text "<name>: <tier>"), by the DLL set the name stands for
+  // (UEEdition.Sets): US 1.53 and the City / Modded re-releases on its DLLs "Sorcerer's Stone", UK 1.1 and the Russian EA release
+  // "Philosopher's Stone" (RU: the title always shown); not identified (no game yet, "Modified release", "Unknown release": the
+  // text does not say which DLL set): the neutral "Harry Potter". Same as Desktop Logic.cs GameTitle.
+  nonisolated static func gameTitle(_ edition: String?) -> String {
+    guard let e = edition else { return "Harry Potter" }
+    switch e.components(separatedBy: ": ")[0] {
+    case "US 1.53", "City re-release", "Modded re-release": return "Harry Potter and the Sorcerer's Stone"
+    case "UK 1.1", "RU EA": return "Harry Potter and the Philosopher's Stone"
+    default: return "Harry Potter"
+    }
+  }
+
   func about() {
     NSApp.orderFrontStandardAboutPanel(options: [
       .applicationName: "HPEngine Launcher",
       .credits: NSAttributedString(string:
-        "HPEngine runs Harry Potter and the Philosopher's Stone (PC, 2001) from your own copy of the game. "
+        "HPEngine runs \(Launcher.gameTitle(edition)) (PC, 2001) from your own copy of the game. "
         + "No game files are included. Game data: \(Launcher.gameURL.path)"),
     ])
   }
@@ -778,6 +793,7 @@ struct QuietButtonStyle: ButtonStyle {
 
 struct Banner: View {
   let icon: String, color: Color, text: String
+  var link: URL? = nil   // "Report": opens the prefilled new-issue page
   @State var open = false
   var body: some View {
     VStack(alignment: .leading, spacing: 6) {
@@ -787,6 +803,9 @@ struct Banner: View {
           .fixedSize(horizontal: false, vertical: open)
         Spacer(minLength: 4)
         Button(open ? "Less" : "More") { open.toggle() }.buttonStyle(.plain).foregroundStyle(color).font(.system(size: 12, weight: .medium))
+        if let l = link {
+          Button("Report") { NSWorkspace.shared.open(l) }.buttonStyle(.plain).foregroundStyle(color).font(.system(size: 12, weight: .medium))
+        }
       }
     }
     .padding(.horizontal, 12).padding(.vertical, 9)
@@ -828,7 +847,7 @@ struct MainView: View {
       if let n = b.newer { updateBar(n) }
       VStack(alignment: .leading, spacing: 12) {
         if setup { setupView } else { installedView }
-        if let w = b.warning { Banner(icon: "exclamationmark.triangle.fill", color: Theme.amber, text: w) }
+        if let w = b.warning { Banner(icon: "exclamationmark.triangle.fill", color: Theme.amber, text: w, link: b.report) }
         if let e = b.error { Banner(icon: "xmark.octagon.fill", color: Theme.red, text: e) }
         footer.padding(.top, 6)
       }
@@ -852,7 +871,7 @@ struct MainView: View {
   var header: some View {
     HStack(alignment: .bottom) {
       VStack(alignment: .leading, spacing: 6) {
-        Text("Harry Potter and the Philosopher's Stone").font(.system(size: 24, weight: .bold, design: .serif)).foregroundStyle(.white)
+        Text(Launcher.gameTitle(b.edition)).font(.system(size: 24, weight: .bold, design: .serif)).foregroundStyle(.white)
         HStack(spacing: 8) {
           Text("HPEngine\(version)").foregroundStyle(.white.opacity(0.7))
           Circle().fill(status.1).frame(width: 7, height: 7)
@@ -1082,10 +1101,13 @@ struct MainView: View {
       // <exit code> <engine console output file>: the error banner (launcher/test_update.sh).
       guard let code = Int32(a[2]), let s = try? String(contentsOfFile: a[3], encoding: .utf8) else { print("FAIL"); exit(1) }
       print(Launcher.errorBanner(s.components(separatedBy: "\n"), code: code, log: "L.")); exit(0)
+    case "--game-title" where a.count == 2 || a.count == 3:
+      // [<edition text>]: the header title (launcher/test_update.sh); no argument: no game identified.
+      print(Launcher.gameTitle(a.count == 3 ? a[2] : nil)); exit(0)
     case "--runtime-path" where a.count == 2:
       print(Launcher.runtimeURL.path); exit(0)
     default:
-      FileHandle.standardError.write(Data("usage: Launcher --verify-update <zip> <sig> <key> <version> | --pick-release <json> <version> | --mods-ini <file> [names...] | --mods-notice <game dir> | --mods-check <game dir> | --start-maps <game dir> [map] | --engine-error <code> <file> | --slot-mods <save file> | --remove-game <root> <keep|all> [fail-after-marker] | --runtime-path\n".utf8))
+      FileHandle.standardError.write(Data("usage: Launcher --verify-update <zip> <sig> <key> <version> | --pick-release <json> <version> | --mods-ini <file> [names...] | --mods-notice <game dir> | --mods-check <game dir> | --start-maps <game dir> [map] | --engine-error <code> <file> | --slot-mods <save file> | --game-title [edition] | --remove-game <root> <keep|all> [fail-after-marker] | --runtime-path\n".utf8))
       exit(2)
     }
   }

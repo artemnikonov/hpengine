@@ -86,6 +86,9 @@ static class Program
         Eq("front Client High", TextureDetail.FirstMip(tex, TexLod.Client, 0, 0), 0);
         var proc = new UETextureSource.TextureData { State = "PROCEDURAL_NO_PIXELS", LodSet = 1, MipCount = 1 };
         Eq("front procedural", TextureDetail.FirstMip(proc, TexLod.Client, 3, 0), 0);
+        // Non-P8 (Core exports one mip only, UETextureSource.ReadDirect): Lock min(mips-1, 3) = 0 at every detail.
+        var rgba = new UETextureSource.TextureData { State = "EXPORTED_RGBA", LodSet = 1, MipCount = 1, Width = 64, Height = 64 };
+        for (int td = 0; td < 4; td++) Eq($"front non-P8 one mip td={td}", TextureDetail.FirstMip(rgba, TexLod.Client, td, 3), 0);
         Eq("front particle -> Zero", TextureDetail.OfSprite(SpriteKind.Particle), TexLod.Zero);
         Eq("front sprite -> Client", TextureDetail.OfSprite(SpriteKind.Sprite), TexLod.Client);
         Eq("front corona -> Client", TextureDetail.OfSprite(SpriteKind.Corona), TexLod.Client);

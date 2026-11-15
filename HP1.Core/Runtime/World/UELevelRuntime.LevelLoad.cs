@@ -197,6 +197,24 @@ namespace HP1.UEScript
             }
         }
 
+        // A map package catalogued level-owned (D-85a) and every piece of per-class state that names its classes.
+        void ReleaseMapPackage(string packageName, UEInterpreter interp)
+        {
+            if (packageName is not null && HP1.Core.UEClassRegistry.Shared?.ReleaseLevelPackage(packageName) is { } released)
+            {
+                interp?.ForgetReleasedClasses(released);
+                FrameProducer?.ForgetReleasedClasses(released);
+            }
+        }
+
+        // A save refused before teardown (UEGameEngineNatives LoadMap: the old level plays on): the save check
+        // (SaveScriptMismatch -> SavedPackage) catalogued the save's map package level-owned. It is no level's package
+        // now, so it goes as ResetWorld would release it; the playing level's own package stays.
+        public void ReleaseRefusedSaveMap(string savedMap, UEInterpreter interp)
+        {
+            if (!string.Equals(savedMap, LevelPackageName, StringComparison.OrdinalIgnoreCase)) ReleaseMapPackage(savedMap, interp);
+        }
+
         // Tear the world down so another map can be loaded. Everything keyed to
         // the level goes: geometry, the collision hash AND its identity maps
         // (handles are only meaningful against the actors that minted them), the
@@ -244,6 +262,8 @@ namespace HP1.UEScript
             // counters (ClassUnique) do not: that is a UClass field and the class survives a
             // map change (live original 1.53: GameInfo1 on every map).
             _occupiedObjectNames.Clear();
+            // Its own classes too (D-85a), with every piece of per-class state that names them.
+            ReleaseMapPackage(LevelPackageName, interp);
             LevelPackageName = null;   // the package goes with the level
             // SpawnLog holds every actor ever spawned, so after a teardown it is
             // a list of the PREVIOUS world's destroyed actors — and it is walked

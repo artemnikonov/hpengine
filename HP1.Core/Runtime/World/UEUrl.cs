@@ -79,6 +79,28 @@ namespace HP1.UEScript
             return true;
         }
 
+        // FURL::GetOption (Engine.dll.c:132121, export 0x4354): the first option whose first strlen(Match) characters
+        // equal Match (appStrnicmp) — the rest of it; none -> Default.
+        public string GetOption(string match, string fallback)
+        {
+            foreach (string op in Ops)
+                if (op.Length >= match.Length && StrnicmpZero(op, match, match.Length)) return op.Substring(match.Length);
+            return fallback;
+        }
+
+        // FURL::SaveURLConfig (Engine.dll.c:94656): every option "Key=Value" whose Key equals Item (appStricmp) is written
+        // to the section (GConfig SetString +0x30).
+        public void SaveURLConfig(UEConfig config, string scope, string section, string item)
+        {
+            foreach (string op in Ops)
+            {
+                int eq = op.IndexOf('=');
+                if (eq < 0) continue;
+                string key = op.Substring(0, eq);
+                if (string.Equals(key, item, StringComparison.OrdinalIgnoreCase)) config.Set(scope, section, key, op.Substring(eq + 1));
+            }
+        }
+
         public bool HasOption(string name)
         {
             foreach (string op in Ops)

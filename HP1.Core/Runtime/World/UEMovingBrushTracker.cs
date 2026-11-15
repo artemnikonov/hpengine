@@ -206,12 +206,14 @@ public sealed partial class HeadlessBspModel
     {
         public readonly Vector3 Location, PrePivot, MainScale, PostScale;
         public readonly float MainSheer, PostSheer;
+        public readonly int MainSheerAxis, PostSheerAxis;
         public readonly int Pitch, Yaw, Roll;
         public BrushPlacement(Vector3 location, int pitch, int yaw, int roll, Vector3 prePivot,
-            Vector3 mainScale, float mainSheer, Vector3 postScale, float postSheer)
+            Vector3 mainScale, float mainSheer, int mainSheerAxis, Vector3 postScale, float postSheer, int postSheerAxis)
         {
             Location = location; Pitch = pitch; Yaw = yaw; Roll = roll; PrePivot = prePivot;
-            MainScale = mainScale; MainSheer = mainSheer; PostScale = postScale; PostSheer = postSheer;
+            MainScale = mainScale; MainSheer = mainSheer; MainSheerAxis = mainSheerAxis;
+            PostScale = postScale; PostSheer = postSheer; PostSheerAxis = postSheerAxis;
         }
     }
 
@@ -750,23 +752,40 @@ public sealed partial class HeadlessBspModel
 
         static readonly float[] IdentityAxes = { 1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f };
 
-        // FCoords::operator*=(FScale) (Core.dll.c:40001): axes via sheerCoords (identity at zero
-        // snap), then component-wise *Scale. Non-zero snap is a loud failure, as in
-        // BrushCoords.MulScale.
-        static void MulScale<F>(float[] a, Vector3 s, float sheer, string who) where F : struct, IFpuMode<F>
+        // FCoords::operator*=(FScale) (Core.dll.c:40001, disasm 0x1011eba0..): axes *= the unit coords with the snapped
+        // sheer in the SheerAxis slot (BrushCoords.SheerCoords; the multiply runs at zero snap too), then *Scale.
+        static void MulScale<F>(float[] a, Vector3 s, float sheer, int axis) where F : struct, IFpuMode<F>
         {
-            if (BrushCoords.SnapSheer(sheer) != 0f) throw new NotSupportedException($"tracker: brush shear ({who}) not ported");
-            MulCoords<F>(a, IdentityAxes);
+            MulCoords<F>(a, SheerAxes(BrushCoords.SnapSheer(sheer), axis));
             for (int r = 0; r < 9; r += 3) { a[r] *= s.x; a[r + 1] *= s.y; a[r + 2] *= s.z; }
         }
 
-        // FCoords::operator/=(FScale) (Core.dll.c:51222): component-wise division first, then
-        // sheerCoords (identity at zero snap).
-        static void DivScale<F>(float[] a, Vector3 s, float sheer, string who) where F : struct, IFpuMode<F>
+        // FCoords::operator/=(FScale) (Core.dll.c:51222): component-wise division first, then the unit coords with the
+        // NEGATED snapped sheer in the same slot.
+        static void DivScale<F>(float[] a, Vector3 s, float sheer, int axis) where F : struct, IFpuMode<F>
         {
-            if (BrushCoords.SnapSheer(sheer) != 0f) throw new NotSupportedException($"tracker: brush shear ({who}) not ported");
             for (int r = 0; r < 9; r += 3) { a[r] /= s.x; a[r + 1] /= s.y; a[r + 2] /= s.z; }
-            MulCoords<F>(a, IdentityAxes);
+            MulCoords<F>(a, SheerAxes(-BrushCoords.SnapSheer(sheer), axis));
+        }
+
+        // The zero snap (the usual case) is shared, read-only: +0 is IdentityAxes; -0 (DivScale's negated zero) keeps its
+        // sign in the slot, so it has its own table per axis — the multiply stays bit-identical (-0 vs +0 terms).
+        static float[] SheerAxes(float sheer, int axis)
+        {
+            int bits = BitConverter.SingleToInt32Bits(sheer);
+            if (bits == 0) return IdentityAxes;
+            if (bits == int.MinValue && (uint)axis < (uint)NegZeroSheerAxes.Length) return NegZeroSheerAxes[axis];
+            return BuildSheerAxes(sheer, axis);
+        }
+
+        static readonly float[][] NegZeroSheerAxes =
+            { BuildSheerAxes(-0f, 0), BuildSheerAxes(-0f, 1), BuildSheerAxes(-0f, 2), BuildSheerAxes(-0f, 3),
+              BuildSheerAxes(-0f, 4), BuildSheerAxes(-0f, 5), BuildSheerAxes(-0f, 6) };
+
+        static float[] BuildSheerAxes(float sheer, int axis)
+        {
+            BrushCoords t = BrushCoords.SheerCoords(sheer, axis);
+            return new[] { t.X.x, t.X.y, t.X.z, t.Y.x, t.Y.y, t.Y.z, t.Z.x, t.Z.y, t.Z.z };
         }
 
         // *=(FRotator) (Core 0x1011d780): yaw, pitch, roll; /=(FRotator) (0x1011e190): roll, pitch,
@@ -806,13 +825,13 @@ public sealed partial class HeadlessBspModel
             where F : struct, IFpuMode<F>
         {
             point = (float[])IdentityAxes.Clone();
-            MulScale<F>(point, pl.PostScale, pl.PostSheer, "PostScale");
+            MulScale<F>(point, pl.PostScale, pl.PostSheer, pl.PostSheerAxis);
             MulRotator<F>(point, pl.Pitch, pl.Yaw, pl.Roll);
-            MulScale<F>(point, pl.MainScale, pl.MainSheer, "MainScale");
+            MulScale<F>(point, pl.MainScale, pl.MainSheer, pl.MainSheerAxis);
             float[] t = (float[])IdentityAxes.Clone();
-            DivScale<F>(t, pl.MainScale, pl.MainSheer, "MainScale");
+            DivScale<F>(t, pl.MainScale, pl.MainSheer, pl.MainSheerAxis);
             DivRotator<F>(t, pl.Pitch, pl.Yaw, pl.Roll);
-            DivScale<F>(t, pl.PostScale, pl.PostSheer, "PostScale");
+            DivScale<F>(t, pl.PostScale, pl.PostSheer, pl.PostSheerAxis);
             vector = new[] { t[0], t[3], t[6], t[1], t[4], t[7], t[2], t[5], t[8] };
             orientation = Orientation<F>(pl.MainScale) * Orientation<F>(pl.PostScale);
         }

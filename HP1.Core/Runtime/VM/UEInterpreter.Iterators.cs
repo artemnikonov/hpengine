@@ -58,6 +58,35 @@ namespace HP1.UEScript
         }
     }
 
+    // TouchingActors (0x1040dd90) walks this->Touching[0..3] (+0xd4) the same way (live slots, index kept).
+    // AActor::execChildActors (Engine 0x1040d990) / execBasedActors (0x1040db90) / ZoneInfo.execZoneActors (0x1040ed10):
+    // a live walk of XLevel->Actors
+    // (+0x80 -> +0x2c data, Num +0x30 re-read every step), the index persists between steps, an empty slot is skipped,
+    // IsA(BaseClass; None -> Actor 0x105d9518) along the class chain, then the per-native test on the actor.
+    public sealed class UEActorWalkIterator : UEIterator
+    {
+        readonly IReadOnlyList<UEObject> _items;
+        readonly UClass _baseClass;
+        readonly Func<UEObject, bool> _test;
+        int _index;
+        public UEActorWalkIterator(IReadOnlyList<UEObject> items, UClass baseClass, Func<UEObject, bool> test)
+        {
+            _items = items; _baseClass = baseClass; _test = test;
+        }
+        public override bool MoveNext(UEInterpreter interp, UEFrame frame)
+        {
+            if (_items != null)
+                while (_index < _items.Count) {
+                    var o = _items[_index++];
+                    if (!UEAllActorsIterator.Matches(o, _baseClass, null) || !_test(o)) continue;
+                    interp.WriteLValue(frame, LoopVar, o);
+                    return true;
+                }
+            interp.WriteLValue(frame, LoopVar, null);
+            return false;
+        }
+    }
+
     // AActor::execVisibleCollidingActors (Engine 0x1040e960): the candidate list is
     // prepared upfront, filtering happens on each step, destroyed ones are not culled.
     public sealed class UEVisibleCollidingIterator : UEIterator

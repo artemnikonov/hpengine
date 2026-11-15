@@ -129,6 +129,10 @@ namespace HP1.UEScript
                             $"CanMoveTo: {start.GetProp(PK.Name)}.{listName}[{i}]={specIndex} "
                             + $"outside ReachSpecs[{ReachSpecs.Count}]");
                     LevelReachSpecRef spec = ReachSpecs[specIndex];
+                    // End == None (a deleted path node, see LoadReachSpecs): the body compares the End POINTER with
+                    // the target (Engine 0x1040144a `mov ecx,[edx+4*ecx+8]; cmp ecx,eax; jne`) and reads nothing through
+                    // it: NULL is just "not this target".
+                    if (spec.EndExport == 0) continue;
                     if (!ActorsByExport.TryGetValue(spec.EndExport, out UEObject specEnd))
                         throw new InvalidDataException(
                             $"CanMoveTo: ReachSpec[{specIndex}] with end {spec.EndExport} "
@@ -289,6 +293,16 @@ namespace HP1.UEScript
                 // about it. Journalled rather than dropped — the port's Log is
                 // where shipped Logf sites land, and losing them would make the
                 // original's output and this one diverge for no stated reason.
+                // ... and that Logf pair is where the original DIES on a spec with a None endpoint: Engine
+                // 0x1040264e..0x10402655 (`mov eax,[eax+4*edx+4]; add eax,0x20; mov eax,[eax]`) reads Start->Name
+                // with no null test, 0x1040267a..0x10402683 the same for End -> access violation at address 0x20.
+                // There is no behaviour to port past this point, so the port stops here too, saying why.
+                if (spec.StartExport == 0 || spec.EndExport == 0)
+                    throw new InvalidDataException(
+                        $"FindPath: {System.IO.Path.GetFileName(LoadedMapPath)} ReachSpec[{specIndex}] has a None endpoint "
+                        + $"(Start={spec.StartExport}, End={spec.EndExport}; a path node deleted in the editor without "
+                        + "rebuilding paths). The original game crashes here (access violation in APawn::findPath, "
+                        + "Engine 0x1040264e): the map needs its paths rebuilt");
                 ActorsByExport.TryGetValue(spec.StartExport, out UEObject logStart);
                 ActorsByExport.TryGetValue(spec.EndExport, out UEObject logEnd);
                 Journal?.Invoke($"find_path_spec startname={logStart?.GetProp(PK.Name) ?? "None"}"
@@ -367,5 +381,68 @@ namespace HP1.UEScript
             return null;
         }
 
+        // APawn::clearPaths (disasm 0x104006b0..0x1040080a), native 522 and FindRandomDest's head. Walks
+        // XLevel->Actors[0].NavigationPointList (+0x494) by nextNavigationPoint (+0x370); per point, in this order:
+        // visitedWeight = 10000000, nextOrdered = 0, bEndPoint cleared, prevOrdered = 0, then cost = bSpecialCost
+        // ? eventSpecialCost(this) (ReturnValue zeroed before ProcessEvent) : ExtraCost.
+        public void ClearPaths(UEInterpreter interp, UEObject pawn)
+        {
+            for (UEObject nav = interp.GetLevelInfo()?.GetProp(PK.NavigationPointList) as UEObject; nav is not null;
+                 nav = nav.GetProp(PK.nextNavigationPoint) as UEObject)
+            {
+                nav.Props["visitedWeight"] = 10000000;
+                nav.Props["nextOrdered"] = null;
+                nav.Props["bEndPoint"] = false;
+                nav.Props["prevOrdered"] = null;
+                nav.Props["cost"] = UEInterpreter.ToBool(nav.GetProp("bSpecialCost"))
+                    ? UEInterpreter.ToInt(UELifecycle.CallEventResult(interp, nav, "SpecialCost", pawn))
+                    : UEInterpreter.ToInt(nav.GetProp("ExtraCost"));
+            }
+        }
+
+        // The shared gate of findPathTo (0x104028f4), findPathToward (0x10401b63), findPathTowardBestInventory
+        // (0x1040223b) and findRandomDest (0x10402dfb): Actors[0].NavigationPointList == NULL or ReachSpecs.Num == 0
+        // -> "no path" (0, or 0.0f for the inventory search). Every shipped map has an empty NavigationPointList (see
+        // ActorReachableNative), so this is the answer on shipped data. A map with a built path network reaches the
+        // search proper (FSortedPathList, breadthPathFrom/TraverseFrom, SetRouteCache, HandleSpecial), not ported:
+        // a loud STOP instead of a guessed route.
+        public void RequireNoPathNetwork(UEInterpreter interp, string who)
+        {
+            if (interp.GetLevelInfo()?.GetProp(PK.NavigationPointList) is null || ReachSpecs.Count == 0) return;
+            throw new NotSupportedException($"{who}: this map has a path network (NavigationPointList and "
+                + $"{ReachSpecs.Count} ReachSpecs); the shipped route search is not ported");
+        }
+
+        // The tail every path exec shares when the search gave no path (execFindPathTo 0x103d8040, execFindPathToward
+        // 0x103d81f6, execFindBestInventoryPath 0x103d4c49 when the weight beat MinWeight): SpecialPause = 0,
+        // bShootSpecial (+0x25c bit 0x2000000) cleared; HandleSpecial runs only for a non-null path and
+        // `if (path == SpecialGoal) SpecialGoal = 0` changes nothing for a null one.
+        public static void NoPathTail(UEObject pawn)
+        {
+            pawn.Props["SpecialPause"] = 0f;
+            pawn.Props["bShootSpecial"] = false;
+        }
+
+        // ANavigationPoint::execdescribeSpec (disasm 0x103d62f0..0x103d6455): XLevel->ReachSpecs[iSpec] (0x1c-byte
+        // FReachSpec) -> out Start (+4), End (+8), ReachFlags (+0x14), Distance (+0). No bounds test in shipped: an
+        // index outside the table reads past it, which the port cannot reproduce — a loud STOP.
+        public void DescribeSpecNative(object[] args)
+        {
+            int i = UEInterpreter.ToInt(args.Length > 0 ? args[0] : null);
+            if (i < 0 || i >= ReachSpecs.Count)
+                throw new NotSupportedException($"describeSpec({i}) outside ReachSpecs[{ReachSpecs.Count}]: shipped reads "
+                    + "past the table (no bounds test, 0x103d640a)");
+            LevelReachSpecRef spec = ReachSpecs[i];
+            UEObject Resolve(int export)
+            {
+                if (export == 0) return null;
+                return ActorsByExport.TryGetValue(export, out UEObject a) ? a : throw new InvalidDataException(
+                    $"describeSpec: ReachSpec[{i}] endpoint {export} does not resolve to an actor");
+            }
+            if (args.Length > 1) args[1] = Resolve(spec.StartExport);
+            if (args.Length > 2) args[2] = Resolve(spec.EndExport);
+            if (args.Length > 3) args[3] = spec.ReachFlags;
+            if (args.Length > 4) args[4] = spec.Distance;
+        }
     }
 }

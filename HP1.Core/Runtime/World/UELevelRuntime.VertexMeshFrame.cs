@@ -79,7 +79,7 @@ namespace HP1.UEScript
             coords.MulRotator(rot.Pitch, rot.Yaw, rot.Roll);
             coords.MulRotator(vm.RotPitch, vm.RotYaw, vm.RotRoll);
             float ds = actor.GetProp(PK.DrawScale) is { } dsv ? UEInterpreter.AsFloat(dsv) : 1f;
-            coords.MulScale(new Vector3(ds * vm.Scale.x, ds * vm.Scale.y, ds * vm.Scale.z), 0f, "vertex mesh frame");
+            coords.MulScale(new Vector3(ds * vm.Scale.x, ds * vm.Scale.y, ds * vm.Scale.z), 0f, 0);
             coords.Origin = new Vector3(coords.Origin.x + vm.Origin.x, coords.Origin.y + vm.Origin.y, coords.Origin.z + vm.Origin.z);
 
             string seqName = (actor.GetProp(PK.AnimSequence) is UEName sn ? sn.ToString() : actor.GetProp(PK.AnimSequence)?.ToString()) ?? "None";

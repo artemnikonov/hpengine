@@ -376,30 +376,26 @@ namespace HP1.UEScript
             }
             else if (physics == 11)
                 PhysTrailer(interp, actor);
-            else if ((physics == 3 || physics == 10) && !UEInterpreter.ClassIsA(actor.Class, "Pawn"))
+            else if (physics == 3 && UEInterpreter.ClassIsA(actor.Class, "Pawn"))
+                PhysSwimming(interp, actor, dt, 0);
+            else if (physics == 7)
+                PhysRolling(interp, actor, dt, 0);   // case 7 in both switches (APawn calls AActor::physRolling)
+            else if (physics == 10 && UEInterpreter.ClassIsA(actor.Class, "Pawn"))
+                PhysSpider(interp, actor, dt, 0);
+            else if (physics == 3 || physics == 10)
             {
                 // PHYS_Swimming/PHYS_Spider on a NON-pawn: the AActor::performPhysics
                 // switch (92687-92718) has no cases 3 and 10 — only the tail.
             }
             else
-            {
-                // STOP: physSwimming (3), physRolling (7), physSpider (10) are not
-                // ported. physSwimming is UNREACHABLE in the campaign (measured):
-                // Physics=3 is set only by SetPhysics(3) under a water-zone check
-                // (Harry.uc:1880/2689, Engine.u PlayerPawn.uc:4628/5109/5391, Pawn.uc:667)
-                // or in state PlayerSwimming, entered only from there (PlayerPawn.uc:
-                // 5484); Engine.dll has no native write of Physics=3; all 226 zones
-                // of 41 maps have effective bWaterZone=False (see PhysFalling).
-                // SetPhysics(7|10) appears neither in Engine.u nor in package scripts.
-                Journal?.Invoke($"physics_boundary actor={actor.GetProp(PK.Name)} mode={physics} location={actor.GetProp(PK.Location)} velocity={actor.GetProp(PK.Velocity)} acceleration={actor.GetProp(PK.Acceleration)} radius={actor.GetProp(PK.CollisionRadius)} height={actor.GetProp(PK.CollisionHeight)} maxstep={actor.GetProp(PK.MaxStepHeight)} region={actor.GetDeclared("Actor", "Region")}");
                 throw new NotSupportedException(
                     $"TickPhysics mode={physics} actor={actor.GetProp(PK.Name)} class={actor.Class?.Name}");
-            }
 
-            // APawn::performPhysics tail (Engine.dll.c:68713-68731): after ANY
-            // active physics mode a pawn turns toward DesiredRotation (players
-            // always; others when Rotation differs or RotationRate.Roll > 0) and
-            // MoveTimer decrements. PHYS_None pawns never reach performPhysics.
+            // APawn::performPhysics tail (Engine.dll.c:68713-68731): after the mode
+            // a pawn turns toward DesiredRotation (players always; others when
+            // Rotation differs or RotationRate.Roll > 0) unless its Physics, re-read
+            // after the mode, is PHYS_Spider (0x103e55e5 `cmp byte [esi+0x30], 0xa; je`),
+            // and MoveTimer decrements. PHYS_None pawns never reach performPhysics.
             // (PostTouch dispatch lives here too; PendingTouch is not tracked.)
             if (!actor.Destroyed)
             {
@@ -407,9 +403,10 @@ namespace HP1.UEScript
                 {
                     UERotator rot = UEInterpreter.AsRotator(actor.GetProp(PK.Rotation));
                     UERotator desired = UEInterpreter.AsRotator(actor.GetProp(PK.DesiredRotation));
-                    if (UEInterpreter.ClassIsA(actor.Class, "PlayerPawn")
-                        || rot.Pitch != desired.Pitch || rot.Yaw != desired.Yaw || rot.Roll != desired.Roll
-                        || UEInterpreter.AsRotator(actor.GetProp(PK.RotationRate)).Roll > 0)
+                    if (UEInterpreter.ToInt(actor.GetProp(PK.Physics)) != 10
+                        && (UEInterpreter.ClassIsA(actor.Class, "PlayerPawn")
+                            || rot.Pitch != desired.Pitch || rot.Yaw != desired.Yaw || rot.Roll != desired.Roll
+                            || UEInterpreter.AsRotator(actor.GetProp(PK.RotationRate)).Roll > 0))
                         PhysicsRotation(actor, dt, preStepVelocity);
                     UEPawnMovement.DecrementMoveTimer(actor, dt);
                 }
@@ -852,10 +849,8 @@ namespace HP1.UEScript
         //    PHYS_None, gives the unused time back for the first two hits per call
         //    and leaves the velocity alone in the tail (85381 `& 0x11`).
         //    The bounce is set by script, not by the engine.
-        // Un-reached shipped branches stay LOUD STOPs, checked on EVERY
-        // substep: the water-zone formula, the bBobbing Decoration formula, the
-        // PlayerPawn wet-feet formula, and the swim entry (startSwimming).
-        // ZoneVelocity and bBounce are ported. ──
+        // The water-zone, bBobbing Decoration and PlayerPawn wet-feet formulas, the swim
+        // entry (startSwimming), ZoneVelocity and bBounce are ported. ──
         // MoveActor 0x103aa58c..0x103aa65d: every |component| below 0.0001f (a NaN counts as below) -> dist 0, direction =
         // Delta; otherwise dist = appSqrt((Z·Z + Y·Y) + X·X) stored as float, r = float(1/dist), direction = float(c·r).
         internal static (float dist, Vector3 dir) MoveActorDirection(Vector3 d)

@@ -84,8 +84,7 @@ namespace HP1.UEScript
             // Render/gameplay resources are spread across HPModels, HProps, DProps,
             // level packages, etc. Discover the shipped package set itself instead of
             // maintaining a name allowlist; stable path sort keeps diagnostics fixed.
-            foreach (string path in Directory.EnumerateFiles(systemDir, "*.u")
-                         .OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+            foreach (string path in UEInstallPath.PackageFiles(Path.GetDirectoryName(Path.GetFullPath(systemDir.TrimEnd('/', '\\'))), "System"))
             {
                 var package = new PackageFile(path);
                 foreach (PackageExport export in package.Exports)

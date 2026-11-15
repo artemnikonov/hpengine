@@ -160,8 +160,8 @@ namespace HP1.UEScript
             UERotator rot = UEInterpreter.AsRotator(brushActor.GetProp(PK.Rotation));
             Vector3 pivot = UEInterpreter.AsVector3(brushActor.GetProp(PK.PrePivot));
             return BrushCoords.ToWorld(location, rot.Pitch, rot.Yaw, rot.Roll, pivot,
-                BrushScaleOf(brushActor, "MainScale"), BrushSheerOf(brushActor, "MainScale"),
-                BrushScaleOf(brushActor, "PostScale"), BrushSheerOf(brushActor, "PostScale"));
+                BrushScaleOf(brushActor, "MainScale"), BrushSheerOf(brushActor, "MainScale"), BrushSheerAxisOf(brushActor, "MainScale"),
+                BrushScaleOf(brushActor, "PostScale"), BrushSheerOf(brushActor, "PostScale"), BrushSheerAxisOf(brushActor, "PostScale"));
         }
 
         public BrushCoords BrushToLocalCoords(UEObject brushActor)
@@ -170,8 +170,8 @@ namespace HP1.UEScript
             UERotator rot = UEInterpreter.AsRotator(brushActor.GetProp(PK.Rotation));
             Vector3 pivot = UEInterpreter.AsVector3(brushActor.GetProp(PK.PrePivot));
             return BrushCoords.ToLocal(location, rot.Pitch, rot.Yaw, rot.Roll, pivot,
-                BrushScaleOf(brushActor, "MainScale"), BrushSheerOf(brushActor, "MainScale"),
-                BrushScaleOf(brushActor, "PostScale"), BrushSheerOf(brushActor, "PostScale"));
+                BrushScaleOf(brushActor, "MainScale"), BrushSheerOf(brushActor, "MainScale"), BrushSheerAxisOf(brushActor, "MainScale"),
+                BrushScaleOf(brushActor, "PostScale"), BrushSheerOf(brushActor, "PostScale"), BrushSheerAxisOf(brushActor, "PostScale"));
         }
 
         public BrushBounds BrushBoundsOf(UEObject brushActor)
@@ -193,6 +193,10 @@ namespace HP1.UEScript
         static float BrushSheerOf(UEObject brushActor, string prop)
             => brushActor.GetProp(prop) is UEObject sc
                 ? UEInterpreter.AsFloat(sc.GetProp(PK.SheerRate)) : 0f;
+
+        // FScale.SheerAxis (+0x10, ESheerAxis byte). With SheerRate 0 the slot gets 0 and the axis does not matter.
+        static int BrushSheerAxisOf(UEObject brushActor, string prop)
+            => brushActor.GetProp(prop) is UEObject sc ? UEInterpreter.ToInt(sc.GetProp(PK.SheerAxis)) : 0;
 
         // Shipped brush-actor trace: the brush's own UModel::LineCheck with the
         // actor's ToWorld coords (both trace branches validated 4800/4800

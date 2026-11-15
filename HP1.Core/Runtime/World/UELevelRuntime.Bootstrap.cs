@@ -881,7 +881,9 @@ namespace HP1.UEScript
         // name, and reuses it; otherwise it spawns a new one at FindPlayerStart.
         // Tut1 has both branches live: the placed harry0 (its PRI appears in its
         // PostBeginPlay, i.e. BEFORE this point) and PlayerStart0.
-        public UEObject SpawnPlayActor(UEInterpreter interp, PlayWorldConfig cfg)
+        // Only through LoadMap's Client block (SpawnPlayActorThenBrushTracker, both bootstraps): shipped passes LoadMap's own
+        // URL (Engine.dll.c:51605-51609), which the port holds in LastUrl from AdoptLoadedUrl — no caller without one.
+        UEObject SpawnPlayActor(UEInterpreter interp, PlayWorldConfig cfg)
         {
             if (interp is null) throw new ArgumentNullException(nameof(interp));
             if (cfg is null) throw new ArgumentNullException(nameof(cfg));
@@ -915,17 +917,22 @@ namespace HP1.UEScript
                     + $":isPlayer={UEInterpreter.ToBool(p.GetProp(PK.bIsPlayer))}");
             Log($"client_init pawnlist {string.Join(' ', pawnOrder)}");
 
-            // GameInfo.Login(Portal, Options, out Error, SpawnClass) — 51649.
+            // GameInfo.Login(Portal, Options, out Error, SpawnClass) — 51649. Portal is the LOADED URL's (FURL +0x34 of
+            // SpawnPlayActor's URL argument, Engine.dll.c:51605-51609; LoadMap passes its own URL): LastUrl, which
+            // AdoptLoadedUrl set from the travel target (Map#Portal) or, on the first load, from cfg.Portal.
             UFunction login = interp.FindEventFunction(game, "Login")
                 ?? throw new InvalidOperationException("GameInfo.Login missing");
-            var args = new object[] { cfg.Portal ?? "", cfg.Options ?? "", "", spawnClass };
-            Log($"client_init login game={game.GetProp(PK.Name)} spawnClass={spawnClass.Name}");
+            string portal = LoginPortal();
+            var args = new object[] { portal, cfg.Options ?? "", "", spawnClass };
+            Log($"client_init login game={game.GetProp(PK.Name)} spawnClass={spawnClass.Name}"
+                + (portal.Length != 0 ? $" portal={portal}" : ""));
             object result = interp.Invoke(game, login, args);
             string error = args[2] as string ?? "";
             if (result is not UEObject pawn)
             {
-                // Shipped logs and returns NULL (51665..51669). For the port this is not
-                // "continue without a player": there is nothing to play with.
+                // SpawnPlayActor logs and returns NULL (51665..51669); its caller
+                // MatchViewportsToActors (0x1039bec3) then calls GError->Logf (0x1039becd..0x1039beea),
+                // a critical error: the original dies too (e.g. `open Entry`, Entry.unr has no PlayerStart).
                 throw new InvalidOperationException(
                     $"SpawnPlayActor: Login returned none (error={error})");
             }
@@ -1022,8 +1029,6 @@ namespace HP1.UEScript
             items = UEInterpreter.ToBool(level.GetProp(PK.bNextItems));
             UEUrl target = UEUrl.Parse(LastUrl, next, UEUrl.Relative);
             if (target.HasOption("restart")) target = LastUrl.Copy();
-            if (target.Portal.Length != 0)
-                throw new NotSupportedException($"travel {next}: portal '#{target.Portal}' is not passed by the frontends in PlayWorldConfig");
             _travelRestart = string.Equals(next, "?RESTART", StringComparison.OrdinalIgnoreCase);
             _capturedUrl = target;
             url = target.Map + target.OptionsString;
@@ -1044,15 +1049,14 @@ namespace HP1.UEScript
             if (string.IsNullOrEmpty(_openRequestUrl)) return false;
             string next = _openRequestUrl;
             _openRequestUrl = null;   // TravelURL = "" after Browse
-            UEUrl target = UEUrl.Parse(LastUrl, next, UEUrl.Partial);
+            items = _openRequestItems;   // Viewport.bTravelItems (+0xa4)
+            UEUrl target = UEUrl.Parse(LastUrl, next, _openRequestType);   // Viewport.TravelType (+0x94)
             if (target.HasOption("restart")) target = LastUrl.Copy();
-            if (target.Portal.Length != 0)
-                throw new NotSupportedException($"travel {next}: portal '#{target.Portal}' is not passed by the frontends in PlayWorldConfig");
             _travelRestart = string.Equals(next, "?RESTART", StringComparison.OrdinalIgnoreCase);
             _capturedUrl = target;
             url = target.Map + target.OptionsString;
             _pendingLevelPackage = System.IO.Path.GetFileNameWithoutExtension(target.Map);
-            Log($"travel_take client={next} url={url} items=False restart={_travelRestart}");
+            Log($"travel_take client={next} url={url} items={items} restart={_travelRestart}");
             return true;
         }
 
@@ -1065,11 +1069,18 @@ namespace HP1.UEScript
         UEUrl _capturedUrl;
         bool _travelRestart;
         string _openRequestUrl;
+        int _openRequestType = UEUrl.Partial;
+        bool _openRequestItems;
 
         // Fixture seam: drop a captured but not yet loaded travel.
-        internal void ClearTravelCapture() { _capturedUrl = null; _travelRestart = false; _openRequestUrl = null; _travelTakenLevel = null; _travelTakenUrl = null; }
+        internal void ClearTravelCapture() { _capturedUrl = null; _travelRestart = false; _openRequestUrl = null; _openRequestType = UEUrl.Partial; _openRequestItems = false; _travelTakenLevel = null; _travelTakenUrl = null; }
 
-        void AdoptLoadedUrl(PlayWorldConfig cfg)
+        // Set by AdoptLoadedUrl before ClientInit. Shipped SpawnPlayActor always receives LoadMap's URL; a missing one is a
+        // port caller outside the bootstrap — loud, no cfg.Portal stand-in.
+        internal string LoginPortal() => (LastUrl ?? throw new InvalidOperationException(
+            "SpawnPlayActor/Login: LastURL not set — AdoptLoadedUrl (BootstrapPlayWorld/BootstrapLoadedWorld) did not run")).Portal;
+
+        internal void AdoptLoadedUrl(PlayWorldConfig cfg)
         {
             LastUrl = _capturedUrl
                 ?? UEUrl.FromOptions(System.IO.Path.GetFileName(LoadedMapPath ?? ""), cfg.Portal, cfg.Options);

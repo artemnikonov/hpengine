@@ -61,8 +61,13 @@
 //
 // FEBook.ChangePage (author decision 2026-11-12, IMPROVEMENT, NOT ORIGINAL: an open combo list closes on a page
 // change; D-83). Details at ChangePageClosesComboList.
+//
+// FEBook.KeyEvent, FEStoryBookPage.KeyEvent (author decision 2026-11-15, IMPROVEMENT, NOT ORIGINAL; D-89 (7)): the
+// splash skip and the story-book page skip of the shipped debug mode (bDebugMode, cut by D-77) for every player.
+// Details at KeySkipsSplash / SpaceSkipsStoryPage.
 using System;
 using System.Collections.Generic;
+using UELib;
 using UELib.Core;
 
 namespace HP1.UEScript
@@ -90,6 +95,8 @@ namespace HP1.UEScript
             ("baseHarry", "KeyDownEvent", (interp, self, args, original) => null),
             ("stateJump", "HitWall", SneakJumpHitWall),
             ("FEBook", "ChangePage", ChangePageClosesComboList),
+            ("FEBook", "KeyEvent", KeySkipsSplash),
+            ("FEStoryBookPage", "KeyEvent", SpaceSkipsStoryPage),
         };
 
         // The replaced functions by name (owner class or state, function), for the binding census of a mod's scripts
@@ -201,39 +208,6 @@ namespace HP1.UEScript
             return null;
         }
 
-        // Pad view only: two lines naming the pad's fixed, not rebindable buttons (UEInput.GamepadFixedHint), English in
-        // every edition like the pad key names. UWindowLabelControls like the page's other labels (font 0, PurpleColour)
-        // under the left column: the strip between the Sound Volume slider (ends at y 403) and the page's bottom (430)
-        // holds no control (the page's 528x430 units). The page object has no variable for them: kept here per page.
-        const float PadHintX = 0f, PadHintY = 404f, PadHintW = 280f, PadHintH = 13f;
-        static readonly System.Runtime.CompilerServices.ConditionalWeakTable<UEObject, UEObject[]> PadHints = new();
-        internal static UEObject[] PadHintLabels(UEObject page) => PadHints.TryGetValue(page, out UEObject[] h) ? h : null;
-        static void PadHint(UEInterpreter interp, UEObject page, bool pad, string[] lines)
-        {
-            UEObject[] hints = PadHintLabels(page);
-            if (hints is null)
-            {
-                if (!pad) return;
-                UEObject like = page.GetProp("ControlLabel") as UEObject ?? throw new InvalidOperationException("FEOptionsPage: no ControlLabel");
-                hints = new UEObject[lines.Length];
-                for (int i = 0; i < hints.Length; i++)
-                {
-                    hints[i] = Call(interp, page, "CreateControl", like.Class, PadHintX, PadHintY + i * PadHintH, PadHintW, PadHintH) as UEObject
-                        ?? throw new InvalidOperationException("FEOptionsPage: the pad hint label was not created");
-                    Call(interp, hints[i], "SetFont", 0);
-                    hints[i].Props["TextColor"] = page.GetProp("PurpleColour");
-                }
-                PadHints.Add(page, hints);
-            }
-            for (int i = 0; i < hints.Length; i++)
-            {
-                bool shown = UEInterpreter.ToBool(hints[i].GetProp("bWindowVisible"));
-                if (!pad) { if (shown) Call(interp, hints[i], "HideWindow"); continue; }
-                if (hints[i].GetProp("Text") as string != lines[i]) Call(interp, hints[i], "SetText", lines[i]);
-                if (!shown) Call(interp, hints[i], "ShowWindow");
-            }
-        }
-
         static object OptionsLoadSettings(UEInterpreter interp, UEObject self, object[] args, Func<object> original)
         {
             object r = original();
@@ -266,6 +240,196 @@ namespace HP1.UEScript
             foreach (var e in Table)
                 if (HP1.Core.UEClassRegistry.Shared?.Find(e.Class) is UClass c && !Declares(c, e.Function)) absent.Add((e.Class, e.Function));
             return absent;
+        }
+
+        // SHADOWED MOD CHANGES (author decision 2026-11-13: log line only, behaviour unchanged). The overrides bind by
+        // name, so when a mod's package brings its own body of a target, the override still replaces (or wraps) it and
+        // the mod's change is lost without a word. Every function of the install's System/*.u an override binds to
+        // (Lookup's rule: owner class or state name + function name, read from the export tables, so packages a level
+        // loads later are covered at start) is hashed — FNV-1a 64 of the function export's serialized bytes — and compared
+        // with the hashes of the supported shipped editions. The bytes hold name and object indices of the package, so
+        // a package recompiled with the function's source untouched is reported too: the line says "differs".
+        // The table is printed by the tool (HP1_PROBE_OVERRIDES=1 on an unmodified install: `override_hash` lines);
+        // one row per edition (UEEdition.DataSet name) and bound function. A recognised install is compared with ITS OWN
+        // edition's rows only (UEEdition.OfSystem of the scripts directory); an unrecognised one (a mod's scripts, another
+        // release) with those of the unmodified editions (US153, UK11, RU_EA). The modified re-releases (VERSIONS.md R4 MODDED_EN, R5 CITY_PL) have rows of their
+        // own, so their stock scripts are not reported as a mod's; that they change overridden functions is said once
+        // (ReleaseChangedTargets). No mod or package is named in the comparison.
+        static readonly (string Edition, string Target, string Hash)[] ShippedScriptHashes =
+        {
+            ("US153", "baseHarry.KeyDownEvent", "2dca573cf4247aa6"),
+            ("US153", "FEBook.ChangePage", "02faaf06b85f0bf3"),
+            ("US153", "FEBook.KeyEvent", "9451dcb62d05881b"),
+            ("US153", "FEStoryBookPage.KeyEvent", "98eda0779eaf2c47"),
+            ("US153", "HPMenuOptionHSlider.BeforePaint", "5aeaba619d63d417"),
+            ("US153", "HPMenuOptionComboList.BeforePaint", "7be99385862dd9e9"),
+            ("US153", "HPMenuOptionCheckBox.BeforePaint", "48854604846da0e2"),
+            ("US153", "FEOptionsPage.LocalizeStrings", "7b233e839d576d8c"),
+            ("US153", "FEOptionsPage.BeforePaint", "e7f3c9dd01980044"),
+            ("US153", "FEOptionsPage.IsSupportedResolution", "d42530f960ec36aa"),
+            ("US153", "FEOptionsPage.LoadAvailableSettings", "bf8419e535a3aeb7"),
+            ("US153", "FEOptionsPage.LoadExistingKeys", "fa03cc7c7f241c46"),
+            ("US153", "FEOptionsPage.SettingsChanged", "de4517f6baf72710"),
+            ("US153", "FEOptionsPage.ObjectDetailChanged", "cfd5d2ba5cb523e5"),
+            ("US153", "FEOptionsPage.ProcessKey", "c8951d00f721a0fd"),
+            ("US153", "killbean.Tick", "cca4cf592845b483"),
+            ("US153", "stateJump.HitWall", "a28aa1dbf5d1063e"),
+            ("US153", "UWindowVScrollBar.Paint", "56f44329c8cb3830"),
+            ("UK11", "baseHarry.KeyDownEvent", "5983754497e433dc"),
+            ("UK11", "FEBook.ChangePage", "d526a85646ab7006"),
+            ("UK11", "FEBook.KeyEvent", "c91de138349618ae"),
+            ("UK11", "FEStoryBookPage.KeyEvent", "0ee4c8c77d03e41b"),
+            ("UK11", "HPMenuOptionHSlider.BeforePaint", "212941ed235cc1ca"),
+            ("UK11", "HPMenuOptionComboList.BeforePaint", "00decb0f6932c6a3"),
+            ("UK11", "FEOptionsPage.LocalizeStrings", "bc1276c975b6ec1a"),
+            ("UK11", "FEOptionsPage.BeforePaint", "21bc3101db5545bd"),
+            ("UK11", "FEOptionsPage.LoadAvailableSettings", "27970778c0fc59f0"),
+            ("UK11", "FEOptionsPage.LoadExistingKeys", "9539e6dfb65776f3"),
+            ("UK11", "FEOptionsPage.SettingsChanged", "d8d437cc2f3aad3b"),
+            ("UK11", "FEOptionsPage.ObjectDetailChanged", "4cb56038da2ed519"),
+            ("UK11", "FEOptionsPage.ProcessKey", "f3d8fafd104c95ef"),
+            ("UK11", "HPMenuOptionCheckBox.BeforePaint", "b94757d1b2d43dbe"),
+            ("UK11", "killbean.Tick", "68d35a7ddb17c291"),
+            ("UK11", "stateJump.HitWall", "80d2e328157069a3"),
+            ("UK11", "UWindowVScrollBar.Paint", "327578661fd5e55d"),
+            ("RU_EA", "baseHarry.KeyDownEvent", "ed0bb342b3702181"),
+            ("RU_EA", "FEBook.ChangePage", "522e2a93103c1a70"),
+            ("RU_EA", "FEBook.KeyEvent", "df5fb25e8b5c4b9f"),
+            ("RU_EA", "FEStoryBookPage.KeyEvent", "9a3fd372e2a8b466"),
+            ("RU_EA", "HPMenuOptionHSlider.BeforePaint", "03cdfa6683bc9c33"),
+            ("RU_EA", "HPMenuOptionComboList.BeforePaint", "82f66de799409bda"),
+            ("RU_EA", "HPMenuOptionCheckBox.BeforePaint", "7215f48695050439"),
+            ("RU_EA", "FEOptionsPage.LocalizeStrings", "bceb6a75b6686442"),
+            ("RU_EA", "FEOptionsPage.BeforePaint", "33895efc572bbb61"),
+            ("RU_EA", "FEOptionsPage.IsSupportedResolution", "fd2aa08b42009dc6"),
+            ("RU_EA", "FEOptionsPage.LoadAvailableSettings", "96073468ff6cd97d"),
+            ("RU_EA", "FEOptionsPage.LoadExistingKeys", "91b81bb226fc8f93"),
+            ("RU_EA", "FEOptionsPage.SettingsChanged", "adedfabd4cd41d47"),
+            ("RU_EA", "FEOptionsPage.ObjectDetailChanged", "754f558bd12ac42f"),
+            ("RU_EA", "FEOptionsPage.ProcessKey", "51f31751bceed617"),
+            ("RU_EA", "killbean.Tick", "cca4cf592845b483"),
+            ("RU_EA", "stateJump.HitWall", "a28aa1dbf5d1063e"),
+            ("RU_EA", "UWindowVScrollBar.Paint", "685ff3a4215700b7"),
+            // R4 modded EN re-release (its v3 and v4 share the .u files)
+            ("MODDED_EN", "baseHarry.KeyDownEvent", "810ed15275c339ff"),
+            ("MODDED_EN", "HPMenuOptionCheckBox.BeforePaint", "a3293db5ea044f29"),
+            ("MODDED_EN", "FEBook.ChangePage", "50566f0e2f564ee8"),
+            ("MODDED_EN", "FEBook.KeyEvent", "a878bfe5037d9a81"),
+            ("MODDED_EN", "FEStoryBookPage.KeyEvent", "f31bbb9eba6aa361"),
+            ("MODDED_EN", "HPMenuOptionComboList.BeforePaint", "1036c158180952d1"),
+            ("MODDED_EN", "HPMenuOptionHSlider.BeforePaint", "b5c8247745630e4e"),
+            ("MODDED_EN", "FEOptionsPage.LocalizeStrings", "07e3be4e5d0a7ccd"),
+            ("MODDED_EN", "FEOptionsPage.BeforePaint", "b3d9090834f627b8"),
+            ("MODDED_EN", "FEOptionsPage.IsSupportedResolution", "18ffb3bc1646f699"),
+            ("MODDED_EN", "FEOptionsPage.LoadAvailableSettings", "98c2bdc778968f46"),
+            ("MODDED_EN", "FEOptionsPage.LoadExistingKeys", "26427865ac02bc03"),
+            ("MODDED_EN", "FEOptionsPage.SettingsChanged", "3d12840bd036d800"),
+            ("MODDED_EN", "FEOptionsPage.ObjectDetailChanged", "1b96a3dd49ee7bde"),
+            ("MODDED_EN", "FEOptionsPage.ProcessKey", "f4144a7b7b308684"),
+            ("MODDED_EN", "killbean.Tick", "cca4cf592845b483"),
+            ("MODDED_EN", "stateJump.HitWall", "1523a8efa493168f"),
+            ("MODDED_EN", "UWindowVScrollBar.Paint", "56f44329c8cb3830"),
+            // R5 City disc: only HPBase.u of its scripts differs from US 1.53, and none of the bound functions in it
+            ("CITY_PL", "baseHarry.KeyDownEvent", "2dca573cf4247aa6"),
+            ("CITY_PL", "FEBook.ChangePage", "02faaf06b85f0bf3"),
+            ("CITY_PL", "FEBook.KeyEvent", "9451dcb62d05881b"),
+            ("CITY_PL", "FEStoryBookPage.KeyEvent", "98eda0779eaf2c47"),   // HPMenu.u byte-identical to US (sha1 3d9aa801)
+            ("CITY_PL", "HPMenuOptionHSlider.BeforePaint", "5aeaba619d63d417"),
+            ("CITY_PL", "HPMenuOptionComboList.BeforePaint", "7be99385862dd9e9"),
+            ("CITY_PL", "HPMenuOptionCheckBox.BeforePaint", "48854604846da0e2"),
+            ("CITY_PL", "FEOptionsPage.LocalizeStrings", "7b233e839d576d8c"),
+            ("CITY_PL", "FEOptionsPage.BeforePaint", "e7f3c9dd01980044"),
+            ("CITY_PL", "FEOptionsPage.IsSupportedResolution", "d42530f960ec36aa"),
+            ("CITY_PL", "FEOptionsPage.LoadAvailableSettings", "bf8419e535a3aeb7"),
+            ("CITY_PL", "FEOptionsPage.LoadExistingKeys", "fa03cc7c7f241c46"),
+            ("CITY_PL", "FEOptionsPage.SettingsChanged", "de4517f6baf72710"),
+            ("CITY_PL", "FEOptionsPage.ObjectDetailChanged", "cfd5d2ba5cb523e5"),
+            ("CITY_PL", "FEOptionsPage.ProcessKey", "c8951d00f721a0fd"),
+            ("CITY_PL", "killbean.Tick", "cca4cf592845b483"),
+            ("CITY_PL", "stateJump.HitWall", "a28aa1dbf5d1063e"),
+            ("CITY_PL", "UWindowVScrollBar.Paint", "56f44329c8cb3830"),
+        };
+
+        // systemDir: the scripts to read; null = the directory of the loaded scripts (the game). A package that cannot be
+        // read (a mod's damaged .u) is skipped and named in `unhashed` ("<path>: <error>"): a log path never stops the game.
+        public static List<(string Class, string Function, string Hash)> TargetScriptHashes(string systemDir = null,
+            List<string> unhashed = null)
+        {
+            var hashes = new List<(string, string, string)>();
+            IReadOnlyList<UnrealPackage> loaded = HP1.Core.UEClassRegistry.Shared?.Packages;
+            if (loaded is null || loaded.Count == 0) return hashes;
+            systemDir ??= System.IO.Path.GetDirectoryName(loaded[0].FullPackageName);
+            foreach (string path in UEInstallPath.PackageFiles(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(systemDir.TrimEnd('/', '\\'))), "System"))
+            {
+                // Tables only (UELib reads them in LoadPackage); the loaded instance's tables where there is one.
+                UnrealPackage own = null, pkg = null;
+                foreach (UnrealPackage l in loaded)
+                    if (string.Equals(l.FullPackageName, path, StringComparison.OrdinalIgnoreCase)) pkg = l;
+                try
+                {
+                    pkg ??= own = UnrealLoader.LoadPackage(path, System.IO.FileAccess.Read);
+                    System.IO.FileStream file = null;   // an own handle: the package's stream may be in use by a reader
+                    try
+                    {
+                        foreach (UExportTableItem e in pkg.Exports)
+                        {
+                            if (!string.Equals(e.Class?.ObjectName.ToString(), "Function", StringComparison.OrdinalIgnoreCase)) continue;
+                            string cls = e.Outer?.ObjectName.ToString(), function = e.ObjectName.ToString();
+                            if (!Array.Exists(Table, t => string.Equals(t.Function, function, StringComparison.OrdinalIgnoreCase)
+                                    && string.Equals(t.Class, cls, StringComparison.OrdinalIgnoreCase))) continue;
+                            var bytes = new byte[e.SerialSize];
+                            file ??= System.IO.File.OpenRead(path);
+                            file.Seek(e.SerialOffset, System.IO.SeekOrigin.Begin);
+                            file.ReadExactly(bytes);
+                            ulong h = 14695981039346656037UL;                 // FNV-1a 64: change detection, not identity
+                            foreach (byte x in bytes) h = (h ^ x) * 1099511628211UL;
+                            hashes.Add((cls, function, h.ToString("x16")));
+                        }
+                    }
+                    finally { file?.Dispose(); }
+                }
+                catch (Exception e) { unhashed?.Add($"{path}: {e.GetType().Name}: {e.Message}"); }
+                finally { own?.Dispose(); }
+            }
+            return hashes;
+        }
+
+        static bool Modified(string edition) => UEEdition.TierOf(Enum.Parse<UEEdition.DataSet>(edition)) == UEEdition.Support.Modified;
+
+        // The edition whose rows a scripts directory is compared with: its own when recognised, else null (the rows of the
+        // unmodified editions: a re-release's modded function is a mod's change for any other install).
+        static string RowsOf(string systemDir)
+        {
+            if (systemDir is null && HP1.Core.UEClassRegistry.Shared?.Packages is { Count: > 0 } loaded)
+                systemDir = System.IO.Path.GetDirectoryName(loaded[0].FullPackageName);
+            UEEdition.DataSet data = systemDir is null ? UEEdition.DataSet.Unknown : UEEdition.OfSystem(systemDir).Data;
+            return data == UEEdition.DataSet.Unknown ? null : data.ToString();
+        }
+
+        // The targets whose function in the install's scripts is not a shipped one. For the game's log (HPEngineProgram).
+        public static List<(string Class, string Function)> ChangedTargets(string systemDir = null, List<string> unhashed = null)
+        {
+            var changed = new List<(string, string)>();
+            string edition = RowsOf(systemDir);
+            var rows = Array.FindAll(ShippedScriptHashes, r => edition is null ? !Modified(r.Edition) : r.Edition == edition);
+            foreach (var (cls, function, hash) in TargetScriptHashes(systemDir, unhashed))
+                if (!Array.Exists(rows, r => r.Hash == hash && string.Equals(r.Target, cls + "." + function, StringComparison.OrdinalIgnoreCase))
+                    && !changed.Contains((cls, function)))
+                    changed.Add((cls, function));
+            return changed;
+        }
+
+        // A recognised modified re-release: the bound functions its own scripts changed from US 1.53 (by the table rows, not
+        // the files). The port's overrides replace them there too. Empty for the reference editions and unrecognised installs.
+        public static List<string> ReleaseChangedTargets(string systemDir = null)
+        {
+            var changed = new List<string>();
+            string edition = RowsOf(systemDir);
+            if (edition is null || !Modified(edition)) return changed;
+            foreach (var r in ShippedScriptHashes)
+                if (r.Edition == edition && !Array.Exists(ShippedScriptHashes, u => u.Edition == "US153" && u.Target == r.Target && u.Hash == r.Hash))
+                    changed.Add(r.Target);
+            return changed;
         }
 
         static void UkResolutions(UEInterpreter interp, UEObject self)
@@ -306,7 +470,6 @@ namespace HP1.UEScript
                     if (input.PadView && self.GetProp("LocalizedKeyName") is List<object> names) PadKeyNames(interp, names);
                     Call(interp, self, "LoadExistingKeys");
                 }
-                PadHint(interp, self, input.ControlsShowsPad(self), input.GamepadFixedHint());
             }
             object r = original();
             if (self.GetProp("ColorDepthCombo") is not UEObject depth || self.GetProp("ResolutionCombo") is not UEObject res) return r;
@@ -514,6 +677,35 @@ namespace HP1.UEScript
                 w = next;
             }
             return original();
+        }
+
+        // FEBook.KeyEvent (FEBook.uc:767-781): with no modal window, a key press during the splash sets fShowSplashTime
+        // to -1 (handleSplash then goes to the next screen) — shipped only `&& HPConsole.bDebugMode`; here without that
+        // gate. Everything else is the shipped body.
+        static object KeySkipsSplash(UEInterpreter interp, UEObject self, object[] args, Func<object> original)
+        {
+            if ((self.GetProp(PK.Root) as UEObject)?.GetProp("ModalWindow") is null
+                && UEInterpreter.ToBool(self.GetProp("bShowSplash")) && UEInterpreter.ToInt(args[1]) == 1)
+            {
+                self.Props["fShowSplashTime"] = -1f;
+                return true;
+            }
+            return original();
+        }
+
+        // FEStoryBookPage.KeyEvent (FEStoryBookPage.uc:466-503): Space pressed goes to the next page once the page has
+        // been shown longer than _MinTimeOnPage, never from page 0 — the shipped debug-mode branch (bAllowPageSkipping =
+        // bDebugMode) for every player. GotoNextPage is the same call the page timer makes (Tick), so the story's end,
+        // the bonus card of story 6 and the travel are unchanged. The debug "NextPage" button and the F fast-skip
+        // stay debug-only (not built). Other keys: the shipped body.
+        static object SpaceSkipsStoryPage(UEInterpreter interp, UEObject self, object[] args, Func<object> original)
+        {
+            if (UEInterpreter.ToInt(args[1]) != 1 || UEInterpreter.ToInt(args[0]) != 32) return original();
+            float now = UEInterpreter.AsFloat((Call(interp, self, "GetLevel") as UEObject)?.GetProp("TimeSeconds"));
+            if (now - UEInterpreter.AsFloat(self.GetProp("_TimeSecondsSave")) > UEInterpreter.AsFloat(self.GetProp("_MinTimeOnPage"))
+                && UEInterpreter.ToInt(self.GetProp("iCurrentPage")) != 0)
+                Call(interp, self, "GotoNextPage");
+            return true;
         }
 
         // Cache keyed by the function itself: the check runs on every script call, so it

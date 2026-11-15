@@ -85,8 +85,8 @@ namespace HP1.UEScript
                 UERotator rot = UEInterpreter.AsRotator(o.GetProp(PK.Rotation));
                 return new HeadlessBspModel.BrushPlacement(UEInterpreter.AsVector3(o.GetProp(PK.Location)),
                     rot.Pitch, rot.Yaw, rot.Roll, UEInterpreter.AsVector3(o.GetProp(PK.PrePivot)),
-                    BrushScaleOf(o, "MainScale"), BrushSheerOf(o, "MainScale"),
-                    BrushScaleOf(o, "PostScale"), BrushSheerOf(o, "PostScale"));
+                    BrushScaleOf(o, "MainScale"), BrushSheerOf(o, "MainScale"), BrushSheerAxisOf(o, "MainScale"),
+                    BrushScaleOf(o, "PostScale"), BrushSheerOf(o, "PostScale"), BrushSheerAxisOf(o, "PostScale"));
             }
         }
 

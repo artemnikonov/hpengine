@@ -427,7 +427,9 @@ namespace HP1.UEScript
             {
                 UEObject zone = (pawn.GetDeclared("Actor", "Region") as UEObject)?.GetProp(PK.Zone) as UEObject;
                 Vector3 zg = UEInterpreter.AsVector3(zone?.GetProp(PK.ZoneGravity));
-                float buoy = 1f - UEInterpreter.AsFloat(pawn.GetProp(PK.Buoyancy)) / UEInterpreter.AsFloat(pawn.GetProp(PK.Mass));
+                // 0x103ebbe1..0x103ebbf6: Buoyancy/Mass stays in the register, 1 − it is stored as float.
+                float buoy = R64(X(1f) - HP1.Core.X87Ext.Div64(X(UEInterpreter.AsFloat(pawn.GetProp(PK.Buoyancy))),
+                    X(UEInterpreter.AsFloat(pawn.GetProp(PK.Mass))))).ToFloat();
                 vel += zg * dt * buoy;
             }
             vel = CalcVelSpeedLimit(vel, maxSpeed, walkingPlayer, effFriction, dt);
@@ -540,6 +542,90 @@ namespace HP1.UEScript
             InstallLatent(self, frame, LatentRunState.MoveToward);
             RotateToward(self, dest);
             MoveToward(self, dest, interp);
+        }
+
+        // APawn::execStrafeTo (disasm 0x103d8c60..0x103d8d93; the decompile lost the arguments): MoveTarget = 0,
+        // bReducedSpeed cleared, DesiredSpeed = bIsPlayer ? MaxDesiredSpeed : MaxDesiredSpeed·0.8f (0x10479e00,
+        // one float store), setMoveTimer of the stack-difference distance (same chain as execMoveTo), LatentAction
+        // 0x1f9, Destination, Focus, then rotateToward(Focus) + moveToward(Destination). No speed argument.
+        public static void EnterStrafeTo(UEObject self, UEFrame frame, Vector3 dest, Vector3 focus,
+            UEInterpreter interp = null)
+        {
+            Vector3 loc = UEInterpreter.AsVector3(self.GetProp(PK.Location));
+            self.SetDeclared("Pawn", "MoveTarget", null);
+            StrafeSpeedAndTimer(self, dest, loc);
+            InstallLatent(self, frame, LatentRunState.StrafeTo);
+            self.Props["Destination"] = dest;
+            self.Props["Focus"] = focus;
+            RotateToward(self, focus);
+            MoveToward(self, dest, interp);
+        }
+
+        // APawn::execStrafeFacing (disasm 0x103d8e60..0x103d8fab): a null target only finishes the call. Otherwise
+        // the same speed/timer head as StrafeTo but MoveTarget is NOT touched; Destination, FaceTarget (+0x294) =
+        // target, Focus = target.Location, LatentAction 0x1fb, rotateToward(Focus) + moveToward(Destination).
+        public static void EnterStrafeFacing(UEObject self, UEFrame frame, Vector3 dest, UEObject target,
+            UEInterpreter interp = null)
+        {
+            if (target is null) return;
+            StrafeSpeedAndTimer(self, dest, UEInterpreter.AsVector3(self.GetProp(PK.Location)));
+            self.Props["Destination"] = dest;
+            self.Props["FaceTarget"] = target;
+            Vector3 focus = UEInterpreter.AsVector3(target.GetProp(PK.Location));
+            self.Props["Focus"] = focus;
+            InstallLatent(self, frame, LatentRunState.StrafeFacing);
+            RotateToward(self, focus);
+            MoveToward(self, dest, interp);
+        }
+
+        // Shared head of both strafe execs (0x103d8cae..0x103d8d37 / 0x103d8ed6..0x103d8f42): bReducedSpeed bit
+        // 0x800 cleared, bIsPlayer (bit 0x2) picks the speed, then (dz² + dy²) + dx² of the unrounded differences.
+        static void StrafeSpeedAndTimer(UEObject self, Vector3 dest, Vector3 loc)
+        {
+            self.Props["bReducedSpeed"] = false;
+            float max = UEInterpreter.AsFloat(self.GetProp(PK.MaxDesiredSpeed));
+            self.Props["DesiredSpeed"] = UEInterpreter.ToBool(self.GetProp(PK.bIsPlayer)) ? max : max * 0.8f;
+            SetMoveTimer(self, RegisterSqrtDist(dest.x, loc.x, dest.y, loc.y, dest.z, loc.z, roundDiffs: false));
+        }
+
+        // execPollStrafeFacing (disasm 0x103d9010..0x103d90c9): a lost FaceTarget completes; else Focus =
+        // FaceTarget.Location, rotateToward(Focus), Destination saved, AlterDestination when bAdvancedTactics
+        // (bit 0x80000000) and PHYS_Walking, moveToward(Destination) (completes on arrival), Destination restored
+        // to the saved value whatever the event wrote.
+        public static bool PollStrafeFacing(UEInterpreter interp, UEObject actor)
+        {
+            if (actor.GetProp(PK.FaceTarget) is not UEObject ft) return true;
+            Vector3 focus = UEInterpreter.AsVector3(ft.GetProp(PK.Location));
+            actor.Props["Focus"] = focus;
+            Vector3 saved = UEInterpreter.AsVector3(actor.GetProp(PK.Destination));
+            RotateToward(actor, focus);
+            if (UEInterpreter.ToBool(actor.GetProp(PK.bAdvancedTactics)) && UEInterpreter.ToInt(actor.GetProp(PK.Physics)) == 1)
+                UELifecycle.CallEvent(interp, actor, "AlterDestination");
+            bool arrived = MoveToward(actor, UEInterpreter.AsVector3(actor.GetProp(PK.Destination)), interp);
+            actor.Props["Destination"] = saved;
+            return arrived;
+        }
+
+        // APawn::execWaitForLanding (disasm 0x103d6eb0..0x103d6ed6): LatentFloat (+0xcc) = 2.5f (0x40200000)
+        // always; LatentAction 0x210 only when Physics == PHYS_Falling. The port keeps LatentFloat in the state
+        // frame's SleepTimeLeft (the same field execSleep/StopWaiting use).
+        public static void EnterWaitForLanding(UEObject self)
+        {
+            UEFrame sf = self.StateFrame ?? throw new NotSupportedException(
+                $"WaitForLanding on {self.GetProp(PK.Name)} without a state frame: LatentFloat lives on it in the port");
+            sf.SleepTimeLeft = 2.5f;
+            if (UEInterpreter.ToInt(self.GetProp(PK.Physics)) == 2) sf.LatentState = LatentRunState.WaitForLanding;
+        }
+
+        // execPollWaitForLanding (disasm 0x103d6ef0..0x103d6f46): Physics != PHYS_Falling completes. Otherwise
+        // LatentFloat -= dt (fsubr, fst) and below 0 (fcomp 0.0f [0x1046d598]) the LongFall event fires; the latent
+        // is NOT cleared then — it keeps polling (and firing) until the pawn stops falling.
+        public static bool PollWaitForLanding(UEInterpreter interp, UEObject actor, UEFrame sf, float dt)
+        {
+            if (UEInterpreter.ToInt(actor.GetProp(PK.Physics)) != 2) return true;
+            sf.SleepTimeLeft -= dt;
+            if (sf.SleepTimeLeft < 0f) UELifecycle.CallEvent(interp, actor, "LongFall");
+            return false;
         }
 
         // APawn::execTurnTo (Engine.dll.c:71393): fixed Focus point; the

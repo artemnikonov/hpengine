@@ -57,14 +57,7 @@ namespace HP1.UEScript
             get
             {
                 if (_packages is not null) return _packages;
-                var list = new List<string>();
-                foreach (string sub in new[] { "Textures", "System", "Maps" })
-                {
-                    string dir = System.IO.Path.Combine(_root, sub);
-                    if (!Directory.Exists(dir)) continue;
-                    foreach (string pat in new[] { "*.utx", "*.u", "*.unr" })
-                        list.AddRange(Directory.GetFiles(dir, pat));
-                }
+                List<string> list = UEInstallPath.PackageFiles(_root, "Textures", "System", "Maps");
                 _packages = list.Distinct(StringComparer.Ordinal)
                     .OrderBy(x => System.IO.Path.GetFileName(x), StringComparer.Ordinal).ToList();
                 return _packages;

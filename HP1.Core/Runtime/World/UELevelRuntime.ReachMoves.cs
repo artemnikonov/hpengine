@@ -80,12 +80,6 @@ namespace HP1.UEScript
         internal static bool ReachProgressed(Vector3 now, Vector3 entry, float minProgress)
             => (HP1.Core.X87Ext.Fcom(R64(HP1.Core.X87Ext.From(minProgress) * HP1.Core.X87Ext.From(minProgress)), DistSq87(now, entry)) & 0x41) != 0;
 
-        static float DistanceSquared(Vector3 a, Vector3 b)
-        {
-            Vector3 d = a - b;
-            return Vector3.Dot(d, d);
-        }
-
         // APawn::walkMove (Engine.dll.c:139711-139811).
         // `rec` is the caller's OWN FCheckResult, the way shipped passes one in
         // by reference (walkMove's second parameter, param_5): EVERY move of
@@ -245,11 +239,14 @@ namespace HP1.UEScript
         // The side test compares the midpoint's water flag against the PAWN'S
         // CURRENT zone, so the caller must invoke it after the pawn has already
         // crossed; comparing against `start`'s zone converges to the mirror point.
+        // Disasm 0x103f1ed0..0x103f1ff0: (dx² + dy²) + dz² of end − start in the register, `fcomp 1.0; test ah, 1`
+        // returns below 1 or unordered; the midpoint X and Y sums are stored as float before ·0.5, the Z sum is not.
         void FindWaterLine(UEObject pawn, Vector3 start, ref Vector3 end)
         {
-            if (DistanceSquared(end, start) < 1f) return;
+            if ((HP1.Core.X87Ext.Fcom(SwDistSq(end, start), SwX(1f)) & HP1.Core.X87Ext.C0) != 0) return;
 
-            Vector3 mid = (start + end) * 0.5f;
+            Vector3 mid = new(SwF(SwX(SwF(SwX(start.x) + SwX(end.x))) * SwX(0.5f)),
+                SwF(SwX(SwF(SwX(start.y) + SwX(end.y))) * SwX(0.5f)), SwF(SwR(SwX(start.z) + SwX(end.z)) * SwX(0.5f)));
             UEObject midZone = ResolveRegion(mid, pawn.GetProp(PK.Level) as UEObject).Zone;
             bool midMatchesPawn =
                 UEInterpreter.ToBool(midZone?.GetProp(PK.bWaterZone))

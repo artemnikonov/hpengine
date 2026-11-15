@@ -3,10 +3,15 @@
 // Rules:
 //   * a mover's drawn polygon is the brush FPoly (brush->Polys); its lightmap is addressed by iBrushPoly, not
 //     surf.iLightMap (−1 on mover surfaces, measured on three maps);
-//   * the texel basis comes from the FPoly itself (Base, TextureU, TextureV, Normal: as in SurrealEngine Render/RenderLight.cpp:10-13)
-//     in the BASE position: translate(BasePos+KeyPos[BrushRaytraceKey]) · Rotation(BaseRot+KeyRot[…]) ·
-//     scale(MainScale) · translate(−PrePivot) (RenderLight.cpp:20) — the lightmap is baked there and moves with the door;
-//   * MainScale is only ±1 per axis (mirroring keeps the texel formula); |s| ≠ 1 — loud failure;
+//   * the texel basis comes from the FPoly itself (Base, TextureU, TextureV, Normal) in the BASE position (pose rule
+//     from SurrealEngine Render/RenderLight.cpp:20 — reconciliation debt, kept for 0.3.0 by the author's decision
+//     2026-11-15, D-89 (5)): Location = BasePos+KeyPos[BrushRaytraceKey],
+//     Rotation = BaseRot+KeyRot[…], transformed as ABrush::BuildCoords + FPoly::Transform do (Engine.dll.c:49283,
+//     0x10396770): points (P−PrePivot)·MainScale·Rotation·PostScale + Location, TextureU/V/Normal through the
+//     inverse-transpose (÷MainScale, Rotation, ÷PostScale), Normal renormalised. Shipped's slot-3 caller hands
+//     SetupForSurf exactly that tracker surface (Points[pBase], Vectors[vTextureU/V/vNormal] of Level->Model, disasm
+//     0x10b25c84..0x10b25d42), so PostScale is in the lightmap basis; the drawn UVs (P−Base)·TextureU do not change;
+//   * MainScale is only ±1 per axis (mirroring keeps the texel formula); |s| ≠ 1 or a sheer — loud failure;
 //   * all movers form one synthetic model: LightMap records offset into the shared LightBits, light
 //     lists (Model->Lights) offset into the shared pool. From there the level pipeline
 //     (LevelSurfLightmapRuntime) works without new math.
@@ -76,6 +81,10 @@ namespace HP1.UEScript
                 Vector3 mainScale = BrushScaleOf(actor, "MainScale");
                 if (Math.Abs(Math.Abs(mainScale.x) - 1f) > 1e-6f || Math.Abs(Math.Abs(mainScale.y) - 1f) > 1e-6f || Math.Abs(Math.Abs(mainScale.z) - 1f) > 1e-6f)
                 { r.Problems.Add($"{name}: MainScale=({mainScale.x},{mainScale.y},{mainScale.z}) — |s|≠1 not ported"); continue; }
+                // The base-pose basis below has no sheer (the tracker and BrushCoords apply it): refused, not drawn with a
+                // wrong basis. No shipped brush shears (census of all 41 maps, v030 area C report).
+                if (BrushCoords.SnapSheer(BrushSheerOf(actor, "MainScale")) != 0f || BrushCoords.SnapSheer(BrushSheerOf(actor, "PostScale")) != 0f)
+                { r.Problems.Add($"{name}: sheer — the base-pose texel basis with a sheer is not ported"); continue; }
 
                 List<HeadlessBspModel.PolyRecord> polys = HeadlessBspModel.ReadPolys(_brushMapPath, polysRef);
                 StaticGeometry bg = model.BuildStaticGeometry();
@@ -88,8 +97,10 @@ namespace HP1.UEScript
                 Vector3 keyPos = KeyVector(actor, "KeyPos", key);
                 UERotator keyRot = KeyRotator(actor, "KeyRot", key);
                 Vector3 prePivot = UEInterpreter.AsVector3(actor.GetProp(PK.PrePivot));
+                Vector3 postScale = BrushScaleOf(actor, "PostScale");
                 var axes = UEValue.GetAxes(new UERotator(baseRot.Pitch + keyRot.Pitch, baseRot.Yaw + keyRot.Yaw, baseRot.Roll + keyRot.Roll));
                 Vector3 o = new Vector3(basePos.x + keyPos.x, basePos.y + keyPos.y, basePos.z + keyPos.z);
+                // MainScale is ±1 here, so ÷MainScale = ·MainScale and Rotate serves both chains.
                 Vector3 Rotate(Vector3 v)
                 {
                     float x = v.x * mainScale.x, y = v.y * mainScale.y, z = v.z * mainScale.z;
@@ -100,7 +111,18 @@ namespace HP1.UEScript
                 Vector3 Point(Vector3 p)
                 {
                     Vector3 q = Rotate(new Vector3(p.x - prePivot.x, p.y - prePivot.y, p.z - prePivot.z));
-                    return new Vector3(q.x + o.x, q.y + o.y, q.z + o.z);
+                    return new Vector3(q.x * postScale.x + o.x, q.y * postScale.y + o.y, q.z * postScale.z + o.z);
+                }
+                Vector3 TexVector(Vector3 v)
+                {
+                    Vector3 q = Rotate(v);
+                    return new Vector3(q.x / postScale.x, q.y / postScale.y, q.z / postScale.z);
+                }
+                Vector3 Normal(Vector3 v)
+                {
+                    Vector3 q = TexVector(v);
+                    float len = MathF.Sqrt(q.x * q.x + q.y * q.y + q.z * q.z);
+                    return new Vector3(q.x / len, q.y / len, q.z / len);
                 }
 
                 int lmBase = lightMaps.Count, bitsBase = lightBits.Count, lightBase = lights.Count;
@@ -126,9 +148,9 @@ namespace HP1.UEScript
                     bool hasLm = fp.iBrushPoly >= 0 && fp.iBrushPoly < bg.LightMaps.Length;
                     if (hasLm) r.PolysWithLightmap++; else r.PolysWithoutLightmap++;
                     int pBase = points.Count; points.Add(Point(fp.Base)); local.Add(fp.Base);
-                    int vN = vectors.Count; vectors.Add(Rotate(fp.Normal)); localVec.Add(fp.Normal);
-                    int vU = vectors.Count; vectors.Add(Rotate(fp.TextureU)); localVec.Add(fp.TextureU);
-                    int vV = vectors.Count; vectors.Add(Rotate(fp.TextureV)); localVec.Add(fp.TextureV);
+                    int vN = vectors.Count; vectors.Add(Normal(fp.Normal)); localVec.Add(fp.Normal);
+                    int vU = vectors.Count; vectors.Add(TexVector(fp.TextureU)); localVec.Add(fp.TextureU);
+                    int vV = vectors.Count; vectors.Add(TexVector(fp.TextureV)); localVec.Add(fp.TextureV);
                     surfs.Add(new StaticSurface(fp.Texture?.Path ?? "None", SurfacePan.MoverSurfaceFlags(fp.PolyFlags, specialLit), pBase, vN, vU, vV,
                         hasLm ? fp.iBrushPoly + lmBase : -1, fp.iBrushPoly, fp.PanU, fp.PanV, 0));
                     int pool = vertPool.Count;

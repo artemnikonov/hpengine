@@ -27,8 +27,7 @@ namespace HP1.UEScript
         {
             if (string.IsNullOrEmpty(systemDir) || !Directory.Exists(systemDir))
                 throw new DirectoryNotFoundException("mesh bounds: no System dir " + systemDir);
-            foreach (string path in Directory.EnumerateFiles(systemDir, "*.u")
-                         .OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+            foreach (string path in UEInstallPath.PackageFiles(Path.GetDirectoryName(Path.GetFullPath(systemDir.TrimEnd('/', '\\'))), "System"))
             {
                 var package = new UEPackageReader(path);
                 foreach (PackageExport export in package.Exports)

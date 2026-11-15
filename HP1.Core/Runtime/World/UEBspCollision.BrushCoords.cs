@@ -255,18 +255,34 @@ public struct BrushCoords
         });
     }
 
-    // FCoords::operator/=(FScale), no-sheer branch used by ABrush::ToLocal.
-    // HP1 Tut1 brush models have zero snapped sheer; retain the STOP rule for
-    // any authored model that does not, rather than applying an approximate
-    // inverse matrix.
-    public void DivScale(Vector3 scale, float sheerRate, string who)
+    // FCoords::operator/=(FScale) (Core.dll.c:51222, disasm 0x1011f04f..; ABrush::ToLocal's PostScale inline, Engine
+    // 0x1032a4b6..0x1032a5e0, is the same): axes /= Scale, Origin *= Scale, then *= the unit coords with the NEGATED
+    // snapped sheer in the SheerAxis slot (no transpose: the slot is the *= one). The multiply runs at zero snap too.
+    public void DivScale(Vector3 scale, float sheerRate, int sheerAxis)
     {
-        if (SnapSheer(sheerRate) != 0f)
-            throw new NotSupportedException($"headless brush sheer unsupported ({who})");
         X = new Vector3(X.x / scale.x, X.y / scale.y, X.z / scale.z);
         Y = new Vector3(Y.x / scale.x, Y.y / scale.y, Y.z / scale.z);
         Z = new Vector3(Z.x / scale.x, Z.y / scale.y, Z.z / scale.z);
         Origin = new Vector3(Origin.x * scale.x, Origin.y * scale.y, Origin.z * scale.z);
+        Mul(SheerCoords(-SnapSheer(sheerRate), sheerAxis));
+    }
+
+    // GMath.UnitCoords with one axis entry set to the snapped sheer: ESheerAxis 1 XY -> X.y, 2 XZ -> X.z, 3 YX -> Y.x,
+    // 4 YZ -> Y.z, 5 ZX -> Z.x, 6 ZY -> Z.y (jump table Core 0x1011ef1c: stores to ebp-0x34/-0x30/-0x2c/-0x24/-0x20/-0x1c
+    // of the copy at ebp-0x44); any other value leaves the unit coords.
+    public static BrushCoords SheerCoords(float sheer, int sheerAxis)
+    {
+        BrushCoords t = Identity;
+        switch (sheerAxis)
+        {
+            case 1: t.X.y = sheer; break;
+            case 2: t.X.z = sheer; break;
+            case 3: t.Y.x = sheer; break;
+            case 4: t.Y.z = sheer; break;
+            case 5: t.Z.x = sheer; break;
+            case 6: t.Z.y = sheer; break;
+        }
+        return t;
     }
 
     // Sheer snap shared by FCoords::operator*=(FScale) and the ToWorld inline
@@ -283,12 +299,12 @@ public struct BrushCoords
         return 0f;
     }
 
-    // FCoords::operator*=(FScale) (Core.dll.c:39995) with the sheer left loud
-    // (no Tut1 brush shears; the snap zeroes |rate|<=0.05).
-    public void MulScale(Vector3 scale, float sheerRate, string who)
+    // FCoords::operator*=(FScale) (Core.dll.c:39995, disasm 0x1011eba0..; ABrush::ToWorld's MainScale inline, Engine
+    // 0x1032a710.., is the same): *= the unit coords with the snapped sheer in the SheerAxis slot (also at zero snap),
+    // then axes *= Scale component-wise, Origin /= Scale.
+    public void MulScale(Vector3 scale, float sheerRate, int sheerAxis)
     {
-        if (SnapSheer(sheerRate) != 0f)
-            throw new NotSupportedException($"headless brush sheer unsupported ({who})");
+        Mul(SheerCoords(SnapSheer(sheerRate), sheerAxis));
         X = new Vector3(X.x * scale.x, X.y * scale.y, X.z * scale.z);
         Y = new Vector3(Y.x * scale.x, Y.y * scale.y, Y.z * scale.z);
         Z = new Vector3(Z.x * scale.x, Z.y * scale.y, Z.z * scale.z);
@@ -298,13 +314,13 @@ public struct BrushCoords
     // ABrush::ToWorld (Engine.dll.c:60413): identity, Origin -= Location,
     // *= PostScale, *= Rotation, *= MainScale (inline), Origin += PrePivot.
     public static BrushCoords ToWorld(Vector3 location, int pitch, int yaw, int roll, Vector3 prePivot,
-        Vector3 mainScale, float mainSheer, Vector3 postScale, float postSheer)
+        Vector3 mainScale, float mainSheer, int mainSheerAxis, Vector3 postScale, float postSheer, int postSheerAxis)
     {
         BrushCoords c = Identity;
         c.Origin -= location;
-        c.MulScale(postScale, postSheer, "PostScale");
+        c.MulScale(postScale, postSheer, postSheerAxis);
         c.MulRotator(pitch, yaw, roll);
-        c.MulScale(mainScale, mainSheer, "MainScale");
+        c.MulScale(mainScale, mainSheer, mainSheerAxis);
         c.Origin += prePivot;
         return c;
     }
@@ -314,13 +330,13 @@ public struct BrushCoords
     // hit Mover's vtable +0x98 before transforming Location and Normal into
     // the brush model's local space.
     public static BrushCoords ToLocal(Vector3 location, int pitch, int yaw, int roll, Vector3 prePivot,
-        Vector3 mainScale, float mainSheer, Vector3 postScale, float postSheer)
+        Vector3 mainScale, float mainSheer, int mainSheerAxis, Vector3 postScale, float postSheer, int postSheerAxis)
     {
         BrushCoords c = Identity;
         c.Origin -= prePivot;
-        c.DivScale(mainScale, mainSheer, "MainScale");
+        c.DivScale(mainScale, mainSheer, mainSheerAxis);
         c.DivRotator(pitch, yaw, roll);
-        c.DivScale(postScale, postSheer, "PostScale");
+        c.DivScale(postScale, postSheer, postSheerAxis);
         c.Origin += location;
         return c;
     }

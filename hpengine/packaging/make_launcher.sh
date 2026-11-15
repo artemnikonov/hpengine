@@ -15,7 +15,8 @@
 #              <out>/HPEngine-Launcher-macOS.zip.sig. HPENGINE_UPDATE_KEY = the release Ed25519 private key file
 #              (launcher/update_sign.swift keygen; kept outside the repository): its public key is pinned into the app
 #              and the zip is signed. Without it the app cannot self-update (it opens the release page) — a warning;
-#   win-x64:   <out>/HPEngine-win-x64.zip;  linux-x64: <out>/HPEngine-linux-x64.tar.gz (keeps the exec bits). Layout of both:
+#   win-x64:   <out>/HPEngine-win-x64.zip;  linux-x64: <out>/HPEngine-linux-x64.tar.gz (keeps the exec bits), each with <archive>.sig
+#              (same key and format as the macOS zip; the Launcher updates itself from them, launcher/Desktop/SelfUpdate.cs). Layout of both:
 #              the Launcher at the root ("HPEngine Launcher.exe" / "HPEngine-Launcher") + README.txt + HPEngine/ (the engine
 #              folder: HPEngine, HP1Setup, tools/, .NET and SDL3 files). These are the RELEASE archives; publish.sh alone
 #              (CI) makes the flat engine-only ones under the same names, so do not share an --out between the two.
@@ -47,9 +48,11 @@ PUBKEY=""
 case " $* " in *" osx-"*)
     case " $* " in *" osx-arm64 "*) ;; *) fail "the macOS Launcher is universal: osx-arm64 and osx-x64 go together" ;; esac
     case " $* " in *" osx-x64 "*) ;; *) fail "the macOS Launcher is universal: osx-arm64 and osx-x64 go together" ;; esac
-    if [ -n "${HPENGINE_UPDATE_KEY:-}" ]; then PUBKEY=$(sign pub "$HPENGINE_UPDATE_KEY") || fail "HPENGINE_UPDATE_KEY: not a key"
-    else echo "WARNING: HPENGINE_UPDATE_KEY not set — this Launcher cannot update itself and its zip is not signed" >&2; fi ;;
+ ;;
 esac
+# The release key signs the macOS zip and the Windows/Linux archives; its public key is pinned into every Launcher.
+if [ -n "${HPENGINE_UPDATE_KEY:-}" ]; then PUBKEY=$(sign pub "$HPENGINE_UPDATE_KEY") || fail "HPENGINE_UPDATE_KEY: not a key"
+else echo "WARNING: HPENGINE_UPDATE_KEY not set — these Launchers cannot update themselves and their archives are not signed" >&2; fi
 
 for rid in "$@"; do
     dir="$OUT/HPEngine-$rid"
@@ -89,7 +92,7 @@ for rid in "$@"; do
     esac
     dotnet publish "$REPO/launcher/Desktop/HPEngineLauncher.csproj" -c Release -r "$rid" --self-contained true \
         -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true \
-        $ICON_PROP $RELEASE_PROPS -o "$OUT/Launcher-$rid" -nologo -v q > "$OUT/launcher-$rid.log" 2>&1 \
+        ${PUBKEY:+-p:HPEngineUpdateKey=$PUBKEY} $ICON_PROP $RELEASE_PROPS -o "$OUT/Launcher-$rid" -nologo -v q > "$OUT/launcher-$rid.log" 2>&1 \
         || { tail -30 "$OUT/launcher-$rid.log"; fail "$rid: Launcher publish"; }
     stage="$OUT/archive-$rid"; rm -rf "$stage"; mkdir -p "$stage"
     cp -R "$dir" "$stage/HPEngine" || fail "$rid: staging"
@@ -119,6 +122,8 @@ TXT
             tar --no-xattrs $m -C "$stage" -czf "$arc" . || fail "$rid: tar"
             sh "$HERE/publish.sh" --check-archive "$arc" ;;
     esac
+    rm -f "$arc.sig"
+    if [ -n "$PUBKEY" ]; then sign sign "$HPENGINE_UPDATE_KEY" "$arc" || fail "$rid: signing the archive"; fi
     echo "   $rid: $(du -h "$arc" | cut -f1) -> $arc"
 done
 # The universal macOS Launcher: one .app, one zip (the asset name the installed Launchers update from stays the same).

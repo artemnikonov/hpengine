@@ -212,7 +212,7 @@ namespace HP1.UEScript
 
         // Branches of the last pass (the judge requires the compared branch to have run).
         public int Frames, NodesEntered, BoxTests, BoxCulled, Surfaces, SurfacesOccluded, Portals, Mirrors, Skies, Warps,
-            Filters, Splits, PreRenders, SpritesListed, ZonesEmptied;
+            Filters, Splits, PreRenders, SpritesListed, ZonesEmptied, WarpCameraFrames;
 
         void EnsureCache(int nodes)
         {
@@ -627,11 +627,20 @@ namespace HP1.UEScript
             int extraPolyFlags = 0;                               // UViewport::ExtraPolyFlags (+0x90) — 0 in game
             int showMask = (int)(((uint)w.ShowFlags >> 11) | 0xfffffffe);
             m.SetZoneLastRenderTime(frameZone, w.TimeSeconds);
-            // Camera in a warp zone with an other side: the whole frame is a child through the warp (0x10b227f0..0x10b22ad5).
+            // Camera in a warp zone with an other side (0x10b22802..0x10b22b19): the whole frame becomes one child through
+            // the warp — Coords through this zone's WarpCoords and Transpose(OtherSide.WarpCoords) (the portal's transform),
+            // CreateChildFrame(Frame, Frame->Span, Frame->Level, iSurf -1, OtherSide->iWarpZone, Frame->Mirror,
+            // Frame->NearClip, coords, no bounds) — and OccludeBsp returns without walking this frame. The child is a warp
+            // view with no source surface; the frontend has no full-screen pass for it and refuses it ([Views] STOP).
             UEObject frameZoneActor = w.ZoneActor(frameZone);
             if (frameZoneActor is not null && !frameZoneActor.Destroyed && UEInterpreter.ClassIsA(frameZoneActor.Class, "WarpZoneInfo")
-                && frameZoneActor.GetProp(PK.OtherSideActor) is UEObject && OtherSideLevel(frameZoneActor) is not null)
-                throw new NotSupportedException($"OccludeBsp: camera in warp zone {frameZoneActor.GetProp(PK.Name)} with another side — a frame entirely through warp (0x10b227f0..0x10b22ad5) is not ported");
+                && frameZoneActor.GetProp(PK.OtherSideActor) is UEObject camOsa && OtherSideLevel(frameZoneActor) is not null)
+            {
+                WarpCameraFrames++;
+                Tag(CreateChildFrame(f, f.SpanBuffer, f.Level, -1, UEValue.ToInt(camOsa.GetProp(PK.iWarpZone)) & 0xff, f.Mirror,
+                    f.NearClipN, f.NearClipW, ThroughWarp(f.Coords, frameZoneActor, camOsa), null), UESceneNode.KindWarp, -1);
+                return;
+            }
 
             UESpanBuffer[] zoneSpans = _zoneSpans;
             for (int z = 0; z < 64; z++) { zoneSpans[z] = _arena.Buffer(); zoneSpans[z].AllocIndex(0, 0); }
@@ -987,7 +996,7 @@ namespace HP1.UEScript
             if (c.Kind != UESceneNode.KindMaster && c.Kind != kind)
                 throw new NotSupportedException($"CreateChildFrame merged frames of different branches ({c.Kind} and {kind}, surface {iSurf})");
             c.Kind = kind;
-            if (!c.SourceSurfs.Contains(iSurf)) c.SourceSurfs.Add(iSurf);
+            if (iSurf >= 0 && !c.SourceSurfs.Contains(iSurf)) c.SourceSurfs.Add(iSurf);   // −1: camera in a warp zone, no portal
         }
 
         static object OtherSideLevel(UEObject warpZone) => warpZone.GetDeclared("WarpZoneInfo", "OtherSideLevel");
@@ -1079,19 +1088,8 @@ namespace HP1.UEScript
         {
             float px = nx, py = ny, pz = nz, pw = nw;
             if (side != 0) { px = -px; py = -py; pz = -pz; pw = -pw; }
-            BrushCoords owc = WarpCoordsOf(osa), wc = WarpCoordsOf(za);
-            // Transpose(OtherSide.WarpCoords): −(O·axes) (TransformVectorBy order), axes transposed.
-            Vector3 t = VectorBy(owc.Origin, owc);
-            var oti = new BrushCoords
-            {
-                Origin = new Vector3(-t.x, -t.y, -t.z),
-                X = new Vector3(owc.X.x, owc.Y.x, owc.Z.x),
-                Y = new Vector3(owc.X.y, owc.Y.y, owc.Z.y),
-                Z = new Vector3(owc.X.z, owc.Y.z, owc.Z.z),
-            };
             BrushCoords c = f.Coords;
-            var c1 = new BrushCoords { Origin = PointBy(c.Origin, wc), X = VectorBy(c.X, wc), Y = VectorBy(c.Y, wc), Z = VectorBy(c.Z, wc) };
-            var child = new BrushCoords { Origin = PointBy(c1.Origin, oti), X = VectorBy(c1.X, oti), Y = VectorBy(c1.Y, oti), Z = VectorBy(c1.Z, oti) };
+            BrushCoords child = ThroughWarp(c, za, osa);
             // NearClip (0x10b24336..0x10b243dc): normal in frame axes, order (A.y·p.y + A.z·p.z) + p.x·A.x.
             float cz = (c.Z.y * py + c.Z.z * pz) + c.Z.x * px;
             float cy = (c.Y.y * py + c.Y.z * pz) + px * c.Y.x;
@@ -1101,6 +1099,24 @@ namespace HP1.UEScript
             float cw = pw - Dot(to, nv);
             int zone = UEValue.ToInt(osa.GetProp(PK.iWarpZone)) & 0xff;
             return CreateChildFrame(f, ds, osl, iSurf, zone, f.Mirror, nv, cw, child, null);
+        }
+
+        // Frame coords through a warp (portal 0x10b23eb8.., camera 0x10b22855..0x10b22ad4): Transpose(OtherSide.WarpCoords)
+        // = −(O·axes) (TransformVectorBy order) with the axes transposed; c by za.WarpCoords (TransformPointBy/VectorBy), then
+        // by that transpose.
+        static BrushCoords ThroughWarp(in BrushCoords c, UEObject za, UEObject osa)
+        {
+            BrushCoords owc = WarpCoordsOf(osa), wc = WarpCoordsOf(za);
+            Vector3 t = VectorBy(owc.Origin, owc);
+            var oti = new BrushCoords
+            {
+                Origin = new Vector3(-t.x, -t.y, -t.z),
+                X = new Vector3(owc.X.x, owc.Y.x, owc.Z.x),
+                Y = new Vector3(owc.X.y, owc.Y.y, owc.Z.y),
+                Z = new Vector3(owc.X.z, owc.Y.z, owc.Z.z),
+            };
+            var c1 = new BrushCoords { Origin = PointBy(c.Origin, wc), X = VectorBy(c.X, wc), Y = VectorBy(c.Y, wc), Z = VectorBy(c.Z, wc) };
+            return new BrushCoords { Origin = PointBy(c1.Origin, oti), X = VectorBy(c1.X, oti), Y = VectorBy(c1.Y, oti), Z = VectorBy(c1.Z, oti) };
         }
 
         static BrushCoords WarpCoordsOf(UEObject wz)

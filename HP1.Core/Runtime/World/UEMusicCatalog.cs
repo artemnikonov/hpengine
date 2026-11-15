@@ -46,15 +46,12 @@ namespace HP1.UEScript
             if (_byPath is not null) return;
             if (_root is null)
                 throw new InvalidOperationException("music catalog without an install root — the frontend did not set the source");
-            string dir = UEInstallPath.Dir(Path.Combine(_root, "Music"))
-                ?? throw new DirectoryNotFoundException($"the install has no Music directory under {_root}");
+            if (UEInstallPath.Dir(Path.Combine(_root, "Music")) is null)
+                throw new DirectoryNotFoundException($"the install has no Music directory under {_root}");
             var index = new Dictionary<string, (UnrealPackage, UExportTableItem)>(StringComparer.OrdinalIgnoreCase);
-            string engine = UEInstallPath.File(Path.Combine(_root, "System", "Engine.u"))
+            string engine = UEInstallPath.ScriptPackageFile(_root, "Engine")
                 ?? throw new FileNotFoundException($"the install has no System/Engine.u under {_root}");
-            foreach (string file in Directory.EnumerateFiles(dir)
-                         .Where(x => Path.GetExtension(x).Equals(".umx", StringComparison.OrdinalIgnoreCase))
-                         .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
-                         .Append(engine))
+            foreach (string file in UEInstallPath.PackageFiles(_root, "Music").Append(engine))
             {
                 // Tables only (LoadPackage reads names/imports/exports): the index needs each Music export's path.
                 // Its object is constructed with its package on the first Payload of that package (perf/spikes:

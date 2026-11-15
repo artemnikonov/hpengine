@@ -34,11 +34,11 @@ public sealed class MainWindow : Window
     readonly List<string> _inputs = new();
     List<ModEntry> _mods = new();
     Process _setup, _play;
-    int _step = -1; double _progress; bool _running, _playing; string _edition, _warning, _error;
+    int _step = -1; double _progress; bool _running, _playing; string _edition, _warning, _error, _report;
     Release _newer;
     static readonly HttpClient Http = new();
 
-    readonly TextBlock _status = new() { Name = "Status", Foreground = new SolidColorBrush(Colors.White, 0.85) },
+    readonly TextBlock _title = new() { Name = "Title" }, _status = new() { Name = "Status", Foreground = new SolidColorBrush(Colors.White, 0.85) },
         _editionText = new() { Name = "EditionText", FontSize = 14, FontWeight = FontWeight.Medium },
         _editionDetail = new() { Name = "EditionDetail", FontSize = 12, Foreground = Th.Dim, TextWrapping = TextWrapping.Wrap, IsVisible = false },
         _editionChip = new() { Name = "EditionChip", FontSize = 11, FontWeight = FontWeight.SemiBold },
@@ -67,7 +67,10 @@ public sealed class MainWindow : Window
     readonly TextBlock _installText = new() { Text = "Install", MinWidth = 90, TextAlignment = TextAlignment.Center };
     readonly Border _updateBanner = new() { Name = "UpdateBanner", IsVisible = false, Padding = new Thickness(20, 0), Height = 44, Background = new SolidColorBrush(Th.GoldC, 0.08) };
     readonly TextBlock _updateText = new() { VerticalAlignment = VerticalAlignment.Center, FontSize = 13, FontWeight = FontWeight.Medium };
-    readonly Button _updateOpen = new() { Content = "What's new" };
+    // An unrecognised release: HP1Setup's REPORT link (UEEdition.ReportUrl), opened from the warning banner.
+    readonly Button _reportButton = new() { Name = "ReportButton", Content = "Report", IsVisible = false };
+    readonly Button _updateOpen = new() { Content = "What's new" }, _updateInstall = new() { Name = "UpdateButton", Content = "Update" };
+    bool _updating;
     readonly Rectangle _dropRect = new() { RadiusX = 14, RadiusY = 14, StrokeThickness = 1.5, StrokeDashArray = new Avalonia.Collections.AvaloniaList<double> { 4, 3.3 }, Fill = Th.Card };
     readonly TextBlock _versionText = new() { Foreground = new SolidColorBrush(Colors.White, 0.7) };
 
@@ -81,7 +84,7 @@ public sealed class MainWindow : Window
         _edition = Edition();
         try { Icon = ShieldIcon.Make(); } catch (Exception) { /* no renderer for the bitmap: the default icon stays */ }
 
-        var title = new TextBlock { Text = "Harry Potter and the Philosopher's Stone", FontSize = 24, FontWeight = FontWeight.Bold, Foreground = Brushes.White, FontFamily = Th.Serif };
+        var title = _title; title.FontSize = 24; title.FontWeight = FontWeight.Bold; title.Foreground = Brushes.White; title.FontFamily = Th.Serif;
         _versionText.Text = "HPEngine " + version;
         var header = new Border
         {
@@ -94,10 +97,14 @@ public sealed class MainWindow : Window
 
         _updateOpen.Classes.Add("quiet");
         _updateOpen.Click += (_, _) => { if (_newer != null) Open(_newer.Page); };
-        _updateBanner.Child = new DockPanel { Children = { Dock(_updateOpen, Avalonia.Controls.Dock.Right), _updateText } };
+        _updateInstall.Classes.Add("gold");
+        _updateInstall.Click += (_, _) => _ = InstallUpdate();
+        _updateBanner.Child = new DockPanel { Children = { Dock(_updateInstall, Avalonia.Controls.Dock.Right), Dock(_updateOpen, Avalonia.Controls.Dock.Right), _updateText } };
 
         _stepsCard = MakeCard(null, _stepsRow, _bar);
-        _warningBanner = MakeBanner(Th.Amber, "!", _warningText);
+        _reportButton.Classes.Add("quiet");
+        _reportButton.Click += (_, _) => { if (_report != null) Open(_report); };
+        _warningBanner = MakeBanner(Th.Amber, "!", _warningText, _reportButton);
         _errorBanner = MakeBanner(Th.Red, "×", _errorText);
         BuildSetupPanel();
         BuildReadyPanel();
@@ -109,7 +116,7 @@ public sealed class MainWindow : Window
                 HPEngine.Packaging.GameLanguage.Save(_game, _language.SelectedIndex == 0 ? null : _languages[_language.SelectedIndex - 1].Code);
                 _error = null;
             }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { _error = "Could not change game language: " + e.Message; }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException) { _error = "Could not change game language: " + e.Message; }
             Refresh();
         };
 
@@ -184,7 +191,7 @@ public sealed class MainWindow : Window
     }
 
     // One-line banner (tinted 12%, 35% border, radius 10) with More/Less to show the whole text.
-    static Border MakeBanner(IBrush color, string glyph, TextBlock text)
+    static Border MakeBanner(IBrush color, string glyph, TextBlock text, Button extra = null)
     {
         var c = ((SolidColorBrush)color).Color;
         text.Foreground = Th.Text;
@@ -198,8 +205,9 @@ public sealed class MainWindow : Window
         };
         var icon = new Border { Width = 18, Height = 18, CornerRadius = new CornerRadius(9), Background = color, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 1, 8, 0),
             Child = new TextBlock { Text = glyph, Foreground = Th.OnGold, FontSize = 12, FontWeight = FontWeight.Bold, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center } };
-        var g = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto") };
+        var g = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto") };
         g.Children.Add(icon); Grid.SetColumn(text, 1); g.Children.Add(text); Grid.SetColumn(more, 2); g.Children.Add(more);
+        if (extra != null) { extra.VerticalAlignment = VerticalAlignment.Top; Grid.SetColumn(extra, 3); g.Children.Add(extra); }
         return new Border { Background = new SolidColorBrush(c, 0.12), BorderBrush = new SolidColorBrush(c, 0.35), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(10), Padding = new Thickness(12, 9), Child = g, IsVisible = false };
     }
 
@@ -273,6 +281,7 @@ public sealed class MainWindow : Window
         M("ResetSettings", "Reset Settings…", () => _ = ResetSettings(), () => Installed);
         M("ResetPad", "Reset Gamepad Bindings…", () => _ = ResetPad(), () => Installed && !_playing && PadReset.Rebound(_game) > 0);
         M("RemoveGame", _own ? "Remove Game: not for your own game folder" : "Remove Game…", () => _ = RemoveGame(), () => !_own && Installed && !_running && !_playing);
+        if (OperatingSystem.IsLinux()) M("AddToSteam", "Add to Steam…", () => _ = AddToSteam(), () => !_running);
         fly.Items.Add(new Separator());
         M("CheckUpdates", "Check for Updates", () => _ = CheckForUpdate(true));
         M("About", "About HPEngine Launcher", () => _ = About());
@@ -284,7 +293,7 @@ public sealed class MainWindow : Window
     void Refresh()
     {
         var (st, col) = _running ? ("Installing…", Th.Gold) : _playing ? ("Playing", Th.Green) : Installed ? ("Ready to play", Th.Green) : ("Not installed", Th.Dim);
-        _status.Text = st; _dot.Fill = col;
+        _status.Text = st; _dot.Fill = col; _title.Text = GameTitle.For(_edition);
         _setupPanel.IsVisible = Setup; _readyPanel.IsVisible = !Setup;
         // the Game card: "US 1.53: exact" -> name + chip (exact: verified, green; supported: gold; others amber with the tier text)
         var parts = (_edition ?? "").Split(": ");
@@ -345,8 +354,10 @@ public sealed class MainWindow : Window
 
     void UpdateBanners()
     {
-        _warningText.Text = _warning; _warningBanner.IsVisible = _warning != null;
-        _errorText.Text = _error; _errorBanner.IsVisible = _error != null;
+        _warningText.Text = _warning; _warningBanner.IsVisible = _warning != null; _reportButton.IsVisible = _report != null;
+        // An unfinished rollback of an earlier update stays on screen while its marker exists (SelfUpdate.IncompleteNotice).
+        var error = _error ?? SelfUpdate.IncompleteNotice(_appDir);
+        _errorText.Text = error; _errorBanner.IsVisible = error != null;
     }
 
     static Button Chevron(string name, string path, bool on)
@@ -416,7 +427,7 @@ public sealed class MainWindow : Window
     {
         if (_own || _inputs.Count == 0 || _running || _playing) return;
         if (!File.Exists(Exe("HP1Setup"))) { _error = $"HP1Setup was not found (the HPEngine folder must stay next to the Launcher) ({Exe("HP1Setup")})."; Refresh(); return; }
-        _running = true; _error = null; _warning = null; _step = 0; _progress = 0;
+        _running = true; _error = null; _warning = null; _report = null; _step = 0; _progress = 0;
         var psi = new ProcessStartInfo(Exe("HP1Setup")) { RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true, CreateNoWindow = true, UseShellExecute = false };
         psi.ArgumentList.Add("--dest"); psi.ArgumentList.Add(_game);
         foreach (var i in _inputs) psi.ArgumentList.Add(i);
@@ -456,6 +467,7 @@ public sealed class MainWindow : Window
             case SetupKind.Progress: _progress = l.Progress; break;
             case SetupKind.Error: _error = l.Text; _edition = Edition(); break;   // the installed edition is still the marker's
             case SetupKind.Warning: _warning = l.Text; break;
+            case SetupKind.Report: _report = l.Text; break;
             case SetupKind.Edition: _edition = l.Text; break;
             case SetupKind.Done: _step = SetupProtocol.Steps.Length; _inputs.Clear(); _edition = Edition(); break;
             case SetupKind.Malformed:
@@ -532,7 +544,7 @@ public sealed class MainWindow : Window
             new TextBlock { Text = $"The installed game copy in {_game} is removed. Saved games, settings and mods are kept. {fate} Your own game files are not touched.", TextWrapping = TextWrapping.Wrap },
             all, new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right, Children = { yes, no } } } };
         if (!await d.ShowDialog<bool>(this)) return;
-        try { GameRemoval.Remove(_game, all.IsChecked == true, OperatingSystem.IsWindows() ? Recycle : null); _error = null; _warning = null; _step = -1; _edition = null; }
+        try { GameRemoval.Remove(_game, all.IsChecked == true, OperatingSystem.IsWindows() ? Recycle : null); _error = null; _warning = null; _report = null; _step = -1; _edition = null; }
         catch (Exception e) { _error = "Could not remove the game: " + e.Message; }
         Refresh();
     }
@@ -543,8 +555,20 @@ public sealed class MainWindow : Window
         else Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(p, Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs, Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
     }
 
+    // Linux: HPEngine as a non-Steam game (SteamShortcuts.cs). Always asked first; nothing is written while Steam runs.
+    async Task AddToSteam()
+    {
+        var exe = Environment.ProcessPath;
+        if (!await Confirm("Add to Steam", $"Add HPEngine to your Steam library as a non-Steam game? Steam will start this Launcher ({exe}). Close Steam completely first. "
+            + "Steam's shortcut list is saved as a backup copy next to it; every Steam account on this computer gets the entry (once).", "Add")) return;
+        string text;   // fire-and-forget from the menu: an exception here would vanish unseen, so it is shown
+        try { text = SteamShortcuts.AddTo(SteamShortcuts.FindRoot(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)), "HPEngine", exe, Path.GetDirectoryName(exe), SteamShortcuts.SteamRunning); }
+        catch (Exception e) { text = "Could not add HPEngine to Steam: " + e.Message; }
+        await Confirm("Add to Steam", text, "OK", false);
+    }
+
     async Task About() => await Confirm("HPEngine Launcher " + _version,
-        $"HPEngine runs Harry Potter and the Philosopher's Stone (PC, 2001) from your own copy of the game. No game files are included. Game data: {_game}" + (_own ? " (your game folder, the one this Launcher is in)" : ""), "OK", false);
+        $"HPEngine runs {GameTitle.For(_edition)} (PC, 2001) from your own copy of the game. No game files are included. Game data: {_game}" + (_own ? " (your game folder, the one this Launcher is in)" : ""), "OK", false);
 
     async Task<bool> Confirm(string title, string text, string ok, bool cancel = true)
     {
@@ -568,7 +592,36 @@ public sealed class MainWindow : Window
 
     void OpenFolder(string dir) { Directory.CreateDirectory(dir); Open(dir); }
 
-    // ---- updates: no self-update on Windows/Linux; the release page opens ----
+    // ---- updates: the signed archive is downloaded, verified and swapped in by a helper (SelfUpdate.cs); no key/archive: the release page ----
+    async Task InstallUpdate()
+    {
+        if (_newer?.Archive == null || _newer.Sig == null || SelfUpdate.IncompleteNotice(_appDir) != null || _updating || _running || _playing) return;
+        _updating = true; _updateInstall.IsEnabled = false; _updateText.Text = "Downloading Launcher " + _newer.Version + "…"; _error = null; UpdateBanners();
+        var tmp = Path.Combine(Path.GetTempPath(), "hpengine-download-" + Guid.NewGuid().ToString("N"));
+        var stage = Path.Combine(_appDir, SelfUpdate.StageName);
+        bool handedOver = false;
+        try
+        {
+            Directory.CreateDirectory(tmp);
+            var sig = await Http.GetByteArrayAsync(_newer.Sig);
+            var file = Path.Combine(tmp, Path.GetFileName(new Uri(_newer.Archive).LocalPath));
+            using (var rs = await Http.GetStreamAsync(_newer.Archive)) using (var fs = File.Create(file)) await rs.CopyToAsync(fs);
+            var err = await Task.Run(() => SelfUpdate.Verify(file, sig, Program.UpdateKey, _newer.Version, SelfUpdate.LauncherName, stage));
+            if (err != null) { _error = err; return; }   // nothing of the install was touched
+            SelfUpdate.StartHelper(_appDir, stage);
+            handedOver = true;
+            Close();
+        }
+        // Every failure (a bad URL, a helper that cannot start, …): this task is fire-and-forget, so it is shown here or never.
+        catch (Exception e) { _error = "Could not update: " + e.Message; }
+        finally
+        {
+            try { Directory.Delete(tmp, true); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+            if (!handedOver) try { if (Directory.Exists(stage)) Directory.Delete(stage, true); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+            _updating = false; _updateInstall.IsEnabled = true; _updateText.Text = $"Launcher {_newer.Version} is available"; UpdateBanners();
+        }
+    }
+
     async Task CheckForUpdate(bool manual)
     {
         string text = null; Release found = null;
@@ -577,10 +630,15 @@ public sealed class MainWindow : Window
             using var rq = new HttpRequestMessage(HttpMethod.Get, Environment.GetEnvironmentVariable("HPENGINE_RELEASES_URL") ?? "https://api.github.com/repos/artemnikonov/hpengine/releases?per_page=30");
             rq.Headers.UserAgent.ParseAdd("HPEngine-Launcher");
             text = await (await Http.SendAsync(rq)).EnsureSuccessStatusCode().Content.ReadAsStringAsync();
-            found = Updates.Pick(text, _version);
+            found = Updates.Pick(text, _version, SelfUpdate.ArchiveName);
         }
         catch (Exception) { text = null; }
-        if (found != null) { _newer = found; _updateText.Text = $"Launcher {found.Version} is available"; _updateBanner.IsVisible = true; return; }
+        if (found != null)
+        {
+            _newer = found; _updateText.Text = $"Launcher {found.Version} is available"; _updateBanner.IsVisible = true;
+            _updateInstall.IsVisible = SelfUpdate.Offered(found, Program.UpdateKey, _appDir);   // else only the release page
+            return;
+        }
         if (manual) await Confirm("Check for Updates", text == null ? "Could not check for updates." : $"HPEngine Launcher {_version} is up to date.", "OK", false);
     }
 }

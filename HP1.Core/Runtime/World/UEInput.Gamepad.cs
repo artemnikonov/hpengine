@@ -29,8 +29,8 @@
 //     undoes it (PAD RESET RULE below);
 //   * the Options "Controls" page shows one device at a time (ControlsLoad): in PAD VIEW — a gamepad is connected and the
 //     last key or axis input came from it — the rows list the pad keys' effective bindings under the pad type's own names
-//     (GamepadKeyNames), key capture takes only pad keys (A is its own key while the page waits for one) and two hint lines
-//     name the fixed buttons; otherwise the page is the original's, without the pad keys, and takes only non-pad keys.
+//     (GamepadKeyNames), key capture takes only pad keys (A is its own key while the page waits for one) — no hint lines for the
+//     fixed buttons (removed by the author 2026-11-13: standard pad conventions, English-only text); otherwise the page is the original's, without the pad keys, and takes only non-pad keys.
 //
 // PAD RESET RULE (the same text in launcher/Desktop/Logic.cs PadReset and launcher/Launcher.swift padRebound; the launchers
 // edit the files, Core only reads them): the saved overlay lives in <game>/HPEngineData — DefUser.ini for the User scope,
@@ -133,19 +133,6 @@ namespace HP1.UEScript
             yield return ("Joy" + JoyStickLeft, "Left Stick Left");
             yield return ("Joy" + JoyStickRight, "Left Stick Right");
         }
-        // The fixed buttons, for the Controls page's pad-view hint lines: what the virtual keys, the right stick and the
-        // menu navigation do (VirtualOf, PollGamepad, UEInput.MenuNav.cs), under the connected pad type's names without
-        // the "Pad " the key rows need (the lines are about the pad).
-        internal string[] GamepadFixedHint() => GamepadFixedHint(_padType, _padFaces);
-        internal static string[] GamepadFixedHint(string type, string faces)
-        {
-            string[] l = PadLabelsFor(type, faces);
-            return new[]
-            {
-                $"{l[PadEast].Substring(4)}: skip, back   {l[PadStart].Substring(4)}: book   Right Stick: camera",
-                $"{l[PadSouth].Substring(4)}: select   D-pad: menus",
-            };
-        }
         // A trigger counts as pressed past the WinDrv dead-zone fraction (0.2 of its range, .rdata 0x111146b8).
         const int TriggerPressed = (int)(0.2 * 32767);
         const int JoyStickUp = 13, JoyStickDown = 14, JoyStickLeft = 15, JoyStickRight = 16;
@@ -206,6 +193,17 @@ namespace HP1.UEScript
                 StringComparison.OrdinalIgnoreCase);
             string raw = config.Get(UEConfig.ScopeSystem, UEConfig.HPEngineSection, GamepadLookSpeedKey);
             _lookSpeed = raw is null ? DefaultLookSpeed : UEValue.LeadingAtof(raw);
+        }
+
+        // PlayerPawn.ResetKeyboard (see UEGameEngineNatives 544): the original ResetConfig(Input) — the shipped
+        // [Engine.Input] back. IMPROVEMENT, NOT ORIGINAL (D-75, author 2026-11-15): GamepadBindingsSaved is dropped too
+        // (the Launchers' PAD RESET RULE), so the pad defaults come back instead of the shipped empty Joy* keys.
+        internal void ResetKeyboard(UEConfig config)
+        {
+            config.Reset(UEConfig.ScopeUser, UEConsoleCommand.InputSection);
+            config.Reset(UEConfig.ScopeSystem, UEConfig.HPEngineSection, GamepadBindingsSavedKey);
+            _padSaved = false;
+            LoadBindings(config.Section(UEConfig.ScopeUser, UEConsoleCommand.InputSection));
         }
 
         // Key dispatch (UInput::Process, the Hold pass): the user's binding, else — with a gamepad connected and the

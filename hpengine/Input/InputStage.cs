@@ -47,7 +47,7 @@ namespace HPEngine.Input
         readonly Dictionary<string, int> _nameDown = new(StringComparer.OrdinalIgnoreCase);
         // ResetRelease: a key-up with the SDL_ResetKeyboard signature (see Feed); FocusRelease: such a key-up that the focus
         // loss right after it proved synthetic — it moves the device state (GetKeyState) but is not an input event.
-        enum Kind { Control, Mouse, Wheel, Char, Focus, ResetRelease, FocusRelease }
+        enum Kind { Control, Mouse, Wheel, Char, Focus, ResetRelease, FocusRelease, Resized }
         // Control events keep the raw device transition: the device state (_ctlDown/_nameDown, i.e. GetKeyState) changes
         // when RunFrame handles the event, so a reset handled in the middle of the queue polls the state AT that point.
         readonly List<(Kind K, string Key, UEInput.InputAction Action, float Delta, SdlControl C, bool Repeat)> _evq = new();
@@ -124,6 +124,8 @@ namespace HPEngine.Input
                 case SDL_EventType.SDL_EVENT_WINDOW_FOCUS_GAINED: audioFocus(true); _evq.Add((Kind.Focus, null, default, 1f, default, false)); break;
                 case SDL_EventType.SDL_EVENT_WINDOW_MINIMIZED: audioFocus(false); break;
                 case SDL_EventType.SDL_EVENT_WINDOW_RESTORED: audioFocus(true); break;
+                // The window manager may finish a mode switch after Resize returned (XWayland: the configure arrives later).
+                case SDL_EventType.SDL_EVENT_WINDOW_RESIZED: _evq.Add((Kind.Resized, null, default, 0f, default, false)); break;
             }
             return true;
         }
@@ -292,6 +294,12 @@ namespace HPEngine.Input
                         if (!_focused && _captured) SetCapture(sink, false);
                         sink.Focus(_focused);
                         if (_focused && !_captured && sink.ConsoleReady) SetCapture(sink, true);
+                        // Captured before the window had focus (macOS: launched behind the launcher, "focus False" in the
+                        // capture log) with no focus loss since: Core is captured, the OS half did not take. Re-apply it.
+                        else if (_focused && _captured) OsCapture?.Invoke(true);
+                        break;
+                    case Kind.Resized:
+                        if (_captured) OsCapture?.Invoke(true);   // a focus loss has released it: nothing without focus
                         break;
                 }
             }

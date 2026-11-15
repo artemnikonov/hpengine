@@ -13,8 +13,8 @@
 //     Enabled=<name>      ; one line per mod, in order: a later mod wins over an earlier one
 //
 // With no mod or data language selected the engine runs on the install itself, exactly as before. Otherwise a working
-// copy <data>/modroot is rebuilt at every start: the install, then GameLanguage's selected files, then the enabled
-// mods' files. Paths are matched case-insensitively, as on the shipped
+// copy <data>/modroot is rebuilt at every start: every game directory of the install as a real directory of links to its
+// files, then GameLanguage's selected files, then the enabled mods' files linked over them. Paths are matched case-insensitively, as on the shipped
 // Windows file system (a mod's "system/engine.u" replaces "System/Engine.u"). Core boots from the working copy and
 // gets only the enabled names (UEGameEngine.Boot mods), a label for its saves: a save records them with the GUIDs of the
 // script packages it depends on, and a save that does not fit the current scripts is refused before the old level is
@@ -199,12 +199,12 @@ namespace HPEngine.Packaging
             return map;
         }
 
-        static string FindFile(string dir, string name) =>
+        internal static string FindFile(string dir, string name) =>
             Directory.GetFiles(dir).FirstOrDefault(f => Path.GetFileName(f).Equals(name, StringComparison.OrdinalIgnoreCase));
 
         static string Key(string rel) => rel.Replace('\\', '/').ToLowerInvariant();
 
-        static string FindDir(string parent, string name) =>
+        internal static string FindDir(string parent, string name) =>
             Directory.Exists(parent)
                 ? Directory.GetDirectories(parent).FirstOrDefault(d => Path.GetFileName(d).Equals(name, StringComparison.OrdinalIgnoreCase))
                 : null;

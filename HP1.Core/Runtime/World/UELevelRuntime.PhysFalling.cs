@@ -83,9 +83,8 @@ namespace HP1.UEScript
             // WizzardCardIcon). A bool saved before the loop would pick the next
             // substep's branch from a stale value and wrongly skip the tail velocity
             // recomputation.
-            // The STOP branches (water, bBobbing, player feet in water) are checked on
-            // EVERY substep — where shipped picks the velocity formula (84873-84910),
-            // see the loop below.
+            // The water, bBobbing and wet-feet velocity formulas are chosen on EVERY
+            // substep, see the loop below.
 
             float horizontalSpeedCap = 0f;
             if (pawn)
@@ -181,31 +180,13 @@ namespace HP1.UEScript
                         $"Core PhysFalling missing zone actor={actor.GetProp(PK.Name)}");
                 Vector3 gravity = UEInterpreter.AsVector3(zone.GetProp(PK.ZoneGravity));
                 Vector3 liveAcceleration = UEInterpreter.AsVector3(actor.GetProp(PK.Acceleration));
-                // Velocity formula choice (84873-84910; repeated at the apex 85029-85081):
-                // zone water (0x2cc&1) → buoyancy and fluid friction; else
-                // Decoration.bBobbing (0x260&8) → half gravity; else PlayerPawn with
-                // FootRegion.Zone.bWaterZone and oldVz<0 → foot-zone friction. These three
-                // branches are NOT ported — a loud STOP on every substep. Unreachable in the
-                // campaign (measured): all 226 zones of 41 maps have effective
-                // bWaterZone=False (classes ZoneInfo/SkyZoneInfo/WarpZoneInfo/LevelInfo
-                // without a default, no map overrides; control — bPainZone=True on 46 zones
-                // is visible in the same measurement); there are no bWaterZone writes in the
-                // Engine.u decompile (reads only) or in package scripts, in Engine.dll only the
-                // copy constructor (12391). Decoration.bBobbing is set only by
-                // Decoration.ZoneChange in a water zone (Engine.u Decoration.uc:92).
-                bool water = UEInterpreter.ToBool(zone.GetProp(PK.bWaterZone));
-                bool bobbing = !water && UEInterpreter.ClassIsA(actor.Class, "Decoration")
-                    && UEInterpreter.ToBool(actor.GetDeclared("Decoration", "bBobbing"));
-                bool wetFeet = !water && !bobbing && UEInterpreter.ClassIsA(actor.Class, "PlayerPawn")
-                    && oldVelocity.z < 0f
-                    && UEInterpreter.ToBool(((actor.GetProp(PK.FootRegion) as UEObject)?.GetProp(PK.Zone) as UEObject)
-                        ?.GetProp(PK.bWaterZone));
-                if (water || bobbing || wetFeet)
-                    throw new NotSupportedException(
-                        $"Core PhysFalling STOP branch (Engine.dll.c:84873-84910) actor={actor.GetProp(PK.Name)} water={water} bobbing={bobbing} wetFeet={wetFeet}");
-
+                // Velocity formula choice (0x103eef17..0x103ef472; repeated at the apex 0x103ef58e..0x103efc05):
+                // zone water -> buoyancy and fluid friction; else Decoration.bBobbing -> half gravity; else PlayerPawn
+                // with FootRegion.Zone.bWaterZone and oldVz<0 -> foot-zone friction (FallingFluidVelocity); else the
+                // dry formula below.
+                Vector3? fluid = FallingFluidVelocity(actor, oldVelocity, timeTick, apex: false);
                 Vector3 force = gravity + liveAcceleration;
-                Vector3 midpointVelocity = oldVelocity + force * (0.5f * timeTick);
+                Vector3 midpointVelocity = fluid ?? oldVelocity + force * (0.5f * timeTick);
 
                 // Apex split (Engine.dll.c:84981-85005): both halves must
                 // exceed 15 ms.
@@ -220,7 +201,8 @@ namespace HP1.UEScript
                     {
                         remaining += second;
                         timeTick = first;
-                        midpointVelocity = oldVelocity + force * (0.5f * timeTick);
+                        midpointVelocity = FallingFluidVelocity(actor, oldVelocity, timeTick, apex: true)
+                            ?? oldVelocity + force * (0.5f * timeTick);
                     }
                 }
                 else apexSeen = false;
@@ -246,11 +228,16 @@ namespace HP1.UEScript
                 Vector3 moved = UEInterpreter.AsVector3(actor.GetProp(PK.Location));
                 Log($"falling_move actor={actor.GetProp(PK.Name)} from={location} to={moved} velocity={actor.GetProp(PK.Velocity)} gravity={gravity} blocked={(hitFraction < 1f).ToString().ToLowerInvariant()} fraction={hitFraction:R} normal={hitNormal} hit={hitActor?.GetProp(PK.Name) ?? (object)"Level"}");
                 if (actor.Destroyed) return;
-                // 85210-85214: a pawn that moved into water (Physics==3) —
-                // APawn::startSwimming with the remainder (1−Time)·dt, before hit handling.
+                // 0x103efe9a..0x103efede: a pawn that moved into water (Physics==3) — APawn::startSwimming(OldVelocity,
+                // timeTick, float((1 − Time)·timeTick + remaining), Iterations) before hit handling; return.
                 if (pawn && UEInterpreter.ToInt(actor.GetProp(PK.Physics)) == 3)
-                    throw new NotSupportedException(
-                        $"physFalling startSwimming reached (Engine.dll.c:85211) actor={actor.GetProp(PK.Name)} — port the shipped swim entry before using it");
+                {
+                    remaining = HP1.Core.X87Ext.Round64(HP1.Core.X87Ext.Round64(HP1.Core.X87Ext.Round64(
+                        HP1.Core.X87Ext.From(1f) - HP1.Core.X87Ext.From(fallHit.Time)) * HP1.Core.X87Ext.From(timeTick))
+                        + HP1.Core.X87Ext.From(remaining)).ToFloat();
+                    StartSwimming(interp, actor, oldVelocity, timeTick, remaining, iteration);
+                    return;
+                }
                 // 85215-85257: a DECORATION hitting a PlayerPawn decrements numLandings
                 // (max(n−1, 0), bit trick 85255) — before the bBounce fork.
                 if (hitFraction < 1f && hitActor is not null

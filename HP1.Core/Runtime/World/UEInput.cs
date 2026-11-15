@@ -202,6 +202,16 @@ namespace HP1.UEScript
             return _keyNames = list;
         }
 
+        // EInputKey mouse keys: IK_LeftMouse 0x01, IK_RightMouse 0x02, IK_MiddleMouse 0x04, IK_MouseX..IK_MouseW 0xe4-0xe7,
+        // IK_MouseWheelUp 0xec, IK_MouseWheelDown 0xed.
+        static readonly int[] MouseKeyIndices = { 0x01, 0x02, 0x04, 0xe4, 0xe5, 0xe6, 0xe7, 0xec, 0xed };
+        internal static bool IsMouseKey(string key)
+        {
+            IReadOnlyList<string> names = KeyNamesByIndex();
+            foreach (int i in MouseKeyIndices) if (string.Equals(names[i], key, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
         // ── Joystick (winmm), UWindowsViewport::UpdateInput joystick block ──
         //
         // JOYINFOEX as joyGetPosEx(JOYSTICKID1) fills it with dwFlags 0x4ff (JOY_RETURNALL | JOY_RETURNCENTERED, no
@@ -424,7 +434,9 @@ namespace HP1.UEScript
         public bool InputEvent(UEInterpreter interp, UEObject console, UEObject pawn, string key,
             InputAction action, float delta)
         {
-            if (action == InputAction.Press || (action == InputAction.Axis && delta != 0f)) _padLast = _inPadPoll;   // D-75
+            // D-75: the device in use follows keyboard keys and the pad; the mouse (moves, clicks, wheel, trackpad) keeps it
+            // (author 2026-11-13: a click on the Controls page in the pad view flipped it to the keyboard view).
+            if ((action == InputAction.Press || (action == InputAction.Axis && delta != 0f)) && (_inPadPoll || !IsMouseKey(key))) _padLast = _inPadPoll;
             bool r = InputEventCore(interp, console, pawn, key, action, delta);
             // Author decision 2026-10-01 (not original; improvements list D-70): the mouse wheel scrolls an open combo list.
             // UWindow of this version has no wheel handler; the override runs after the wheel event went through the

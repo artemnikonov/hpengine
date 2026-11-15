@@ -105,6 +105,31 @@ namespace HP1.UEScript
                 yield return n.Name.ToString();
         }
 
+        // FUN_10147c30 (Core): TFieldIterator<UProperty> over the class chain, own fields first, appStricmp on the name.
+        internal static UProperty FindPropertyText(UEObject self, string name)
+        {
+            for (UClass c = self?.Class; c is not null; c = UEInterpreter.CanonicalSuper(c))
+                foreach (UProperty f in c.EnumerateFields<UProperty>())
+                    if (string.Equals(f.Name.ToString(), name, StringComparison.OrdinalIgnoreCase)) return f;
+            return null;
+        }
+
+        // An enum object from an ObjectConst: an export UEnum carries its names; an import stub is looked up by its exact
+        // name inside its exact outer (UEClassRegistry.EnumNames). Anything else is not a UEnum -> null (NAME_None).
+        internal static IReadOnlyList<string> EnumNamesOf(object o)
+        {
+            if (o is UEnum en && en.Names is { Count: > 0 })
+            {
+                var l = new List<string>(en.Names.Count);
+                foreach (var n in en.Names) l.Add(n.ToString());
+                return l;
+            }
+            if (o is UObject uo && uo.ImportTable is { } imp
+                && string.Equals(imp.ClassName.ToString(), "Enum", StringComparison.OrdinalIgnoreCase))
+                return UEClassRegistry.Shared.EnumNames(uo.Name.ToString(), imp.OuterTable?.ObjectName.ToString());
+            return null;
+        }
+
         // FString::Caps (Core.dll.c:64283).
         internal static string ShippedCaps(string s)
         {
@@ -484,6 +509,67 @@ namespace HP1.UEScript
             // FString::Caps (Core.dll.c:64283): only 'a'..'z' (0x60 < c < 0x7b)
             // are reduced by 0x20; other characters (incl. non-ASCII) stay as-is.
             Pair(235, "Caps", (interp, frame, args) => ShippedCaps(Str(args[0]) ?? ""));
+            // UObject::execSetPropertyText (Core.dll.c:4734): the same field walk; RF_Public (+0x1c & 4) and not
+            // CPF_Const (PropertyFlags +0x3c & 2), then ImportText(Value, this + Offset, PortFlags 1) via slot +0x88:
+            // element 0; a value ImportText does not accept leaves the property unchanged.
+            Pair(0, "SetPropertyText", (interp, frame, args) =>
+            {
+                UEObject self = frame.Context ?? frame.Object;
+                UProperty prop = FindPropertyText(self, Str(args.Length > 0 ? args[0] : null) ?? "");
+                if (prop is null || !prop.HasObjectFlag(UELib.Flags.ObjectFlagsLO.Public)
+                    || prop.PropertyFlags.HasFlag(UELib.Flags.PropertyFlag.Const)) return null;
+                string key = prop.Name.ToString();
+                object cur = self.GetProp(key);
+                if (prop.ArrayDim > 1)
+                {
+                    // A static array is preallocated to its list form by LoadDefaults; without it element 0 has no
+                    // slot to write (as in LoadConfig): loud, never the scalar over the whole array.
+                    if (cur is not System.Collections.IList list)
+                        throw new InvalidOperationException("SetPropertyText: static array " + key
+                            + " not preallocated on " + self.Class?.Name);
+                    if (list.Count == 0) list.Add(null);
+                    object e = list[0];
+                    if (UEObjectConfig.ImportText(prop, Str(args.Length > 1 ? args[1] : null) ?? "", ref e)) list[0] = e;
+                    return null;
+                }
+                if (UEObjectConfig.ImportText(prop, Str(args.Length > 1 ? args[1] : null) ?? "", ref cur)) self.Props[key] = cur;
+                return null;
+            });
+            // UObject::execGetPropertyText (Core.dll.c:27996): FUN_10147c30 = UProperty walk of the class chain (own
+            // fields, then super, vtable +0x6c), appStricmp on the name; no field or not RF_Public (ObjectFlags +0x1c & 4)
+            // -> ""; otherwise ExportText(0, buf, this, this, PortFlags 1) via slot +0x8c: element 0, PPF_Localized.
+            Pair(0, "GetPropertyText", (interp, frame, args) =>
+            {
+                UEObject self = frame.Context ?? frame.Object;
+                string name = Str(args.Length > 0 ? args[0] : null) ?? "";
+                UProperty prop = FindPropertyText(self, name);
+                if (prop is null || !prop.HasObjectFlag(UELib.Flags.ObjectFlagsLO.Public)) return "";
+                object v = self.GetProp(prop.Name.ToString());
+                if (v is System.Collections.IList list && prop.ArrayDim > 1) v = list.Count > 0 ? list[0] : null;
+                if (prop.Type == UELib.Types.PropertyType.BoolProperty)
+                {
+                    // UBoolProperty::ExportTextItem (Core.dll.c:18767): PortFlags & 1 -> GTrue/GFalse. The port keeps the
+                    // global words as literals; a language whose word differs even by case is not established (STOP).
+                    string lit = UEValue.ToBool(v) ? "True" : "False";
+                    string loc = UELocalization.Localize("General", lit, "Core", optional: true);
+                    if (!string.IsNullOrEmpty(loc) && loc != lit)
+                        throw new NotSupportedException($"GetPropertyText bool: Core.{UELocalization.Language} [General] {lit}={loc}; "
+                            + "whether shipped GTrue/GFalse are localized at appInit is not established (STOP)");
+                    return lit;
+                }
+                return UEObjectConfig.ExportTextItem(prop, v);
+            });
+            // UObject::execGetEnum (Core.dll.c:33418, export 0x22b6): result NAME_None unless E IsA UEnum and
+            // i < Names.Num (+0x38) — then Names(i) (+0x34). No native index in HP1 (iNative 0).
+            Pair(0, "GetEnum", (interp, frame, args) =>
+            {
+                IReadOnlyList<string> names = EnumNamesOf(args.Length > 0 ? args[0] : null);
+                int i = args.Length > 1 ? UEInterpreter.ToInt(args[1]) : 0;
+                if (names is null || i >= names.Count) return new UEName("None");
+                // 0x101428bf `cmp; jge`: signed, no lower bound — a negative i reads before the Names data (not emulable).
+                if (i < 0) throw new InvalidOperationException($"GetEnum: negative index {i} reads outside Names in the original");
+                return new UEName(names[i]);
+            });
             // Locs (238) is NOT registered: HP1 has no such native — no execLocs
             // in Core.dll, no Locs name in Core.u (only FString::Locs,
             // Core.dll.c:7393). A call to native 238 goes loudly to OnUnknownNative.
@@ -756,6 +842,27 @@ namespace HP1.UEScript
                 if (args.Length > 3) args[3] = Z;
                 return null;
             });
+            // v030 area B — Core math natives no shipped script calls (bodies: X87 / UEValue, addresses there).
+            Pair(210, "ComplementEqual_FloatFloat", (interp, frame, args) =>
+                X87.ComplementEqual(UEInterpreter.AsFloat(args[0]), UEInterpreter.AsFloat(args[1])));
+            Pair(248, "Smerp", (interp, frame, args) =>
+                X87.Smerp(UEInterpreter.AsFloat(args[0]), UEInterpreter.AsFloat(args[1]), UEInterpreter.AsFloat(args[2])));
+            Pair(230, "GetUnAxes", (interp, frame, args) => {
+                var (X, Y, Z) = UEValue.GetUnAxes(UEInterpreter.AsRotator(args[0]));
+                if (args.Length > 1) args[1] = X;
+                if (args.Length > 2) args[2] = Y;
+                if (args.Length > 3) args[3] = Z;
+                return null;
+            });
+            Pair(227, "Invert", (interp, frame, args) => {
+                var (X, Y, Z) = X87.Invert(UEInterpreter.AsVector3(args[0]), UEInterpreter.AsVector3(args[1]),
+                    UEInterpreter.AsVector3(args[2]));
+                args[0] = X; args[1] = Y; args[2] = Z;
+                return null;
+            });
+            Pair(0, "OrthoRotation", (interp, frame, args) =>
+                X87.OrthoRotation(UEInterpreter.AsVector3(args[0]), UEInterpreter.AsVector3(args[1]),
+                    UEInterpreter.AsVector3(args[2])));
 
             // ── Vector in-place (arg 0 OutParm) ───────────────────────────
             Pair(221, "MultiplyEqual_VectorFloat", (interp, frame, args) => {
@@ -965,6 +1072,17 @@ namespace HP1.UEScript
                     Str(args.Length > 1 ? args[1] : null),
                     Str(args.Length > 2 ? args[2] : null)));
             Pair(0, "GetLanguage", (interp, frame, args) => UELocalization.Language);
+            // UObject::execStaticSaveConfig (export 0x1a78): SaveConfig(Class->GetDefaultObject(), CPF_Config 0x4000) — the class
+            // defaults (the port's default.X bag) are written. A PerObjectConfig class names its section after the object:
+            // which name the default object carries there is not established — loud.
+            Pair(0, "StaticSaveConfig", (interp, frame, args) =>
+            {
+                UClass cls = (frame.Context ?? frame.Object)?.Class ?? throw new InvalidOperationException("StaticSaveConfig without a class");
+                if ((UEObjectConfig.ClassFlags(cls) & UEObjectConfig.CLASS_PerObjectConfig) != 0)
+                    throw new NotSupportedException($"StaticSaveConfig on PerObjectConfig class {cls.Name}: the default object's section name is not established (STOP)");
+                UEObjectConfig.SaveConfig(UEConfig.Global, interp.ClassDefaultsBag(cls), interp);
+                return null;
+            });
             Pair(536, "SaveConfig", (interp, frame, args) =>
             {
                 UEObjectConfig.SaveConfig(UEConfig.Global, frame.Context ?? frame.Object, interp);
@@ -1489,47 +1607,24 @@ namespace HP1.UEScript
                 if (args.Length > 2) args[2] = yl;
                 return null;
             });
-            // ── 467/471/480: LOUD BOUNDARIES, not stubs ──
+            // ── 471/480: LOUD BOUNDARIES, not stubs ──
             //
             // 471 DrawClippedActor and 480 DrawPortal: a bytecode census of all shipped .u
             // — 480 has NO calls, 471 has a
             // single one, UWindowWindow.DrawClippedActor, which itself has no
             // caller (neither final nor virtual). Unreachable.
             //
-            // 467 DrawActor: callers are Inventory.RenderOverlays and
-            // Weapon.RenderOverlays (Engine.u, decompile of 146 classes: Weapon.uc:209,
-            // Inventory.uc:103 — also the search control; HPMenu.u mentions
-            // DrawActor(MouseParticle) only in commented-out "test code").
-            // They are called by PlayerPawn/Pawn.RenderOverlays, and the event from the tail of
-            // DrawWorld goes to `bBehindView ? None : (ViewTarget ?? Actor)`.
-            // UNREACHABILITY — by listing the writers:
-            //  * bBehindView = false is written only by PlayerPawn.ViewPlayerNum/
-            //    ViewPlayer/ViewSelf/BehindView (exec), ViewClass (on a miss),
-            //    PlayerSpectating.AltFire, Dying.EndState and Spectator; game scripts never
-            //    write bBehindView or ViewTarget = None;
-            //  * the execs are unreachable: the HPConsole console opens only with
-            //    bDebugMode (globalconfig, absent from shipped ini — false; the cheat
-            //    HarryDebugModeOn and the settings key are cut — no developer console,
-            //    NOT ORIGINAL, D-77), Tilde
-            //    is unbound in DefUser.ini, no key calls
-            //    View*/BehindView, the game's ConsoleCommand sends no such commands;
-            //  * the game never enters PlayerSpectating (no GotoState in Engine.u or
-            //    in scripts); Dying.EndState clears ViewTarget only for Carcass —
-            //    the recipient stays the BaseCam camera (a Pawn without a Weapon);
-            //  * ViewClass(BaseCam, true) from Harry.PostBeginPlay misses
-            //    only without a camera on the map: measured over 38 maps (
-            //    tick 300, view line) — everywhere bBehindView=True, ViewTarget is
-            //    PotCam/BaseCam.
-            // If the boundary is reached anyway: execDrawActor body (Engine.dll.c:
-            // 125588) — WireFrame -> RendMap = 1 for the call; clear bHidden;
-            // ClearZ; Render->DrawActor(Frame, A) = FDynamicSprite + FUN_10b30c70
-            // + DrawActorSprite (Render.dll.c:3339-3372); bHidden = 1; restore
-            // RendMap. The mesh branch of DrawActorSprite exists in Core
-            // (RenderLevelPass.DrawMeshSprite), but URender::DrawActor is not ported,
-            // and the port closes the frame (FinishMasterFrame) BEFORE RenderOverlays —
-            // it has no frame for DrawActor at that point.
+            // 467 DrawActor(Actor A, bool WireFrame, optional bool ClearZ): callers are Inventory.RenderOverlays and
+            // Weapon.RenderOverlays (Engine.u), reached from the tail of DrawWorld when !bBehindView (shipped campaign:
+            // never; the Restored mod's HP1FlyKeys: Weapon.RenderOverlays of a baseWand without Mesh). The optional
+            // ClearZ is pre-filled with 0 (0x1038999c). Body: UEWorldFrameProducer.CanvasDrawActor.
             Pair(467, "DrawActor", (interp, frame, args) =>
-                throw new NotSupportedException("Canvas.DrawActor reached — not ported: execDrawActor (Engine.dll.c:125588) needs URender::DrawActor (not translated) on a live frame, while the port finishes the master frame before RenderOverlays; campaign census shows bBehindView=1 with a camera ViewTarget on all 38 maps, and every bBehindView=false writer is an exec command, PlayerSpectating or Dying.EndState"));
+            {
+                bool wire = args is { Length: > 1 } && args[1] is not null && UEValue.ToBool(args[1]);
+                bool clearZ = args is { Length: > 2 } && args[2] is not null && UEValue.ToBool(args[2]);
+                FrameProducer.CanvasDrawActor(frame.Context ?? frame.Object, args is { Length: > 0 } ? args[0] as UEObject : null, wire, clearZ);
+                return null;
+            });
             Pair(471, "DrawClippedActor", (interp, frame, args) =>
                 throw new NotSupportedException("Canvas.DrawClippedActor reached — not ported; the campaign census shows its only caller UWindowWindow.DrawClippedActor has no callers"));
             Pair(480, "DrawPortal", (interp, frame, args) =>

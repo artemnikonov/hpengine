@@ -42,6 +42,12 @@ namespace HPEngine
                 FrameOf.Add(i);
                 at[i] = vi;
                 if (kind == KindSky) { Claim(parent, kind, 0, vi, i, refuse); continue; }
+                // Core's camera-in-warp-zone child (OccludeBsp 0x10b22802..): no portal surface, the whole parent view is seen
+                // through the warp, and Core does not draw the master. No batch samples it and there is no full-screen child
+                // pass here: a loud STOP, never a silently empty frame.
+                if (kind == KindWarp && fv.Sources.Length == 0)
+                    throw new NotSupportedException("camera inside a warp zone (OccludeBsp 0x10b22802..0x10b22b19): the full-screen "
+                        + "warp child view has no frontend pass — not ported");
                 foreach (ViewSource src in fv.Sources)
                 {
                     int key = kind == KindWarp ? (src.Surf >= 0 ? portalOf(src.Surf) : -1) : mirrorKey(src);

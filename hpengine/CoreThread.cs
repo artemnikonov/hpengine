@@ -142,6 +142,8 @@ namespace HPEngine
     //                                                       cursor, Brightness, Interface Size, an open combo list)
     //   kill                                              — baseHarry.KillHarry(true) on the Core thread before the tick's input
     //                                                       (UEGameEngine.KillPlayerProbe: death -> stateDead -> slot 99 reload)
+    //   click <control text>                              — on the Core thread before the tick's input: Notify(DE_Click) of the
+    //                                                       open menu page's control with that Text (UEGameEngine.MenuClickProbe)
     //   quit                                              — no tick is run from this one on
     // Events of tick k are handed to InputStage where the loop hands it the polled OS events of that tick (both loops), so
     // a late or early delivery in either loop changes the digest. Real OS input is ignored, the cursor is (0, 0), the mouse
@@ -188,6 +190,10 @@ namespace HPEngine
         }
         public bool ProbeAt(int tick) => _lines.Exists(l => l.Tick == tick && l.Verb == "probe");
         public bool KillAt(int tick) => _lines.Exists(l => l.Tick == tick && l.Verb == "kill");
+        public IEnumerable<string> ClicksAt(int tick)
+        {
+            foreach (var (t, verb, args) in _lines) if (t == tick && verb == "click") yield return args;
+        }
 
         // Stress: the tick's key and mouse lines into the SDL event queue, in file order (window thread).
         public unsafe void Push(int tick)
@@ -245,7 +251,7 @@ namespace HPEngine
                         if (_padOk) _pad = new UEInput.GamepadState { LeftX = S(a[0]), LeftY = S(a[1]), RightX = S(a[2]), RightY = S(a[3]),
                             LeftTrigger = S(a[4]), RightTrigger = S(a[5]), Buttons = uint.Parse(a[6], System.Globalization.CultureInfo.InvariantCulture) };
                         break;
-                    case "console": case "probe": case "kill": break;
+                    case "console": case "probe": case "kill": case "click": break;
                     default: throw new InvalidDataException($"window script: unknown verb '{verb}' at tick {tick}");
                 }
             }

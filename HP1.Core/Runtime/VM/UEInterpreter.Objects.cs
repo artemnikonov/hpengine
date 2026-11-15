@@ -217,7 +217,7 @@ namespace HP1.UEScript
             RememberProxy(refVal, proxy);
             return proxy;
         }
-        UEObject ClassDefaultsBag(UClass cls)
+        internal UEObject ClassDefaultsBag(UClass cls)
         {
             if (!_classDefaults.TryGetValue(cls, out var d))
             {
@@ -227,6 +227,15 @@ namespace HP1.UEScript
             }
             return d;
         }
+        // A level package's classes were released (UEClassRegistry.ReleaseLevelPackage): their default bags and
+        // ClassUnique counters go with them (a reload makes a new UClass), and the lookups that walked the catalogue
+        // (event/global function, stub declaration) are recomputed.
+        internal void ForgetReleasedClasses(HashSet<UClass> released)
+        {
+            foreach (UClass cls in released) { _classDefaults.Remove(cls); ClassUnique.Remove(cls); }
+            _eventFnCache.Clear(); _globalFnCache.Clear(); _stubDecl.Clear();
+        }
+
         // Tail of UObject::SaveConfig (Core.dll.c:63720-63760): for each loaded
         // class with IsChildOf(BaseClass) — LoadConfig(Defaults, 1).
         // The port's default objects are the `default.X` cache; those already

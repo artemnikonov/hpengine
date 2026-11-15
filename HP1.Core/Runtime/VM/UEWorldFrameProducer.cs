@@ -487,6 +487,10 @@ namespace HP1.UEScript
         // one for all emitters of the class, and rebuilding it every frame
         // would cost a defaults parse per call.
         readonly Dictionary<UELib.Core.UClass, UEObject> _parentDefaults = new(UERefComparer<UELib.Core.UClass>.Instance);
+        internal void ForgetReleasedClasses(HashSet<UELib.Core.UClass> released)
+        {
+            foreach (UELib.Core.UClass cls in released) _parentDefaults.Remove(cls);
+        }
         SlotKind _slotKind; float _slotChaos, _slotSpin;
         // The render-path slot's current value (ChaosTimer, SpinPos bits as floats).
         internal float RenderSlotChaos, RenderSlotSpin;
@@ -842,8 +846,8 @@ namespace HP1.UEScript
             // Tail of URender::DrawWorld (Render.dll.c:2661-2677): after DrawFrame —
             // the RenderOverlays(Viewport.Canvas) event to the recipient `bBehindView ? None :
             // (ViewTarget ?? Actor)` with !GIsEditor and ShowFlags & 8, via
-            // ProcessEvent. (GUglyHackFlags|=1 for the call is read only by
-            // Canvas.DrawActor, which is a loud STOP in the port.)
+            // ProcessEvent. (GUglyHackFlags|=1 for the call is read only by the
+            // draw of Canvas.DrawActor, which is a loud STOP in the port: CanvasDrawActor.)
             if (DriveHudEnabled && player is not null && _cameraCache.Valid)
             {
                 UEObject overlay = UEValue.ToBool(player.GetProp(PK.bBehindView)) ? null

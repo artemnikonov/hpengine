@@ -193,8 +193,46 @@ namespace HP1.UEScript
 
         // P \ Q for convex P and Q on one plane (normal n): pieces of P outside Q;
         // null = no intersection (P intact), empty = P inside Q.
+        //
+        // n must be the normal of the plane the polygons lie in: the edge normals n × (b − a) are in that plane only then.
+        // Some nodes carry a stored plane that is NOT the plane of their vertices — shipped Lev2_Inc_B (nodes 4341-4344:
+        // vertices in x = -2255.98, FBspNode.Plane normal (0,-0.496,-0.868)) and the community map "A Christmas Night"
+        // (x = -3424, normal (0,-1,0)). There every edge normal pointed out of the plane, all of P was "on the line", and
+        // each edge of Q returned a whole copy of P as an outside piece: Lev2_Inc_B node 4341 came out as 6963 pieces
+        // with 1295 times its area, Christmas Night as 19.5 million pieces from one node (a world vertex buffer over
+        // 2 GB, OverflowException in the frontend's upload). The polygons are rasterised from their vertices
+        // (OccludeBsp, Render.dll.c:5900-5902), so they cover each other in the vertices' plane: when the given normal
+        // is nearer to Q's plane than to Q's normal (the two cases are 90 degrees apart: |n·nq| against |n × nq|), Q's own
+        // normal is taken. A plane that is merely off by float noise (shipped: vertices up to 0.2 units off) keeps n, and
+        // so does a Q without width (its own normal means nothing).
+        // NOT FROM Render.dll: the original has no plane in this step at all (ClipBspSurf transforms and clips the node's
+        // vertices, Render.dll.c:12963..; FUN_10b24f30 rasterises them, :5914; the stored plane only picks the side,
+        // :5879-5887), so for vertices on one plane any n not lying in that plane gives the same region, and the 45-degree
+        // switch is the port's choice of computing frame. Shipped census (SelfTest coplanar_stale_normal_census, D-85d):
+        // 94 chain pairs switch (90 at >= 89 degrees, where n lies in the vertex plane; 4 at 54-88, Lev2_fire1), 166 pairs
+        // lie between 1 and 89 degrees, and cutting every pair in Q's own plane would change 13 pairs' piece area.
+        // DECIDED: improvement, not original (author 2026-11-15, D-85d option 1): this rule stays.
+        internal static int StaleNormalCuts;
+
         public static List<UEVector[]> Subtract(UEVector[] p, UEVector[] q, UEVector n)
         {
+            double nx = 0, ny = 0, nz = 0;                           // Newell normal of Q
+            for (int k = 0; k < q.Length; k++)
+            {
+                UEVector a = q[k], b = q[(k + 1) % q.Length];
+                nx += ((double)a.y - b.y) * ((double)a.z + b.z); ny += ((double)a.z - b.z) * ((double)a.x + b.x); nz += ((double)a.x - b.x) * ((double)a.y + b.y);
+            }
+            double nl = Math.Sqrt(nx * nx + ny * ny + nz * nz);
+            if (nl >= 1e-9)
+            {
+                nx /= nl; ny /= nl; nz /= nl;
+                double along = nx * n.x + ny * n.y + nz * n.z, n2 = (double)n.x * n.x + (double)n.y * n.y + (double)n.z * n.z;
+                if (along * along < n2 - along * along && Solid(new List<UEVector>(q)))   // |n·nq| < |n × nq|
+                {
+                    System.Threading.Interlocked.Increment(ref StaleNormalCuts);   // the frontend (WorldMesh.Build) and the Core thread (mover pieces) both cut
+                    n = new UEVector((float)nx, (float)ny, (float)nz);
+                }
+            }
             double cx = 0, cy = 0, cz = 0;
             foreach (UEVector v in q) { cx += v.x; cy += v.y; cz += v.z; }
             cx /= q.Length; cy /= q.Length; cz /= q.Length;

@@ -70,6 +70,11 @@ were read in the disassembly (`../HP1.Core/Runtime/World/UEEdition.cs` header li
   DLL's machine code on several maps: 647 drawer calls and 990 LOD-cut cases, no divergence.
 - UK `URender::DrawWorld` adapts `GlobalShapeLODAdjust` where US does it in `PostRender`; the port keeps 1.0 in both (an
   improvement, see `original-bugs.md`).
+- **Localized files.** UK sets `Language=eng`, and the engine then opens `<Name>.eng_<ext>` before `<Name>.<ext>` in
+  every package directory (`appFindPackageFile`, Core 0x10153f40). The UK data has three: `Textures/MenuArt.eng_utx`
+  (the "Philosopher's Stone" menu logo; `MenuArt.utx` is the US "Sorcerer's Stone" one), `Sounds/AllDialog.eng_uax`
+  (the UK voice recording) and `Sounds/AllEmote.eng_uax` (the same bytes as US). The port follows the same rule
+  (`UEInstallPath.Packages.cs`); with `Language=int` (US) only the plain names are opened.
 - Scripts: the decompiled UK bytecode equals US except that `FEOptionsPage.IsSupportedResolution` does not exist; UK inlines a
   filter (512x384, 640x480, 800x600, 1024x768) into `LoadAvailableSettings`. On UK the port rebuilds the resolution list with
   every device mode (D-70, not original).

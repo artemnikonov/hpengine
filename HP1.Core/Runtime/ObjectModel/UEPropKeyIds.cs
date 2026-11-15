@@ -321,6 +321,7 @@ namespace HP1.UEScript
         public static readonly int savePointID = UEPropKeys.Id("savePointID");
         public static readonly int Scale = UEPropKeys.Id("Scale");
         public static readonly int ScaleGlow = UEPropKeys.Id("ScaleGlow");
+        public static readonly int SheerAxis = UEPropKeys.Id("SheerAxis");
         public static readonly int SheerRate = UEPropKeys.Id("SheerRate");
         public static readonly int ShowFlags = UEPropKeys.Id("ShowFlags");
         public static readonly int SightRadius = UEPropKeys.Id("SightRadius");

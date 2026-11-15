@@ -25,13 +25,13 @@ namespace HP1.UEScript
         public sealed class TextureData
         {
             public string Path;
-            public string State;               // EXPORTED / PROCEDURAL_NO_PIXELS / NO_MIPS / NON_P8 / NO_PALETTE
+            public string State;               // EXPORTED / EXPORTED_RGBA / PROCEDURAL_NO_PIXELS / NO_MIPS / DXT1_FATAL / NON_P8_UNDEFINED / NO_PALETTE
             public int Width, Height;          // mip 0 (0 — no mips)
             public bool Masked;                // bMasked tag
             public int LodSet;                 // LODSet tag, else 1
             public int MipCount;               // number of mips in the package
-            public byte[] Palette;             // 256×RGBA as in the package (EXPORTED)
-            public (int U, int V, byte[] P8)[] Levels;   // mips with data, from 0; the chain stops at a mip without data
+            public byte[] Palette;             // 256×RGBA as in the package (EXPORTED; null for EXPORTED_RGBA)
+            public (int U, int V, byte[] P8)[] Levels;   // mips with data, from 0; the chain stops at a mip without data (EXPORTED_RGBA: R,G,B,A bytes)
         }
 
         readonly string _root;
@@ -50,14 +50,7 @@ namespace HP1.UEScript
             get
             {
                 if (_packages is not null) return _packages;
-                var list = new List<string>();
-                foreach (string sub in new[] { "Textures", "System", "Maps" })
-                {
-                    string dir = System.IO.Path.Combine(_root, sub);
-                    if (!Directory.Exists(dir)) continue;
-                    foreach (string pat in new[] { "*.utx", "*.u", "*.unr" })
-                        list.AddRange(Directory.GetFiles(dir, pat));
-                }
+                List<string> list = UEInstallPath.PackageFiles(_root, "Textures", "System", "Maps");
                 _packages = list.Distinct(StringComparer.Ordinal)
                     .OrderBy(x => System.IO.Path.GetFileName(x), StringComparer.Ordinal).ToList();
                 if (_packages.Count == 0) throw new InvalidOperationException($"textures: no packages under {_root}");
@@ -69,8 +62,7 @@ namespace HP1.UEScript
         {
             if (_textureClasses is not null) return;
             var super = new Dictionary<string, string>(StringComparer.Ordinal);
-            string sysDir = System.IO.Path.Combine(_root, "System");
-            foreach (string pkgPath in Directory.GetFiles(sysDir, "*.u").OrderBy(x => System.IO.Path.GetFileName(x), StringComparer.Ordinal))
+            foreach (string pkgPath in UEInstallPath.PackageFiles(_root, "System").OrderBy(x => System.IO.Path.GetFileName(x), StringComparer.Ordinal))
             {
                 UnrealPackage pkg = UnrealLoader.LoadPackage(pkgPath, FileAccess.Read);
                 pkg.InitializePackage(UnrealPackage.InitFlags.All);
@@ -254,7 +246,7 @@ namespace HP1.UEScript
                 LodSet = lod is null ? 1 : int.Parse(lod),
             };
             if (tex.Mips == null || tex.Mips.Count == 0) { d.State = "NO_MIPS"; return d; }
-            if (tex.Format != UELib.Engine.UBitmapMaterial.TextureFormat.P8) { d.State = "NON_P8"; return d; }
+            if (tex.Format != UELib.Engine.UBitmapMaterial.TextureFormat.P8) return ReadDirect(pkgPath, tex, d);
             if (tex.Palette == null) { d.State = "NO_PALETTE"; return d; }
             tex.Palette.BeginDeserializing();
             if (tex.Palette.Colors == null || tex.Palette.Colors.Count < 256) { d.State = "NO_PALETTE"; return d; }
@@ -293,6 +285,53 @@ namespace HP1.UEScript
             return d;
         }
 
+        // NON-P8 TEXTURE AS D3DDRV UPLOADS IT. UTexture::Lock (Engine 0x10421220) hands the device Format (+0x28) and
+        // Mips (+0xa4); CompMips (test 0x10421261) are taken only when RenDev+0x68 (SupportsTC) is set, and D3DDrv
+        // never sets it (its only RecognizePixelFormat calls, 0x1000ce01/0x1000ce7a, are 8888 into +0x1b0 and 1555 into
+        // +0x214). The port's device is the 8888 one (+0x1b0 set: a 32-bit mode), as its P8 path (FUN_10002490).
+        // UD3DRenderDevice::SetTexture (0x10009a80) picks the pool by Format (0x10009b27):
+        //   3 (DXT1) -> pool +0x27c on pixel format +0xe8, never recognized: MaxU/MaxV are 0, no mip fits and
+        //     GError->Logf("D3D Driver: Encountered oversize texture without sufficient mipmaps") (0x10009f3d) —
+        //     the original stops with a fatal error. State DXT1_FATAL.
+        //   1, 2, 4, 5 and any other non-zero value -> pool +0x284 (8888) whose converter 0x100022c0 writes, for
+        //     UClamp x VClamp texels of EVERY mip, dword(dst) = dword(src) << 1 into A8R8G8B8 (bytes B,G,R,A), ignoring
+        //     PolyFlags (no masked/opacity variant). It reads 4 bytes per texel and the clamp of the FIRST mip, so it is
+        //     defined only for one mip of >= U*V*4 bytes; Format 1 is written with one call (0x1000a0a2), so a surface
+        //     larger than the mip (U or V below the minimum at +0x320/+0x324 — max(device caps, 4), SetRes
+        //     0x1000d800 — or an aspect beyond the device's +0x334) keeps undefined texels. The port takes exactly
+        //     the defined case: one mip, square, 4 <= U, >= U*V*4 bytes; anything else is NON_P8_UNDEFINED (a loud
+        //     STOP, not a guess; the strict rule is kept by the author's decision 2026-11-15). Formats of 1 or 2 bytes per texel (RGB16, L8, DXT3/5 of later engines) fail the
+        //     size test: the converter would read past the mip.
+        // Levels then hold R,G,B,A bytes ready for upload (State EXPORTED_RGBA, Palette null).
+        TextureData ReadDirect(string pkgPath, UELib.Engine.UTexture tex, TextureData d)
+        {
+            int format = (int)tex.Format;
+            var mip = tex.Mips[0];
+            d.Width = mip.USize; d.Height = mip.VSize;
+            if (format == 3) { d.State = "DXT1_FATAL"; return d; }
+            byte[] src = tex.Mips.Count == 1 ? ReadBulk(pkgPath, mip.Data.StorageOffset, mip.Data.StorageSize) : null;
+            byte[] rgba = src is null ? null : D3DConvert8888(src, mip.USize, mip.VSize);
+            if (rgba is null) { d.State = "NON_P8_UNDEFINED"; return d; }
+            d.State = "EXPORTED_RGBA";
+            d.Masked = string.Equals(tex.Properties?.Find("bMasked")?.Value, "true", StringComparison.OrdinalIgnoreCase);
+            d.Levels = new[] { (mip.USize, mip.VSize, rgba) };
+            return d;
+        }
+
+        // D3DDrv 0x100022c0 (8888 pool, non-P8): dst = src << 1 per dword, A8R8G8B8 -> R,G,B,A bytes. Null outside the
+        // defined case (ReadDirect).
+        public static byte[] D3DConvert8888(byte[] src, int u, int v)
+        {
+            if (u != v || u < 4 || src.Length < u * v * 4) return null;
+            var rgba = new byte[u * v * 4];
+            for (int i = 0; i < u * v; i++)
+            {
+                uint d = BitConverter.ToUInt32(src, i * 4) << 1;
+                rgba[i * 4] = (byte)(d >> 16); rgba[i * 4 + 1] = (byte)(d >> 8); rgba[i * 4 + 2] = (byte)d; rgba[i * 4 + 3] = (byte)(d >> 24);
+            }
+            return rgba;
+        }
+
         // ── FONTS (UFont) ─────────────────────────────────────────────────────
         // Glyphs (StartU/StartV/USize/VSize, page, VerticalOffset), Kerning and pages (the font's UTexture). A font is
         // addressed by LEAF name (as the HUD looks it up); packages — System/*.u and Textures/*.utx. Stubs whose
@@ -312,8 +351,7 @@ namespace HP1.UEScript
             if (_fonts is null)
             {
                 _fonts = new Dictionary<string, FontData>(StringComparer.OrdinalIgnoreCase);
-                var files = Directory.GetFiles(System.IO.Path.Combine(_root, "System"), "*.u")
-                    .Concat(Directory.Exists(System.IO.Path.Combine(_root, "Textures")) ? Directory.GetFiles(System.IO.Path.Combine(_root, "Textures"), "*.utx") : Array.Empty<string>())
+                var files = UEInstallPath.PackageFiles(_root, "System", "Textures")
                     .OrderBy(x => System.IO.Path.GetFileName(x), StringComparer.Ordinal);
                 foreach (string f in files)
                 {

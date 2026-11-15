@@ -75,15 +75,10 @@ namespace HP1.UEScript
             if (!_packages.TryGetValue(pkgName, out var loaded))
             {
                 // The package is searched in THE GAME'S OWN PATH ORDER ([Core.System] Paths,
-                // the shared list UETextureFactsReader.PackagePaths), not only System/*.u:
+                // UEInstallPath.PackageFile), not only System/*.u:
                 // the UWindow fonts live in Textures/UWindowFonts.utx.
                 string root = Path.GetDirectoryName(Path.GetFullPath(_systemDir.TrimEnd('/', '\\')));
-                string pkgPath = null;
-                foreach (string pattern in UETextureFactsReader.PackagePaths)
-                {
-                    pkgPath = UEInstallPath.File(Path.Combine(root, string.Format(pattern, pkgName)));
-                    if (pkgPath is not null) break;
-                }
+                string pkgPath = UEInstallPath.PackageFile(root, pkgName);
                 if (pkgPath is null)
                     throw new FileNotFoundException($"font package missing: {pkgName} (searched [Core.System] Paths from {root})");
                 // Only the name/export tables (read by LoadPackage) and the raw bytes are used: the font body is

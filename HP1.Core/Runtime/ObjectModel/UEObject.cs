@@ -597,12 +597,11 @@ namespace HP1.UEScript
                         result = new UERotator(BitConverter.ToInt32(b, 0), BitConverter.ToInt32(b, 4), BitConverter.ToInt32(b, 8));
                     break;
                 case "plane":
-                    // Core.Object.Plane = FPlane: FVector(12) + float W(4) —
-                    // PlayerPawn.FlashFog/ConstantGlowFog/DesiredFlashFog/
-                    // InstantFog and ZoneInfo.ViewFog/ViewFlash.
+                    // The serialized field order (W before the super's X,Y,Z) has one owner: the instance decoder.
+                    // No shipped package has a Plane default tag (census 2026-11-14: Core/Engine/Editor.u name Plane, none
+                    // of their class defaults carries one), so only mod packages reach this.
                     if (b != null && b.Length >= 16)
-                        result = new UEPlane(BitConverter.ToSingle(b, 0), BitConverter.ToSingle(b, 4),
-                            BitConverter.ToSingle(b, 8), BitConverter.ToSingle(b, 12));
+                        result = UEActorGraphLoader.DecodeStruct("Plane", b, null, null, null);
                     else
                         LogStructDecodeOnce($"{cls.Name}.{dp.Name}", $"Plane bytes={b?.Length ?? -1}");
                     break;
@@ -687,11 +686,27 @@ namespace HP1.UEScript
                     if (string.Equals(p.Struct?.Name?.ToString(), structName, StringComparison.OrdinalIgnoreCase))
                     { def = p.Struct; break; }
             if (def == null) return null;
-            foreach (var f in def.EnumerateFields<UELib.Core.UProperty>())
+            foreach (var f in SerializeBinFields(def))
                 if (f is UELib.Core.UObjectProperty || f is UELib.Core.UStructProperty) return null;
             int pos = 0;
             var bag = ReadAtomicStruct(def, cls, b, ref pos);
             return bag != null && pos == b.Length ? bag : null;
+        }
+
+        // The field order of UStruct::SerializeBin: TFieldIterator (Core 0x1012e910..0x1012e965) walks the struct's own
+        // Children (+0x38) along Next, then GetInheritanceSuper (vtable +0x6c) and ITS Children — own fields before the
+        // super's (Plane: W, then Vector's X,Y,Z). An imported super stub (no fields) is replaced by the export with the
+        // same full path (ShippedLayout.ResolveStruct); none -> loud.
+        internal static IEnumerable<UELib.Core.UProperty> SerializeBinFields(UELib.Core.UStruct def)
+        {
+            for (UELib.Core.UStruct s = def; s != null;)
+            {
+                foreach (var f in s.EnumerateFields<UELib.Core.UProperty>()) yield return f;
+                if (s.Super is not UELib.Core.UStruct sup) yield break;
+                var (full, mark) = HP1.UEScript.Render.ShippedLayout.ResolveStruct(sup);
+                if (mark is not null) throw new NotSupportedException($"struct {def.Name}: super {sup.Name} {mark}");
+                s = full;
+            }
         }
 
         // UStruct::SerializeBin (Core.dll.c:45567-45628): walks the struct's
@@ -705,7 +720,7 @@ namespace HP1.UEScript
         static UEObject ReadAtomicStruct(UELib.Core.UStruct def, UClass pkgCls, byte[] b, ref int pos)
         {
             var bag = new UEObject(UEPropLayout.ForStruct(def)) { IsStruct = true };
-            foreach (var f in def.EnumerateFields<UELib.Core.UProperty>())
+            foreach (var f in SerializeBinFields(def))
             {
                 if (f.PropertyFlags.HasFlag(UELib.Flags.PropertyFlag.Native)
                  || f.PropertyFlags.HasFlag(UELib.Flags.PropertyFlag.Transient)) continue;
@@ -879,8 +894,9 @@ namespace HP1.UEScript
                         (o as UELib.UImportTableItem)?.ClassName?.ToString(),
                         (o as UELib.UImportTableItem)?.PackageName?.ToString()));
                 chain.Reverse();
-                path = HP1.Core.UEClassRegistry.Shared?.VerifyImportPath(chain)
-                    ?? string.Join(".", chain.ConvertAll(c => c.Name));
+                var reg = HP1.Core.UEClassRegistry.Shared;
+                path = reg is not null ? reg.ResolveImportPath(chain) : string.Join(".", chain.ConvertAll(c => c.Name));
+                if (path is null) return null;   // a missing CLASS_SafeReplace import loads as None
             }
             if (string.IsNullOrEmpty(name)) return null;
             if (string.IsNullOrEmpty(klass) || string.Equals(klass, "Class", StringComparison.OrdinalIgnoreCase))
@@ -909,7 +925,7 @@ namespace HP1.UEScript
             return bag;
         }
 
-        static UEObject MakeColorBag(byte r, byte g, byte bl, byte a)
+        internal static UEObject MakeColorBag(byte r, byte g, byte bl, byte a)
         {
             var bag = new UEObject(UEPropLayout.ForStructName("Color")) { IsStruct = true };
             bag.Props["R"] = (int)r;

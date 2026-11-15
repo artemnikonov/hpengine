@@ -200,7 +200,21 @@ namespace HP1.UEScript
         internal static Dictionary<string, Dictionary<string, string>> ParseIni(string text)
         {
             var parsed = new Dictionary<string, Dictionary<string, string>>(UEPropNameComparer.Instance);
-            Dictionary<string, string> section = null;
+            foreach (var (name, pairs) in ParseIniPairs(text))
+            {
+                var section = parsed[name] = new Dictionary<string, string>(UEPropNameComparer.Instance);
+                foreach (var kv in pairs) section[kv.Key] = kv.Value;   // last one wins
+            }
+            return parsed;
+        }
+
+        // The same Read, keeping every pair in TMultiMap Pairs order (TMap::Add appends to Pairs; the iterator walks
+        // Pairs by index) — what FConfigCacheIni::GetSection (Engine.dll.c:277600) lists. Sections in first-seen order.
+        internal static List<(string Section, List<KeyValuePair<string, string>> Pairs)> ParseIniPairs(string text)
+        {
+            var sections = new List<(string, List<KeyValuePair<string, string>>)>();
+            var byName = new Dictionary<string, List<KeyValuePair<string, string>>>(UEPropNameComparer.Instance);
+            List<KeyValuePair<string, string>> section = null;
             int pos = 0;
             while (pos < text.Length)
             {
@@ -212,8 +226,11 @@ namespace HP1.UEScript
                 if (line[0] == '[' && line[line.Length - 1] == ']')
                 {
                     string sn = line.Length >= 2 ? line.Substring(1, line.Length - 2) : "";
-                    if (!parsed.TryGetValue(sn, out section))
-                        parsed[sn] = section = new Dictionary<string, string>(UEPropNameComparer.Instance);
+                    if (!byName.TryGetValue(sn, out section))
+                    {
+                        byName[sn] = section = new List<KeyValuePair<string, string>>();
+                        sections.Add((sn, section));
+                    }
                     continue;
                 }
                 if (section == null) continue;
@@ -222,9 +239,9 @@ namespace HP1.UEScript
                 string value = line.Substring(eq + 1);
                 if (value.Length > 0 && value[0] == '"' && value[value.Length - 1] == '"')
                     value = value.Length >= 2 ? value.Substring(1, value.Length - 2) : "";
-                section[line.Substring(0, eq)] = value;   // last one wins
+                section.Add(new KeyValuePair<string, string>(line.Substring(0, eq), value));
             }
-            return parsed;
+            return sections;
         }
     }
 }

@@ -43,14 +43,7 @@ namespace HP1.UEScript
             get
             {
                 if (_packages is not null) return _packages;
-                var list = new List<string>();
-                foreach (string sub in new[] { "Textures", "System", "Maps" })
-                {
-                    string dir = System.IO.Path.Combine(_root, sub);
-                    if (!Directory.Exists(dir)) continue;
-                    foreach (string pat in new[] { "*.utx", "*.u", "*.unr" })
-                        list.AddRange(Directory.GetFiles(dir, pat));
-                }
+                List<string> list = UEInstallPath.PackageFiles(_root, "Textures", "System", "Maps");
                 return _packages = list.Distinct(StringComparer.Ordinal)
                     .OrderBy(x => System.IO.Path.GetFileName(x), StringComparer.Ordinal).ToList();
             }
@@ -62,8 +55,7 @@ namespace HP1.UEScript
             {
                 if (_textureClasses is not null) return _textureClasses;
                 var super = new Dictionary<string, string>(StringComparer.Ordinal);
-                string sysDir = System.IO.Path.Combine(_root, "System");
-                foreach (string pkgPath in Directory.GetFiles(sysDir, "*.u").OrderBy(x => System.IO.Path.GetFileName(x), StringComparer.Ordinal))
+                foreach (string pkgPath in UEInstallPath.PackageFiles(_root, "System").OrderBy(x => System.IO.Path.GetFileName(x), StringComparer.Ordinal))
                 {
                     UnrealPackage pkg = Open(pkgPath);
                     if (pkg is null) continue;

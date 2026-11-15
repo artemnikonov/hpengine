@@ -181,9 +181,14 @@ public sealed partial class HeadlessBspModel
             int height = r.Int32();
             int flags = r.Int32();
             byte pruned = r.Byte();
-            if (start <= 0 || start - 1 >= package.Exports.Count
-                || end <= 0 || end - 1 >= package.Exports.Count)
-                throw new InvalidDataException($"reach spec {i} endpoints {start}/{end}");
+            // 0 = None is loaded as it is: FReachSpec's serializer (Engine 0x103b3730) reads Start and End with
+            // operator<<(UObject*&) and checks nothing; ULinkerLoad::IndexToObject (Core 0x1014aa60) returns NULL
+            // for index 0 (jge 0x1014ab67 -> xor eax,eax). A map edited in UnrealEd with a path node deleted and
+            // the paths not rebuilt has such specs; the original loads it. Who reads the endpoint decides later
+            // (UELevelRuntime.NavNatives: CanMoveTo, FindPath).
+            if (start < 0 || start - 1 >= package.Exports.Count
+                || end < 0 || end - 1 >= package.Exports.Count)
+                throw new InvalidDataException($"{Path.GetFileName(mapPath)}: reach spec {i} endpoints {start}/{end}");
             specs[i] = new LevelReachSpecRef(distance, start, end, radius, height, flags, pruned);
         }
 
@@ -521,6 +526,11 @@ public sealed partial class HeadlessBspModel
         }
         if (outers.Count == 0)
             throw new InvalidDataException("surface material import without a package: " + name);
+        // The surface's Texture is an object reference like any other: VerifyImport leaves a missing CLASS_SafeReplace
+        // import None (UEClassRegistry.ResolveImportPath) — a mod's surface naming Editor.TexPreviewBack, which Editor.u
+        // does not export, is an untextured surface, not a failed trace.
+        if (HP1.Core.UEClassRegistry.Shared is not null && UEActorGraphLoader.ResolveImportObjectPath(package, index) is null)
+            return null;
         string sourcePackage = outers[^1];
         string group = outers.Count > 1 ? outers[0] : null;
         // The reference CLASS is PART OF THE IDENTITY, not decoration. UE1 resolves an import by

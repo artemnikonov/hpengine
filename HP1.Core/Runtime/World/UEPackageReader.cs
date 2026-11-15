@@ -182,7 +182,9 @@ namespace HP1.UEScript
             }
             if (!allImports) return path;
             chain.Reverse();
-            return HP1.Core.UEClassRegistry.Shared?.VerifyImportPath(chain) ?? path;
+            // null — a missing CLASS_SafeReplace import loads as None (UEClassRegistry.ResolveImportPath).
+            var reg = HP1.Core.UEClassRegistry.Shared;
+            return reg is not null ? reg.ResolveImportPath(chain) : path;
         }
 
         string OuterNameOf(int outer)

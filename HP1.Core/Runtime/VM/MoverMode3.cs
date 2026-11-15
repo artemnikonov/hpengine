@@ -163,19 +163,17 @@ namespace HP1.UEScript
         // (+0x27c, quantum 0.05/0.55/0.65) along SheerAxis (+0x280), Origin += PrePivot.
         // Body — BrushCoords.ToWorld (same as brush collision,
         // UELevelRuntime.BrushToWorldCoords); point — TransformPointBy, vector —
-        // TransformVectorBy of those coords. A nonzero shear after quantisation is
-        // rejected loudly by BrushCoords.MulScale (NotSupportedException): the shear
-        // matrix is not ported and must not be silently skipped.
+        // TransformVectorBy of those coords.
         public struct Pose
         {
             public BrushCoords Coords;
         }
         public static Pose MakePose(UEVector location, UERotator rotation, UEVector prePivot,
-                                    UEVector mainScale, float mainSheer, UEVector postScale, float postSheer)
+                                    UEVector mainScale, float mainSheer, int mainSheerAxis, UEVector postScale, float postSheer, int postSheerAxis)
             => new Pose
             {
                 Coords = BrushCoords.ToWorld(location, rotation.Pitch, rotation.Yaw, rotation.Roll, prePivot,
-                                             mainScale, mainSheer, postScale, postSheer),
+                                             mainScale, mainSheer, mainSheerAxis, postScale, postSheer, postSheerAxis),
             };
         public static UEVector WorldPoint(in Pose p, UEVector local) => p.Coords.TransformPoint(local);
         public static UEVector WorldVector(in Pose p, UEVector local) => p.Coords.TransformVector(local);

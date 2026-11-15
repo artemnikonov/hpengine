@@ -182,6 +182,25 @@ namespace HP1.UEScript
             }
         }
 
+        // Wind.GetWind 425 (AWind::execGetWind, Engine.dll.c:22222): GetWind(this, Pos) of THIS source. The value goes
+        // to script, so the fluctuation noise that TotalWind may omit for particles is a loud STOP here.
+        public Vector3 WindNative(UEObject w, Vector3 point)
+        {
+            Vector3 v = WindAt(UEInterpreter.AsVector3(w.GetProp(PK.Location)), UEInterpreter.AsRotator(w.GetProp(PK.Rotation)),
+                UEInterpreter.AsFloat(w.GetProp(PK.WindSpeed)), (byte)UEInterpreter.ToInt(w.GetProp(PK.WindRadius)),
+                (byte)UEInterpreter.ToInt(w.GetProp(PK.WindRadiusInner)), (byte)UEInterpreter.ToInt(w.GetProp(PK.WindFluctuation)),
+                (byte)UEInterpreter.ToInt(w.GetProp(PK.WindSource)), UEInterpreter.ToBool(w.GetProp(PK.bPermeating)),
+                UEInterpreter.AsVector3(w.GetProp(PK.Fluc)), point,
+                (from, to) => Bsp is null
+                    ? throw new InvalidOperationException("wind: the level model has no BSP")
+                    : Bsp.FastLineCheckClear(to, from),
+                out bool skipped);
+            if (skipped)
+                throw new NotSupportedException("Wind.GetWind on '" + w.GetProp(PK.Name) + "' with WindFluctuation="
+                    + w.GetProp(PK.WindFluctuation) + ": the noise term (FUN_104315d0) is not ported and the value is script-visible (STOP)");
+            return v;
+        }
+
         // AWind::GetTotalWind: sum over all winds (shipped does not read the ULevel argument).
         public Vector3 TotalWind(Vector3 point)
         {

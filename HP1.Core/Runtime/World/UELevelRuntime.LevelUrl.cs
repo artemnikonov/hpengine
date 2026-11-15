@@ -15,5 +15,14 @@ namespace HP1.UEScript
                 throw new System.InvalidOperationException("GetLocalURL: level URL not set (level not loaded)");
             return LastUrl.String();
         }
+
+        // AActor::execGetURLMap (Engine.dll.c:99279, native 547): copies XLevel(+0x80)->Engine(+0x40) +0x98 =
+        // UGameEngine LastURL (+0x7c, ctor ??0UGameEngine) .Map (FURL +0x1c, FURL::FURL Engine.dll.c:109991).
+        public string UrlMapNative()
+        {
+            if (LastUrl is null)
+                throw new System.InvalidOperationException("GetURLMap: LastURL not set (level not loaded)");
+            return LastUrl.Map;
+        }
     }
 }

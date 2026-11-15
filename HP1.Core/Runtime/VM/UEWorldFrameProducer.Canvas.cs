@@ -138,6 +138,42 @@ namespace HP1.UEScript
                 _canvas.Props["Viewport"] = vp;
         }
 
+        // UCanvas::execDrawActor (Engine.dll.c:125588; export 0x4129 -> jmp 0x10389930, disasm 0x10389930..0x10389a39):
+        //   saved = Viewport(+0x78)->Actor(+0x30)->RendMap(+0x4e8); WireFrame -> RendMap = 1 (0x103899cf);
+        //   A(+0x28) &= ~2 — bHidden = 0 (0x103899df; A is not null-checked);
+        //   ClearZ -> Viewport->RenDev(+0x5c) vtable +0x9c (UD3DRenderDevice vtable 0x1001a010 + 0x9c = ClearZ) (Frame +0x7c);
+        //   Render(+0x80) vtable +0x78 (URender vtable 0x10b38038 + 0x78 = DrawActor 0x10b01091) (Frame, A);
+        //   A(+0x28) |= 2 — bHidden = 1 whatever it was before (0x10389a17); RendMap = saved (0x10389a24).
+        // URender::DrawActor (0x10b33980): FDynamicSprite for A, FDynamicSprite::Setup (0x10b30c70) against the canvas frame,
+        // nonzero -> DrawActorSprite. Ported here: the two Setup rejections that read no frame, BOTH only with ShowFlags & 0x20
+        // clear (DrawType 1/7 and that flag jump to the sprite path 0x10b30e4b/0x10b30e4e first, 0x10b30c8a..0x10b30ca9) —
+        //   DrawType not in {1, 7, 2, 8} (0x10b30cec..0x10b30cf2 -> return 0 at 0x10b31115);
+        //   DrawType 2, not a ParticleFX (0x10b30cfc loop), no Mesh (+0x164) and no Brush (+0x168): AActor::
+        //   GetRenderBoundingBox (0x1037aa40) returns zero FCoords, |X|² == 0.0 (fcomp 0x10b385bc at 0x10b30d89) -> 0.
+        //   (Inventory.BecomeItem sets Mesh = PlayerViewMesh, None for baseWand: Weapon.RenderOverlays of the wand.)
+        // NOT PORTED (loud): ClearZ, and every actor Setup could accept — DrawActorSprite on the canvas frame.
+        internal void CanvasDrawActor(UEObject canvas, UEObject a, bool wireFrame, bool clearZ)
+        {
+            UEObject viewer = (canvas?.GetProp("Viewport") as UEObject)?.GetProp(PK.Actor) as UEObject
+                ?? throw new InvalidOperationException("Canvas.DrawActor: no Canvas.Viewport.Actor (shipped dereferences it)");
+            if (a is null) throw new InvalidOperationException("Canvas.DrawActor(None): shipped writes None+0x28 (access violation)");
+            // The refusals come before the RendMap / bHidden writes (they read neither), so a refused call changes no state.
+            if (clearZ)
+                throw new NotSupportedException("Canvas.DrawActor ClearZ reached — not ported: RenDev->ClearZ(Frame) on the canvas frame");
+            int dt = UEValue.ToInt(a.GetProp(PK.DrawType));
+            bool icons = (UEValue.ToInt(viewer.GetProp(PK.ShowFlags)) & 0x20) != 0;
+            bool rejected = !icons && (dt is not (1 or 7 or 2 or 8)
+                || dt == 2 && !UEInterpreter.ClassIsA(a.Class, "ParticleFX") && a.GetProp(PK.Mesh) is null && a.GetProp(PK.Brush) is null);
+            if (!rejected)
+                throw new NotSupportedException($"Canvas.DrawActor of {a.GetProp(PK.Name)} ({a.Class?.Name}, DrawType {dt}) reached — "
+                    + "not ported: FDynamicSprite::Setup + DrawActorSprite on the canvas frame (Render 0x10b33980)");
+            object rendMap = viewer.GetProp(PK.RendMap);
+            if (wireFrame) viewer.Props["RendMap"] = 1;
+            a.Props["bHidden"] = false;
+            a.Props["bHidden"] = true;
+            viewer.Props["RendMap"] = rendMap;
+        }
+
         void HudPostRender(UEInterpreter interp, UEObject player)
         {
             if (interp is null || player is null)

@@ -67,6 +67,7 @@ namespace HPEngine
                     case "--window-stress": WindowStress = true; break;   // window script: key/mouse through the SDL queue, slow Core ticks, forced tick-end interleaving (CoreThread.cs WindowScript)
                     case "--digest": DigestOut = new StreamWriter(args[++i]); break;   // window: per-tick state digest (judge)
                     case "--offscreen-window": OffscreenWindow = true; break;   // window: hidden, drawn offscreen, no audio device (judge/bench)
+                    case "--mods-in-judge-window": ModsInJudgeWindow = true; break;   // check only (audit/mod_window_boot.sh): the player's mod overlay under a judge window
                 }
 
             if (selftest is not null)   // no game files: synthetic scene (SdlSelfTest.cs)
@@ -117,7 +118,7 @@ namespace HPEngine
             // frontend read (the install, or the working copy with the enabled mods), `install` keeps settings and saves.
             string install = root;
             IReadOnlyList<string> activeMods = null;
-            if (windowedGame)
+            if (windowedGame || ModsInJudgeWindow)
             {
                 try
                 {
@@ -190,7 +191,7 @@ namespace HPEngine
             Proc = new HPEngine.ProcTex.ProcTextures(procData.FireTextures(), procData.WetTextures());
             if (Environment.GetEnvironmentVariable("HP1_PROCDBG") == "1")
             {
-                var firePkg = UELib.UnrealLoader.LoadPackage(UEInstallPath.File(Path.Combine(root, "System", "Fire.u")) ?? Path.Combine(root, "System", "Fire.u"), FileAccess.Read);
+                var firePkg = UELib.UnrealLoader.LoadPackage(UEInstallPath.ScriptPackageFile(root, "Fire") ?? throw new FileNotFoundException("HP1_PROCDBG: no script package Fire under " + root), FileAccess.Read);
                 firePkg.InitializePackage(UELib.UnrealPackage.InitFlags.All);
                 foreach (var e in firePkg.Exports)
                     if (e.Object is UELib.Core.UClass c && (e.ObjectName.ToString() is "IceTexture" or "FractalTexture" or "WaterTexture" or "WetTexture"))
@@ -982,7 +983,7 @@ namespace HPEngine
         static WindowScript Script;
         static bool WindowStress;
         static StreamWriter DigestOut;
-        static bool OffscreenWindow;
+        static bool OffscreenWindow, ModsInJudgeWindow;
 
         static int Window(UEGameEngine host, Renderer r, GameAudio audio)
         {
@@ -1118,6 +1119,9 @@ namespace HPEngine
                     foreach (string cmd in Script.ConsoleAt(k))
                         Console.WriteLine($"[Script] tick {k} console '{cmd}' -> '{UEConsoleCommand.Execute(host.Runtime.Config, cmd, null, device)}'");
                 if (Script is not null && Script.KillAt(k)) Console.WriteLine($"[Script] tick {k} kill {host.KillPlayerProbe()}");
+                if (Script is not null)
+                    foreach (string text in Script.ClicksAt(k))
+                        Console.WriteLine($"[Script] tick {k} click '{text}' -> {host.MenuClickProbe(text)}");
                 PrepareStep(pxw, pxh, menuRegion);
                 input.RunFrame(sink, dt);
                 jobBefore = host.Runtime.LatestFrame; jobBeforeLevelTime = host.Runtime.PresentedLevelTime; jobDt = dt;

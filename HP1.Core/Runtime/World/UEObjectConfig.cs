@@ -184,6 +184,27 @@ namespace HP1.UEScript
             interp?.ReloadConfigOfClassDefaults(baseClass, config);
         }
 
+        // ── ResetConfig(Class) (Core 0x1ac3, Core.dll.c:20086) ──────────────
+        //   source file by Class->ConfigName (+0x4a4): System -> Default.ini, User -> DefUser.ini; the section
+        //   GetPathName(Class) of that file replaces the live one (GConfig +0x18 / +0x30); then LoadConfig(1) of every
+        //   loaded class default IsChildOf(Class) and of every object IsA(Class). The port's form: drop the saved
+        //   overlay of that section (shipped files are never rewritten), reload the class defaults, and LoadConfig every
+        //   live actor of the class. Live objects that are not actors are not enumerable in the port: loud.
+        public static void ResetConfig(UEConfig config, UClass cls, UEInterpreter interp, IEnumerable<UEObject> actors)
+        {
+            if (config is null) throw new InvalidOperationException("ResetConfig without the process GConfig");
+            UClass c = Canon(cls) ?? throw new ArgumentNullException(nameof(cls));
+            if (!Reg.IsChildOfClass(c, Reg.Find("Actor")))
+                throw new NotSupportedException("ResetConfig(" + c.Name + "): live objects of a non-actor class are not "
+                    + "enumerable in the port (the original walks GObjObjects) — STOP, §4");
+            string scope = ScopeFor(ConfigFile(null, c, false));
+            config.Reset(scope, ClassPath(c));
+            interp?.ReloadConfigOfClassDefaults(c, config);
+            foreach (UEObject a in actors)
+                if (a is not null && !a.Destroyed && a.Class is not null && Reg.IsChildOfClass(a.Class, c))
+                    LoadConfig(config, a, a.Class, a.Class, propagate: true, isInstance: true);
+        }
+
         // ── LoadConfig(bPropagate, Class, NULL) ─────────────────────────────
         //
         //   if (!(Class->ClassFlags & CLASS_Config)) return;         (Class+0x488 & 4)

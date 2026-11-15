@@ -295,6 +295,7 @@ namespace HPEngine
         public int TextureDetailLevel => _texDetail;
         public int SkinDetailLevel => _skinDetail;
         public readonly HashSet<string> ShortChains = new(StringComparer.OrdinalIgnoreCase);
+        public readonly HashSet<string> UndefinedFormats = new(StringComparer.OrdinalIgnoreCase);   // DXT1_FATAL / NON_P8_UNDEFINED
 
         public void ApplyTextureDetail(int textureDetail, int skinDetail)
         {
@@ -321,9 +322,28 @@ namespace HPEngine
             return t;
         }
 
+        // A non-P8 texture as Core converted it (State EXPORTED_RGBA: D3DDrv 0x100022c0 texels, one mip): the world and the
+        // HUD upload it the same way.
+        SDL_GPUTexture* UploadExportedRgba(UETextureSource.TextureData d)
+        {
+            var t = Tex(SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, d.Width, d.Height, 1, SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER);
+            UploadLevels(t, d.Levels);
+            return t;
+        }
+
         SDL_GPUTexture* LoadTexture(UETextureSource src, string path, TexDraw variant, int firstMip = 0)
         {
             UETextureSource.TextureData d = src.Get(path);
+            if (d is not null && d.State == "EXPORTED_RGBA")
+            {
+                // Non-P8: Core converted the single mip as D3DDrv 0x100022c0 does (no PolyFlags variant). Core exports only
+                // one-mip non-P8 textures, so Lock gives mip 0 (TextureDetail.FirstMip); any other mip is loud, as for P8.
+                if (firstMip > 0 && ShortChains.Add(path))
+                    Console.Error.WriteLine($"[Texture] STOP: {path}: Lock gives mip {firstMip}, the port has only mip 0 of a non-P8 texture");
+                return UploadExportedRgba(d);
+            }
+            if (d?.State is "DXT1_FATAL" or "NON_P8_UNDEFINED" && UndefinedFormats.Add(path))
+                Console.Error.WriteLine($"[Texture] STOP: {path}: {d.State} — the original D3DDrv has no defined picture for it (UETextureSource.ReadDirect)");
             if (d is null || d.State != "EXPORTED" || d.Levels is null || d.Levels.Length == 0) { MissingTextures.Add($"{path} ({d?.State ?? "not found"})"); return _white; }
             if (firstMip >= d.Levels.Length)
             {

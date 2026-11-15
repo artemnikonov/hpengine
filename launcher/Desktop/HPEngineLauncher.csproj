@@ -23,5 +23,14 @@
     <PackageReference Include="Avalonia" Version="11.3.23" />
     <PackageReference Include="Avalonia.Desktop" Version="11.3.23" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.23" />
+    <!-- Ed25519 verification of the self-update (.NET has none built in) -->
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.4.0" />
+  </ItemGroup>
+  <!-- The release public key (Ed25519, base64) the self-update verifies against; make_launcher.sh passes -p:HPEngineUpdateKey=... -->
+  <ItemGroup Condition="'$(HPEngineUpdateKey)' != ''">
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>HPEngineUpdateKey</_Parameter1>
+      <_Parameter2>$(HPEngineUpdateKey)</_Parameter2>
+    </AssemblyAttribute>
   </ItemGroup>
 </Project>

@@ -130,7 +130,7 @@ looks". It finds the game in what the player gives it, checks it, and copies the
 - **Check:** the edition comes from Core's `UEEdition` (`HP1.Core/Runtime/World/UEEdition.cs`, linked into HP1Setup:
   SHA-1 of `System/Engine.dll`, `Render.dll`, `HPBase.u`; the exe only names the No-CD variant), so HP1Setup and Core
   cannot disagree. Supported editions and tiers: US 1.53 — exact (`launcher/us153.sha1`, 254 files; equal to three
-  separate US 1.53 copies); UK 1.1 — supported (`launcher/uk11.sha1`, 253 files: no `Textures/HPFonts.utx`); RU EA —
+  separate US 1.53 copies); UK 1.1 — supported (`launcher/uk11.sha1`, 256 files: no `Textures/HPFonts.utx`; with the three Language=eng files `MenuArt.eng_utx`, `AllDialog.eng_uax`, `AllEmote.eng_uax`); RU EA —
   supported (`launcher/ru_ea.sha1`, 254 files; menu text in the substitute font Liberation Sans, not original). Every
   file of the edition's manifest (top-level `System/*.u *.dll`, `Maps/*.unr`, `Textures/*.utx`, `Sounds/*.uax`,
   `Music/*.umx`) must be present with that size and SHA-1, plus `System/DefUser.ini` and `Default.ini` (in `System/` or
@@ -208,8 +208,21 @@ Linux `$XDG_DATA_HOME/HPEngine` (absolute path only; default `~/.local/share/HPE
 Support/HPEngine`. Disc images are not unpacked here: mount them and add the mounted disc. **Mods:** a list of the folders
 in `<game>/Mods` with a checkbox and up/down per enabled mod, "Open Mods Folder"; it writes `<game>/HPEngineData/Mods.ini`
 (`[Mods]` + one `Enabled=<name>` per enabled mod, in order, a later mod wins; comments and other sections are kept).
-**Updates (Windows/Linux, v1):** no self-update; "Check for Updates" (and a check at start) reads the same GitHub feed
-with the same version rule as the macOS Launcher (pre-releases only for a pre-release build) and opens the release page.
+**Updates (Windows/Linux):** "Check for Updates" (and a check at start) reads the same GitHub feed with the same version rule as the macOS
+Launcher (pre-releases only for a pre-release build). The banner's **Update** downloads this platform's release archive
+(`HPEngine-win-x64.zip`, `HPEngine-linux-x64.tar.gz`) and its `<archive>.sig` — the same Ed25519 key and signature format as the macOS zip (the
+public key is pinned into the build, `-p:HPEngineUpdateKey` from `HPENGINE_UPDATE_KEY`) — and checks the signature **before a byte of the archive is
+opened**; then unpacks into `.hpengine-update/` next to the Launcher, checks the layout (Launcher + `HPEngine/`) and that the new Launcher's `--version`
+is the advertised one, and starts a helper (a temp copy of the Launcher, `--apply-update`) that waits for the Launcher to exit, swaps the Launcher file
+and `HPEngine/` (old ones renamed `*.update-old`; any failure puts everything back, backups are deleted only after both are in place) and starts the
+Launcher again; the helper's log is `hpengine-update.log` in the temp folder. Only those two items are replaced, so in "own game folder" mode the
+game, `Save/`, `Mods/`, settings and the game's own `README.txt` are never touched. A bad or missing signature, a partial download or a wrong version
+is refused with a message and nothing is changed; a build without the key, or a release without the `.sig`, opens the release page. Not while the game or a setup runs.
+**Add to Steam (Linux):** More > "Add to Steam…" asks first, then adds the Launcher as a non-Steam game to `<steam>/userdata/<id>/config/shortcuts.vdf` of
+every Steam account (`~/.steam/steam` or `~/.local/share/Steam`; not `userdata/0`), only while Steam is not running (Steam overwrites the file on exit; the
+player is told to close it). The entry is spliced into the binary VDF (existing bytes unchanged), the old file is kept as `shortcuts.vdf.hpengine-backup-<time>`,
+one entry per install path (repeat adds nothing), a file that does not parse is left alone and named. **Title:** the header shows "...and the Sorcerer's
+Stone" for a US 1.53 install, "...Philosopher's Stone" for UK 1.1 and the Russian EA release, and a neutral "Harry Potter" while no game is identified.
 Checks: `sh launcher/test_desktop.sh` (+ `test_desktop_redtest.sh`).
 
 **Archive layout (win-x64, linux-x64), like the macOS app — everything inside, one thing to click:**
@@ -241,7 +254,7 @@ is needed. Unpacking the package over an existing install (section above) keeps 
 **Build:** `HPENGINE_UPDATE_KEY=<private key file> sh hpengine/packaging/make_launcher.sh [--out DIR] [--reuse] [RID ...]`
 (default all four RIDs; the macOS app and the Windows `.exe` icon need a Mac). One-time key: `xcrun swift launcher/update_sign.swift keygen <file>`,
 kept outside the repository; every later release must be signed with the same key. Version: `launcher/VERSION`; the
-release tag is `v<VERSION>`. Release assets for macOS: `HPEngine-Launcher-macOS.zip` and `HPEngine-Launcher-macOS.zip.sig`.
+release tag is `v<VERSION>`. Release assets for macOS: `HPEngine-Launcher-macOS.zip` and `HPEngine-Launcher-macOS.zip.sig`; for Windows/Linux each archive with its `.sig` (signed by `make_launcher.sh` with the same key).
 **Checks:** `sh launcher/test_setup.sh` — sources from environment variables only (`HP1_US` required, optional
 other copies; listed in the script; unset -> NOVERDICT): the manifests against UEEdition, US folder, file inside it, a
 US `.zip`, the UK and RU copies (accepted, with their EDITION id), other releases, missing map, one changed byte, one

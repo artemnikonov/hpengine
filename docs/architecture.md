@@ -86,7 +86,7 @@ channels in `.AnimChannels`. Next to it:
 | `HP1.Core/Runtime/World/UEGalaxyAudio.cs` | the 16-channel sound table and music logic of the original Galaxy audio subsystem |
 | `HP1.Core/Runtime/World/UEInput.cs` | `UInput`: key events, bindings, exec functions behind buttons |
 | `HP1.Core/Runtime/World/UEConfig.cs` | the live `.ini` configuration state |
-| `HP1.Core/Runtime/World/UEInstallPath.cs` | case-insensitive file lookup in the install (Linux file systems) |
+| `HP1.Core/Runtime/World/UEInstallPath.cs` | case-insensitive file lookup in the install (Linux file systems); `UEInstallPath.Packages.cs`: which file is package X (path order, localized `<Name>.<lang>_<ext>` first) |
 | `HP1.Core/Runtime/World/UEEdition.cs` | which release of the game the install holds (SHA-1 of its files) |
 
 **Render-side Core.** `HP1.Core/Runtime/Render/` holds the parts of the original renderer whose results the player

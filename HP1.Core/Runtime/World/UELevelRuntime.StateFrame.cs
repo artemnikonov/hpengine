@@ -111,6 +111,19 @@ namespace HP1.UEScript
                     if (!UEPawnMovement.PollMoveToward(interp, actor)) goto PollPending;
                     LatentCompletedProbe?.Invoke(interp, actor, "MoveToward");
                     break;
+                case LatentRunState.StrafeTo:
+                    // execPollStrafeTo (disasm 0x103d8df0..0x103d8e1c) is execPollMoveTo's body: rotateToward(Focus),
+                    // moveToward(Destination), complete on arrival.
+                    if (!UEPawnMovement.PollMoveTo(actor, interp)) goto PollPending;
+                    LatentCompletedProbe?.Invoke(interp, actor, "StrafeTo");
+                    break;
+                case LatentRunState.StrafeFacing:
+                    if (!UEPawnMovement.PollStrafeFacing(interp, actor)) goto PollPending;
+                    LatentCompletedProbe?.Invoke(interp, actor, "StrafeFacing");
+                    break;
+                case LatentRunState.WaitForLanding:
+                    if (!UEPawnMovement.PollWaitForLanding(interp, actor, frame, dt)) goto PollPending;
+                    break;
                 case LatentRunState.TurnTo:
                     // execPollTurnTo (Engine.dll.c:48528): DesiredRotation plus
                     // the shipped completion band ±100.
@@ -124,8 +137,7 @@ namespace HP1.UEScript
                 case LatentRunState.Stop:
                     return;
                 default:
-                    // A latent whose poll is not ported
-                    // (StrafeTo/StrafeFacing/WaitForLanding). Silently switching the
+                    // A latent with no poll in the port. Silently switching the
                     // frame to Stop would silently kill the actor's state.
                     throw new NotSupportedException(
                         $"latent poll not ported: {frame.LatentState} actor="

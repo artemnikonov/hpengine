@@ -160,7 +160,7 @@ static class Program
         var Q = new UEVector(2f, 1f, 0.5f);
         var v = new UEVector(10f, 20f, 30f);
         // No rotation: everything is a power of two, the expectation is exact.
-        var pose = MoverMode3.MakePose(L, new UERotator(0, 0, 0), P, S, 0f, Q, 0f);
+        var pose = MoverMode3.MakePose(L, new UERotator(0, 0, 0), P, S, 0f, 5, Q, 0f, 5);
         var want = new UEVector(Q.x * S.x * (v.x - P.x) + L.x, Q.y * S.y * (v.y - P.y) + L.y, Q.z * S.z * (v.z - P.z) + L.z);
         var got = MoverMode3.WorldPoint(in pose, v);
         Check("WorldPoint (PostScale, MainScale, PrePivot)", got.x == want.x && got.y == want.y && got.z == want.z, $"expected {want}, got {got}");
@@ -174,7 +174,7 @@ static class Program
         float step = 0.0003834952076431364f;
         float s90 = (float)Math.Sin(4096 * (double)step), c90 = (float)Math.Sin(8192 * (double)step);
         var S2 = new UEVector(2f, 1f, 1f); var Q2 = new UEVector(1f, 3f, 1f);
-        var pose2 = MoverMode3.MakePose(L, new UERotator(0, 16384, 0), P, S2, 0f, Q2, 0f);
+        var pose2 = MoverMode3.MakePose(L, new UERotator(0, 16384, 0), P, S2, 0f, 5, Q2, 0f, 5);
         var v2 = new UEVector(P.x + 1f, P.y + 2f, P.z + 5f);
         double lx = S2.x * 1.0, ly = S2.y * 2.0, lz = S2.z * 5.0;              // MainScale·(p − PrePivot)
         double rx = c90 * lx - s90 * ly, ry = s90 * lx + c90 * ly, rz = lz;    // yaw: X=(c,s,0), Y=(−s,c,0)
@@ -183,17 +183,11 @@ static class Program
         bool near = Math.Abs(got2.x - want2.x) < 1e-3 && Math.Abs(got2.y - want2.y) < 1e-3 && Math.Abs(got2.z - want2.z) < 1e-3;
         Check("WorldPoint yaw 90° (PostScale after rotation)", near, $"expected {want2}, got {got2}");
 
-        // Shear: quantum |s| ≤ 0.05 -> 0 (same result), otherwise the shear matrix is not ported -> loud refusal.
-        var pose3 = MoverMode3.MakePose(L, new UERotator(0, 0, 0), P, S, 0.04f, Q, -0.05f);
+        // Shear: quantum |s| ≤ 0.05 -> 0 (same result). Non-zero snaps are judged against the real ABrush::ToWorld
+        // (se_harness/bsp_diff/validate_brush.py, sheer fixtures).
+        var pose3 = MoverMode3.MakePose(L, new UERotator(0, 0, 0), P, S, 0.04f, 5, Q, -0.05f, 5);
         var got3 = MoverMode3.WorldPoint(in pose3, v);
         Check("offset 0.04/−0.05 quantises to 0", got3.x == want.x && got3.y == want.y && got3.z == want.z, $"{got3}");
-        foreach ((float ms, float ps) in new[] { (0.3f, 0f), (0f, 0.3f), (-0.7f, 0f) })
-        {
-            bool loud = false;
-            try { MoverMode3.MakePose(L, new UERotator(0, 0, 0), P, S, ms, Q, ps); }
-            catch (NotSupportedException) { loud = true; }
-            Check($"shift Main={ms} Post={ps} — loud refusal", loud, "no refusal — shift silently ignored");
-        }
     }
 
     // ── 4. execFinishAnim (Engine.dll.c:110512-110570), bone argument:

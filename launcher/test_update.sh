@@ -240,5 +240,17 @@ cmp -s "$U" "$T/uw" && ok pad_reset_user_file || bad "pad_reset_user_file"
 cmp -s "$S" "$T/sw" && ok pad_reset_system_file || bad "pad_reset_system_file"
 padn nothing_left 0
 
+# Title by edition (--game-title [edition text]); same cases as launcher/Desktop.Tests (TitleCases).
+title() { got=$("$L" --game-title "$@"); [ "$got" = "$want" ] && ok "title_$name" || bad "title_$name: want '$want', got '$got'"; }
+name=us want="Harry Potter and the Sorcerer's Stone" title "US 1.53: exact"
+name=us_modified want="Harry Potter and the Sorcerer's Stone" title "US 1.53: modified"
+name=uk want="Harry Potter and the Philosopher's Stone" title "UK 1.1: supported"
+name=ru_ea want="Harry Potter and the Philosopher's Stone" title "RU EA: supported"
+name=city want="Harry Potter and the Sorcerer's Stone" title "City re-release: modified"
+name=modded want="Harry Potter and the Sorcerer's Stone" title "Modded re-release: modified"
+name=modified_release want="Harry Potter" title "Modified release: modified"
+name=unknown want="Harry Potter" title "Unknown release: unverified"
+name=none want="Harry Potter" title
+
 [ $fails -eq 0 ] || exit 1
 echo "all passed"

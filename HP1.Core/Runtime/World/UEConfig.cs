@@ -46,6 +46,10 @@ namespace HP1.UEScript
 
             // Restore after restart: the saved overlay comes back as (scope, section, key, value).
             IEnumerable<(string Scope, string Section, string Key, string Value)> Load();
+
+            // Drop saved keys so the shipped file shows through again: one key, or the whole section when key is null.
+            // No default body: a store that kept reset keys would bring them back on the next start.
+            void Remove(string scope, string section, string key);
         }
 
         sealed class MemoryStore : IStore
@@ -55,6 +59,8 @@ namespace HP1.UEScript
             public MemoryStore(params (string, string, string, string)[] seed) { _seed = seed; }
             public void Save(string scope, string section, string key, string value)
                 => Writes.Add(scope + ":" + section + "." + key + "=" + value);
+            public void Remove(string scope, string section, string key)
+                => Writes.Add("remove " + scope + ":" + section + (key is null ? "" : "." + key));
             public IEnumerable<(string, string, string, string)> Load() => _seed;
         }
 
@@ -96,7 +102,18 @@ namespace HP1.UEScript
                 if (!sections.TryGetValue(section, out var keys))
                     sections[section] = keys = new Dictionary<string, string>(UEPropNameComparer.Instance);
                 keys[key] = value;
+                Rewrite(scope, sections);
+            }
 
+            public void Remove(string scope, string section, string key)
+            {
+                if (!_byScope.TryGetValue(scope, out var sections) || !sections.TryGetValue(section, out var keys)) return;
+                if (key is null) sections.Remove(section); else keys.Remove(key);
+                Rewrite(scope, sections);
+            }
+
+            void Rewrite(string scope, Dictionary<string, Dictionary<string, string>> sections)
+            {
                 // The file is rewritten whole: the overlay is small, and partial ini edits cause drift between
                 // memory and disk.
                 var sb = new System.Text.StringBuilder();
@@ -387,6 +404,20 @@ namespace HP1.UEScript
         // key is looked up with FString::operator== (Core 0x10107a20 — appStricmp = _wcsicmp in the "C" locale);
         // if the key exists and appStricmp(old, new) == 0, NOTHING changes: neither the value (the old spelling
         // stays) nor Dirty, so there is nothing to write to disk.
+        // The port's form of the original's "replace the live section with the file's" (UObject::ResetConfig copies the
+        // class section of Default.ini / DefUser.ini over the live config): the shipped files are never rewritten here, so
+        // dropping the saved overlay of that section (or of one key) makes the shipped values the answer again.
+        public void Reset(string scope, string section, string key = null)
+        {
+            string prefix = Key(scope, section, key ?? "");
+            var drop = new List<string>();
+            foreach (string k in _overlay.Keys)
+                if (key is null ? k.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) : string.Equals(k, prefix, StringComparison.OrdinalIgnoreCase))
+                    drop.Add(k);
+            foreach (string k in drop) _overlay.Remove(k);
+            _store.Remove(scope, section, key);
+        }
+
         public void Set(string scope, string section, string key, string value)
         {
             if (TryGetIni(scope, section, key, out string old) && WcsicmpEq(old, value ?? ""))

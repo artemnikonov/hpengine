@@ -27,6 +27,9 @@ namespace HP1.Core
             new Dictionary<string, UnrealPackage>(UEPropNameComparer.Instance);
 
         public IReadOnlyList<UnrealPackage> Packages => _packages;
+        // Bumped whenever the package catalogue changes (RegisterPackage of a new package, ReleaseLevelPackage): caches
+        // of answers read from the catalogue outside the registry compare it.
+        public int Generation { get; private set; }
 
         // Whether the registry knows a package with this name. Needed for an honest
         // DynamicLoadObject answer: "no object" and "package not loaded" are different facts,
@@ -174,7 +177,7 @@ namespace HP1.Core
             _packageByName[name] = package;
             _packages.Add(package);
             // A new package may resolve an import that did not resolve before.
-            _childCache.Clear();
+            _childCache.Clear(); _importPaths.Clear(); Generation++;
             foreach (var export in package.Exports)
             {
                 if (!(export.Object is UClass cls)) continue;
@@ -200,6 +203,48 @@ namespace HP1.Core
                 }
             }
             return true;
+        }
+
+        // A MAP PACKAGE THAT DEFINES ITS OWN CLASSES (D-85a, community maps) is catalogued for the level's lifetime only:
+        // UGameEngine::LoadMap resets the old level's loaders and collects it (ResetLoaders, Engine.dll.c:246663;
+        // CollectGarbage(RF_Native), :247126), so its classes do not outlive the level. Without the release a later level
+        // saw the old map's classes by short name (Find) and in ANY_PACKAGE lookups (GetNextInt: "classes in several
+        // packages"). The level teardown (UELevelRuntime.ResetWorld) releases by the level's package name.
+        readonly List<UnrealPackage> _levelPackages = new List<UnrealPackage>();
+
+        public void RegisterLevelPackage(UnrealPackage package)
+        {
+            if (RegisterPackage(package)) _levelPackages.Add(package);
+        }
+
+        // The one release routine of the registry: every table that can hold the package's objects or an answer computed
+        // through them goes. Returns the released classes (null: nothing released) so the owners of per-class state outside
+        // the registry (the interpreter's default bags and ClassUnique, the frame producer's parent defaults) drop theirs.
+        // Identity-keyed pure layout caches (UEProps, ShippedLayout, param descriptors) only keep the dead objects alive:
+        // a released object is never looked up again, so they cannot answer wrongly.
+        public HashSet<UClass> ReleaseLevelPackage(string packageName)
+        {
+            int i = _levelPackages.FindIndex(p => string.Equals(CanonicalName(p.PackageName), CanonicalName(packageName), StringComparison.OrdinalIgnoreCase));
+            if (i < 0) return null;
+            UnrealPackage gone = _levelPackages[i];
+            _levelPackages.RemoveAt(i);
+            var classes = new HashSet<UClass>(HP1.UEScript.UERefComparer<UClass>.Instance);
+            foreach (var export in gone.Exports)
+                if (export.Object is UClass cls) classes.Add(cls);
+            _packages.Remove(gone);
+            _packageByName.Remove(CanonicalName(gone.PackageName));
+            // The short-name and native-index tables as if the package had never been registered: the same pass over
+            // the remaining packages in their registration order.
+            var rest = new List<UnrealPackage>(_packages);
+            _packages.Clear(); _packageByName.Clear(); _classByName.Clear(); _functionByNativeIndex.Clear();
+            foreach (UnrealPackage p in rest) RegisterPackage(p);
+            // Answers that went through the catalogue (enum by name, IsA / IsChildOf along CanonicalSuper) are recomputed.
+            _enumNames.Clear(); _childCache.Clear(); _isACache.Clear(); Array.Clear(_isAMemo); _importPaths.Clear(); Generation++;
+            // A released class's load rank goes with it; a later class of the same name ranks as newly loaded.
+            foreach (UClass cls in classes)
+                if (_rankOwner.TryGetValue(cls.Name, out UClass owner) && ReferenceEquals(owner, cls))
+                { _loadRank.Remove(cls.Name); _rankOwner.Remove(cls.Name); }
+            return classes;
         }
 
         public UClass Find(string name)
@@ -349,8 +394,8 @@ namespace HP1.Core
         }
 
         // Port (CPU only): direct-mapped memo in front of _isACache by reference identity of the class and the target string
-        // (call sites pass literals). Both caches are never invalidated (a class's ancestry does not change); single-threaded
-        // like _isACache.
+        // (call sites pass literals). Both caches are invalidated only by ReleaseLevelPackage (a class's ancestry does not
+        // change while the catalogue does not); single-threaded like _isACache.
         struct IsAHit { public UClass C; public string T; public bool R; }
         const int IsAMemoSize = 1024;
         readonly IsAHit[] _isAMemo = new IsAHit[IsAMemoSize];
@@ -408,12 +453,8 @@ namespace HP1.Core
         // "Package.Group....Name", built along the outer chain of the export table.
         readonly Dictionary<string, UnrealPackage> _resourcePackages =
             new Dictionary<string, UnrealPackage>(StringComparer.OrdinalIgnoreCase);
-        // Order is appFindPackageFile (Core 0x10153f40): GSys->Paths in the order of
-        // System/0/Default.ini [Core.System] (System, Maps, Textures, Sounds, Music), like
-        // UETextureFacts.PackagePaths. Distinguishable on "Editor": System/Editor.u and
-        // Textures/Editor.utx; shipped takes Editor.u.
-        static readonly string[] ResourcePackagePaths =
-            { "System/{0}.u", "Maps/{0}.unr", "Textures/{0}.utx", "Sounds/{0}.uax", "Music/{0}.umx" };
+        // The file of a package name: HP1.UEScript.UEInstallPath.PackageFile (the [Core.System] path order).
+        // Distinguishable on "Editor": System/Editor.u and Textures/Editor.utx; shipped takes Editor.u.
 
         public List<string> FindResourceExportPaths(string packageName, string leaf, string className)
         {
@@ -466,13 +507,7 @@ namespace HP1.Core
         {
             string systemDir = System.IO.Path.GetDirectoryName(_packages[0].FullPackageName);
             string root = systemDir is null ? null : System.IO.Path.GetDirectoryName(systemDir);
-            if (root is null) return null;
-            foreach (string pattern in ResourcePackagePaths)
-            {
-                string candidate = HP1.UEScript.UEInstallPath.File(System.IO.Path.Combine(root, string.Format(pattern, packageName)));
-                if (candidate is not null) return candidate;
-            }
-            return null;
+            return root is null ? null : HP1.UEScript.UEInstallPath.PackageFile(root, packageName);
         }
 
         // Export table of a resource package from disk (once per package).
@@ -485,13 +520,7 @@ namespace HP1.Core
             if (_resourcePackages.TryGetValue(packageName, out UnrealPackage pkg)) return pkg;
             string systemDir = System.IO.Path.GetDirectoryName(_packages[0].FullPackageName);
             string root = systemDir is null ? null : System.IO.Path.GetDirectoryName(systemDir);
-            string path = null;
-            if (root is not null)
-                foreach (string pattern in ResourcePackagePaths)
-                {
-                    path = HP1.UEScript.UEInstallPath.File(System.IO.Path.Combine(root, string.Format(pattern, packageName)));
-                    if (path is not null) break;
-                }
+            string path = root is null ? null : HP1.UEScript.UEInstallPath.PackageFile(root, packageName);
             // Tables only (UELib reads them in LoadPackage): objects are not materialised;
             // the registry need not know the import classes of a resource package.
             if (path is not null) pkg = UnrealLoader.LoadPackage(path, System.IO.FileAccess.Read);
@@ -529,7 +558,68 @@ namespace HP1.Core
         // Returns the path of the FOUND export; null if the package is unknown or the chain did
         // not resolve (the consumer refuses loudly).
         public string VerifyImportPath(IReadOnlyList<(string Name, string ClassName, string ClassPackage)> chain)
+            => VerifyImport(chain, out _);
+
+        // ── AN IMPORT VerifyImport CANNOT RESOLVE: None OR A FAILED LOAD ─────
+        //
+        // Shipped (Core 0x10149bc8..0x10149d28, decompile Core.dll.c:31652-31700): when no export answers the import,
+        // the import's class is tested for CLASS_SafeReplace (`test byte [class+0x488], 0x40` at 0x10149bc8). Set:
+        // XObject stays null and VerifyImport returns at 0x10149d28 with no error — the reference loads as None
+        // (CreateImport hands back the null XObject). The only trace is GLog "Missing %s %s" (0x101b30fc: class name,
+        // import full name), written only when [0x101dc430] is set = ParseParam(cmdline, "CONFLICTS")
+        // (Core.dll.c:3747). Not set: GLog line (0x10149d7b) and appThrowf(FailedImport "Can't find %s in file '%s'")
+        // — the package load fails.
+        // Here: the found export's path; null (None) when every outer resolved and only the leaf, of a SafeReplace
+        // class, did not; otherwise the literal chain path, which the consumer refuses loudly.
+        public string ResolveImportPath(IReadOnlyList<(string Name, string ClassName, string ClassPackage)> chain)
         {
+            string path = VerifyImport(chain, out int failedLevel);
+            if (path is not null) return path;
+            string literal = string.Join(".", System.Linq.Enumerable.Select(chain, c => c.Name));
+            if (failedLevel != chain.Count - 1 || !IsSafeReplace(chain[failedLevel].ClassPackage, chain[failedLevel].ClassName))
+                return literal;
+            if (_missingSafeReplace.Add(literal))
+                HP1.Core.UETrace.Info($"Missing {chain[failedLevel].ClassName} {literal} — CLASS_SafeReplace import, loads as None "
+                    + "(VerifyImport 0x10149bc8; the original writes this line only under -CONFLICTS)");
+            return null;
+        }
+
+        readonly HashSet<string> _missingSafeReplace = new(StringComparer.OrdinalIgnoreCase);
+
+        // VerifyImport's answer per (package, import index), as UEActorGraphLoader.ResolveImportObjectPath asks it; valid while
+        // the catalogue is unchanged, so RegisterPackage and ReleaseLevelPackage clear it. Keyed weakly: a map package
+        // the actor-graph loader opens per load is no catalogue package, and a strong key kept every loaded world's
+        // package (~9 MB per map/save load, audit/memory_growth.sh --travel).
+        readonly System.Runtime.CompilerServices.ConditionalWeakTable<UnrealPackage, Dictionary<int, string>> _importPaths = new();
+        internal Dictionary<int, string> ImportPaths(UnrealPackage package) => _importPaths.GetValue(package, _ => new Dictionary<int, string>());
+
+        // ClassFlags (Class+0x488) as VerifyImport reads them. The class is found BY NAME — the original's own key:
+        // StaticFindObject(UPackage, NULL, *Import.ClassPackage) (Core 0x10149b52), then StaticFindObject(UClass, that
+        // package, *Import.ClassName) (0x10149b7a), both FName lookups (case-insensitive); no class -> not SafeReplace
+        // (je 0x10149c89). A class with a script export: the package's own value — UClass::Serialize reads ClassFlags
+        // straight from the .u (Core 0x1012b3c5..0x1012b3d0, Core.dll.c:4199). Otherwise the static flags of the native
+        // UClass ctor stand (NativeSafeReplace).
+        bool IsSafeReplace(string classPackage, string className)
+        {
+            if (string.IsNullOrEmpty(className)) return false;
+            if (classPackage is not null && FindPackage(classPackage) is { } pkg)
+                foreach (var e in pkg.Exports)
+                    if (e.Object is UClass c && !IsImportStub(c) && string.Equals(c.Name, className, StringComparison.OrdinalIgnoreCase))
+                        return (c.ClassFlags & 0x40) != 0;
+            return classPackage is not null && NativeSafeReplace.Contains(classPackage + "." + className);
+        }
+
+        // Native classes whose static ClassFlags carry CLASS_SafeReplace (0x40): every IMPLEMENT_CLASS ctor call in
+        // Engine.dll (112 calls of UClass::UClass via the IAT slot 0x10608f7c) whose InClassFlags immediate has bit 0x40,
+        // name = the InNameStr literal: Sound `push 0x40` 0x1038064b (name 0x104d53c6), Music 0x1038184b (0x104d53f6),
+        // Texture 0x1042229f (0x104dbb2e), Palette 0x10423cab (0x104dbbbe); package literal "Engine" (0x104d36b0).
+        // Texture and Palette also have Engine.u script exports, whose serialized flags win above.
+        static readonly HashSet<string> NativeSafeReplace = new(StringComparer.OrdinalIgnoreCase)
+            { "Engine.Sound", "Engine.Music", "Engine.Texture", "Engine.Palette" };
+
+        string VerifyImport(IReadOnlyList<(string Name, string ClassName, string ClassPackage)> chain, out int failedLevel)
+        {
+            failedLevel = 0;
             if (chain is null || chain.Count < 2 || _packages.Count == 0) return null;
             string root = chain[0].Name;
             UnrealPackage source = FindPackage(root) ?? ResourceExportTable(root);
@@ -541,7 +631,9 @@ namespace HP1.Core
                 UExportTableItem hit = FindImportExport(source, want.Name, want.ClassName, want.ClassPackage, sourceIndex, root);
                 if (hit is null && string.Equals(want.ClassName, "Mesh", StringComparison.OrdinalIgnoreCase))
                     hit = FindImportExport(source, want.Name, "LodMesh", want.ClassPackage, sourceIndex, root);
-                if (hit is null || (hit.ObjectFlags & 0x4) == 0) return null;
+                if (hit is null) { failedLevel = level; return null; }
+                // not public: FailedImportPrivate is thrown (Core.dll.c:31600) — never None
+                if ((hit.ObjectFlags & 0x4) == 0) { failedLevel = -1; return null; }
                 sourceIndex = hit.Index;
             }
             var parts = new List<string>();
@@ -620,6 +712,10 @@ namespace HP1.Core
         // materialised here; matches the Tut1/Tut3 captures, add the bytecode walk if a capture disagrees.
         // RF_Native classes (static objects in a DLL) take no rank: they sort after every heap class.
         readonly Dictionary<string, int> _loadRank = new(UEPropNameComparer.Instance);
+        // Which class took each rank (ReleaseLevelPackage drops only its own), and the next rank: ranks stay unique and
+        // increasing after a release.
+        readonly Dictionary<string, UClass> _rankOwner = new(UEPropNameComparer.Instance);
+        int _nextRank;
         public IReadOnlyDictionary<string, int> LoadRanks => _loadRank;
         public int ClassLoadRank(UClass cls) => cls is not null && _loadRank.TryGetValue(cls.Name, out int r) ? r : -1;
 
@@ -627,7 +723,8 @@ namespace HP1.Core
         {
             UClass c = Canonical(cls);
             if (c is null || _loadRank.ContainsKey(c.Name) || IsNativeClass(c)) return;
-            _loadRank[c.Name] = _loadRank.Count;
+            _loadRank[c.Name] = _nextRank++;
+            _rankOwner[c.Name] = c;
             foreach (UClass r in DeclaredClassRefs(c)) NoteClassLoaded(r);
             foreach (UClass r in UEObject.DefaultClassRefs(c)) NoteClassLoaded(r);
         }

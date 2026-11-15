@@ -43,8 +43,9 @@ namespace HP1.UEScript
     // installed on the player alone is worse still: every non-player caller
     // (Camera.Timer, Harry.Timer) then hits "unknown native" instead.
     //
-    // Anything not covered raises a loud STOP rather than a plausible default:
-    // an invented answer here is indistinguishable from a real one.
+    // A word a ported executor takes but whose answer the port cannot give raises a loud STOP rather than a
+    // plausible default: an invented answer here is indistinguishable from a real one. A command no ported
+    // executor takes answers "" with a log line — the original's fall-through (end of Execute).
     public static class UEConsoleCommand
     {
         // `config` — the SINGLE mutable config state (UELevelRuntime.Config):
@@ -521,10 +522,30 @@ namespace HP1.UEScript
                 return "";
             }
 
-            throw new NotSupportedException("ConsoleCommand: " + command);
+            // ── A COMMAND NO EXECUTOR TAKES: "" ──────────────────────────────────
+            //
+            // AActor::execConsoleCommand (Engine 0x10406d50) and APlayerPawn::execConsoleCommand (0x103d5770) call
+            // Engine->Exec(Cmd, StrOut) and DISCARD its return value (no test of eax after the calls at 0x10406e34,
+            // 0x103d587b, 0x103d5916): the result is whatever the executors wrote. UGameEngine::Exec ends in
+            // UEngine::Exec (0x1039a062) and returns 0 at 0x1039a06f; UEngine::Exec, after GSys, UObject::StaticExec,
+            // GCache, GExec, Client, Audio and its own FLUSH/CRACKURL, returns 0 at 0x1039367f writing nothing. So an
+            // unrecognised command answers "" silently. "Unrecognized command" (Core.int [Errors] Exec) is printed
+            // only by the typed console — Engine.u Console state Typing, when UConsole.ConsoleCommand returns false —
+            // and by the log window, WTerminal::TypeChar (Window.dll); never by this native.
+            // A word a listed native executor takes (UEExecChain tables, UEngine::Exec's sub-executors included) but the
+            // port does not answer stays a loud STOP. Unknown: HP.exe's GExec (FExecHook::Exec) — the shipped exe is
+            // packed, its words are not readable; a word only it takes would land on "" here (logged; kept by the author's
+            // decision 2026-11-15, D-89 (3)).
+            if (UEExecChain.KnownNativeWord(command) is string word)
+                throw new NotSupportedException("ConsoleCommand: " + command + " — word " + word + " of a native executor the port does not answer");
+            if (_unrecognisedNoted.Add(command))   // once per distinct command: script may send it every tick
+                HP1.Core.UETrace.Warn("[ConsoleCommand] \"" + command + "\": taken by no ported executor; answers \"\" "
+                    + "(UEngine::Exec falls through to 0 with no output, Engine 0x1039367f)");
+            return "";
         }
 
         static bool _snapNoted;
+        static readonly HashSet<string> _unrecognisedNoted = new(StringComparer.OrdinalIgnoreCase);
 
         // ── STEP 4 OF SHIPPED RESIZE: SAVE WHAT WAS APPLIED ────────────────────
         //

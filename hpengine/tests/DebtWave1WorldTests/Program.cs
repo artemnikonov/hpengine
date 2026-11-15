@@ -190,14 +190,15 @@ static class Program
             && buf[p2] == 0x5A, $"\"{s2}\" [{Show(s2)}] pos={p2}, expected \"ЖЖ\" pos=14");   // non-Latin test input
     }
 
-    // FPlane is 16 bytes; W of a placed actor (ZoneInfo.ViewFog/ViewFlash) is not lost, the type is UEPlane, as
-    // for class defaults.
+    // FPlane is 16 bytes; W of a placed actor is not lost and the type is UEPlane, as for class defaults. Byte order is
+    // W,X,Y,Z: Core.u's Plane extends Vector and UStruct::SerializeBin's field iterator (Core 0x1012e910..0x1012e965) walks
+    // the struct's own field W before the super's X,Y,Z (the earlier X,Y,Z,W expectation had no source for the order).
     static void WalkerPlaneKeepsW()
     {
         var raw = new List<byte>();
         foreach (float f in new[] { 0.25f, -1.5f, 3f, 0.75f }) raw.AddRange(BitConverter.GetBytes(f));
         object v = Decode(10, "Plane", raw.ToArray());
-        Check("Plane of a placed actor: X,Y,Z,W", v is UEPlane p && p.X == 0.25f && p.Y == -1.5f && p.Z == 3f && p.W == 0.75f,
+        Check("Plane of a placed actor: W,X,Y,Z on disk", v is UEPlane p && p.W == 0.25f && p.X == -1.5f && p.Y == 3f && p.Z == 0.75f,
             $"got {v?.GetType().Name} {v}");
         object vec = Decode(10, "Vector", raw.GetRange(0, 12).ToArray());
         Check("Vector of a placed actor unchanged", vec is UEVector u && u.x == 0.25f && u.y == -1.5f && u.z == 3f,
