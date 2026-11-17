@@ -59,6 +59,16 @@ namespace HP1.UEScript
         private const int StairPitchUp = 5400;
         private const int StairPitchDown = -5000;
 
+        // HP2's descent probe point [HP2 0x103e4b7c..0x103e4bac]: Forward·ahead stays in the register and the eye point is
+        // added before the one float store (HP1 stores the product as a float FVector first).
+        internal static Vector3 StairFarHp2(Vector3 eye, Vector3 forward, float ahead)
+        {
+            static float F(float e, float f, float a) => HP1.Core.X87Ext.Round64(HP1.Core.X87Ext.From(f) * HP1.Core.X87Ext.From(a)
+                + HP1.Core.X87Ext.From(e)).ToFloat();
+            return new Vector3(F(eye.x, forward.x, ahead), F(eye.y, forward.y, ahead), F(eye.z, forward.z, ahead));
+        }
+
+        // Original: Engine.dll ?execFindStairRotation@APawn@@QAEXAAUFFrame@@QAX@Z [HP1 0x103D7020] [HP2 0x103E46A0]
         public int FindStairRotation(UEInterpreter interp, UEObject pawn, float deltaTime)
         {
             if (pawn is null) return 0;
@@ -144,8 +154,10 @@ namespace HP1.UEScript
                         // clearance — when blocked, the view is not lowered.
                         if (clear == 1f)
                         {
+                            // HP2 computes this probe's point again, the product in the register (StairFarHp2).
+                            Vector3 far4 = UEGameProfile.Current.Game == UEEdition.Game.HP2 ? StairFarHp2(eyePoint, forward, ahead) : far;
                             float t4 = SingleLineCheck(interp, pawn, pawn,
-                                far, farDown, extent, 6).Time;
+                                far4, new Vector3(far4.x, far4.y, far4.z - drop3), extent, 6).Time;
                             target = pitch < 0 ? pitch : 0;      // setge/dec/and
                             if (drop + 10f < drop3 * t4) target = StairPitchDown;
                         }

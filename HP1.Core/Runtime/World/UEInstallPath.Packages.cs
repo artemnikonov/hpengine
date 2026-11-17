@@ -102,6 +102,64 @@ namespace HP1.UEScript
             return files;
         }
 
+        // Original: Engine.dll.c:122755 AActor::execGetMapName (export 0x3ffd, body 0x103d4d90).
+        // Wildcard = "*." + FURL::DefaultMapExt; for each GSys->Paths(i) (Default.ini's [Core.System] Paths, which is
+        // "../" + PackagePaths[i] with "*") that contains Wildcard (appStrstr, case-sensitive): FindFiles(<Paths(i) cut at
+        // Wildcard> + Prefix + Wildcard, Files=1, Dirs=0) relative to System, and each name not yet in the list
+        // (appStricmp) is appended. The CD pass (GCdPath + "System" + Paths(i)) never runs here: appInit leaves GCdPath
+        // empty when ..\Textures\Palettes.utx exists (Core.dll.c:56325-56333), and the port has no CDPATH= command line.
+        // Every name is cut after its last '\\' (InStr/Right loop). The answer is the name Dir steps from MapName
+        // (appStrcmp, exact case): before the first -> the last, past the last -> the first; MapName not listed -> the
+        // first name, no names -> "".
+        public static string GetMapName(string root, string prefix, string mapName, int dir)
+        {
+            string wildcard = "*." + (UEUrl.DefaultMapExt ?? throw new InvalidOperationException("GetMapName: FURL::StaticInit has not run (DefaultMapExt)"));
+            var names = new List<string>();
+            foreach (string entry in PackagePaths)
+            {
+                string path = "../" + string.Format(entry, "*");
+                int at = path.IndexOf(wildcard, StringComparison.Ordinal);
+                if (at < 0) continue;
+                foreach (string f in FindFiles(Path.Combine(root, "System"), path.Substring(0, at) + prefix + wildcard))
+                    if (!names.Exists(n => string.Equals(n, f, StringComparison.OrdinalIgnoreCase))) names.Add(f);
+            }
+            for (int i = 0; i < names.Count; i++)
+                while (names[i].IndexOf('\\') >= 0) names[i] = names[i].Substring(names[i].IndexOf('\\') + 1);
+            for (int i = 0; i < names.Count; i++)
+                if (string.Equals(names[i], mapName, StringComparison.Ordinal))
+                {
+                    int k = i + dir;
+                    return names[k < 0 ? names.Count - 1 : k >= names.Count ? 0 : k];
+                }
+            return names.Count > 0 ? names[0] : "";
+        }
+
+        // FFileManagerWindows::FindFiles(Filename, Files=1, Dirs=0) relative to the working directory (HP.exe runs in
+        // System): the file names (no directories) of Filename's directory that match its last component ('*' any run,
+        // '?' one character, case-insensitive, as FindFirstFile on long names). Platform boundary: NTFS lists a directory
+        // by its upcased names — OrdinalIgnoreCase here, as UERegistry and PackageFiles. Not modelled: FindFirstFile's
+        // 8.3 short-name matches ("*.unr" also hitting "x.unrbak" through X~1.UNR where short names exist).
+        public static List<string> FindFiles(string workingDir, string filename)
+        {
+            string f = filename.Replace('\\', '/');
+            int cut = f.LastIndexOf('/');
+            string dir = Dir(Path.GetFullPath(Path.Combine(workingDir, cut < 0 ? "." : f.Substring(0, cut + 1))));
+            string pattern = f.Substring(cut + 1);
+            var names = new List<string>();
+            if (dir is not null)
+                foreach (string e in Directory.EnumerateFiles(dir))
+                    if (WildMatch(pattern, 0, Path.GetFileName(e), 0)) names.Add(Path.GetFileName(e));
+            names.Sort(StringComparer.OrdinalIgnoreCase);
+            return names;
+        }
+
+        static bool WildMatch(string p, int i, string n, int j)
+        {
+            if (i == p.Length) return j == n.Length;
+            if (p[i] == '*') return WildMatch(p, i + 1, n, j) || (j < n.Length && WildMatch(p, i, n, j + 1));
+            return j < n.Length && (p[i] == '?' || char.ToUpperInvariant(p[i]) == char.ToUpperInvariant(n[j])) && WildMatch(p, i + 1, n, j + 1);
+        }
+
         // One path entry's directory, listed once: what File(<root>/<entry dir>/<file>) answers, without a stat or a
         // directory scan per name.
         sealed class Listing

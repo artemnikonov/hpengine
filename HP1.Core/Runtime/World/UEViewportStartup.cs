@@ -161,10 +161,7 @@ namespace HP1.UEScript
         internal static bool ImportBool(UEConfig config, string section, string key)
         {
             string raw = config.Get(UEConfig.ScopeSystem, section, key)?.Trim();
-            if (string.Equals(raw, "True", StringComparison.OrdinalIgnoreCase)
-             || raw == "1") return true;
-            if (string.Equals(raw, "False", StringComparison.OrdinalIgnoreCase)
-             || raw == "0") return false;
+            if (raw is not null && UELocalization.ImportBoolWord(raw) is bool b) return b;
             throw new System.IO.InvalidDataException(
                 "[" + section + "] " + key + " = '" + (raw ?? "<no key>")
                 + "': on unrecognized text shipped keeps the CLASS DEFAULT "

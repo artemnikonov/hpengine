@@ -23,13 +23,15 @@ namespace HPEngine
             // native Wayland stops presenting after setres + fullscreen toggles; XWayland does not, and Game Mode runs on it
             // anyway. The SDL_VIDEO_DRIVER environment variable still wins (the hint yields to it).
             if (OperatingSystem.IsLinux()) SDL_SetHint("SDL_VIDEO_DRIVER", "x11,wayland");
-            string root = null, map = null, shot = null, video = null, selftest = null, visual = null;
+            string root = null, map = null, shot = null, video = null, selftest = null, visual = null, hp2CmdLine = null, hp2SaveDir = null;
             int videoFrames = 300;
             string lookAt = null;
             int warm = 50, bench = 300, w = 1280, h = 720, post = 0, probeSettle = 0, kill = -1; bool sizeFromArgs = false;
             var causeEvents = new List<string>();
             var consoleAt = new List<(int Tick, string Cmd)>();
+            var probeExecAt = new List<(int Tick, string Cmd)>();
             var consoleCmds = new List<string>();   // --console "<command>": same entry as the menu ConsoleCommand (UEConsoleCommand.Execute)
+            var books = new List<(int Tick, string Page)>();
             var keys = new List<(int Tick, string Key)>();   // --key <post tick>:<EInputKey name>: Press before that post tick, Release before the next (CoreInputSink, the window's route)
             PerfTitle = FramePacer.PerfTitleFromArgs(args);   // --perf-title: fps/timings in the window title
             for (int i = 0; i < args.Length; i++)
@@ -37,6 +39,8 @@ namespace HPEngine
                 {
                     case "--root": root = args[++i]; break;
                     case "--map": map = args[++i]; break;
+                    case "--hp2-cmdline": hp2CmdLine = args[++i]; break;
+                    case "--hp2-savedir": hp2SaveDir = args[++i]; break;   // the port's HP2 save directory (the launcher's <HP1 data dir's parent>/HP2Data/Save)   // HP2 Game.exe's own command line (the launcher's HP2 tab): map, -SAVESLOT=, -LOADGAME=
                     case "--shot": shot = args[++i]; break;
                     case "--selftest-gpu": selftest = args[++i]; break;
                     case "--video": video = args[++i]; break;      // directory of PNG frames (no window)
@@ -44,7 +48,7 @@ namespace HPEngine
                     case "--look-at": lookAt = args[++i]; break;
                     case "--cam": CamOverride = args[++i].Split(',').Select(x => float.Parse(x, System.Globalization.CultureInfo.InvariantCulture)).ToArray(); break;
                     case "--look-dist": LookDist = float.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture); break;   // snapshot: camera 300 units from the actor, along the actor's yaw
-                    
+
                     case "--debug-cam": DebugCam = true; break;
                     case "--warm": warm = int.Parse(args[++i]); break;
                     case "--fps": TargetFps = double.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture); FpsFromArgs = true; break;   // window pacing (Core ticks per second); otherwise 60
@@ -52,10 +56,12 @@ namespace HPEngine
                     case "--bench": bench = int.Parse(args[++i]); break;
                     case "--size": var p = args[++i].Split('x'); w = int.Parse(p[0]); h = int.Parse(p[1]); sizeFromArgs = true; break;
                     case "--console": consoleCmds.Add(args[++i]); break;
+                    case "--probe-exec-at": var pe = args[++i]; int pc0 = pe.IndexOf(':'); probeExecAt.Add((int.Parse(pe[..pc0]), pe[(pc0 + 1)..])); break;   // <warm tick>:<command>, the live probe's exec/pexec (UEGameEngine.ConsoleProbe), before that warm tick
                     case "--console-at": var ca = args[++i]; int cc = ca.IndexOf(':'); consoleAt.Add((int.Parse(ca[..cc]), ca[(cc + 1)..])); break;   // <post tick>:<command>, before that post tick
                     case "--drawlog": DrawLog.Path = args[++i]; break;   // snapshot draw-call log (DrawLog.cs)
                     case "--probe-settle": probeSettle = int.Parse(args[++i]); break;   // snapshot camera only for the last N warm-up ticks
                     case "--key": var kp = args[++i].Split(':'); keys.Add((int.Parse(kp[0]), kp[1])); break;
+                    case "--open-book-at": var ob = args[++i]; int obi = ob.IndexOf(':'); books.Add((int.Parse(ob[..obi]), ob[(obi + 1)..])); break;   // <post tick>:<page>, FEBook.OpenBook(page) (UEGameEngine.OpenBookProbe)
                     case "--post": post = int.Parse(args[++i]); break;   // ticks after --console (snapshot after loading a save etc.)
                     case "--causeevent": causeEvents.Add(args[++i]); break;   // snapshot: Trigger(player, player) on actors with that Tag after --console (UEGameEngine.CauseEventProbe)
                     case "--kill": kill = int.Parse(args[++i]); break;   // snapshot: baseHarry.KillHarry(true) before that post tick (death -> LoadSelectedSlot)
@@ -66,8 +72,14 @@ namespace HPEngine
                     case "--window-script": Script = new WindowScript(args[++i]); break;   // window: fixed-step scripted session (judge)
                     case "--window-stress": WindowStress = true; break;   // window script: key/mouse through the SDL queue, slow Core ticks, forced tick-end interleaving (CoreThread.cs WindowScript)
                     case "--digest": DigestOut = new StreamWriter(args[++i]); break;   // window: per-tick state digest (judge)
+                    case "--world-digest": WorldDigest.Path = args[++i]; break;   // window: per-20-tick whole-world digest (judge, CoreThread.cs)
+                    case "--world-ref": WorldDigest.RefPath = args[++i]; break;   // window: dump the world bytes at the first tick differing from this digest
+                    case "--world-dump": WorldDigest.DumpAt = int.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture); break;   // window: dump the world bytes at this tick
                     case "--offscreen-window": OffscreenWindow = true; break;   // window: hidden, drawn offscreen, no audio device (judge/bench)
-                    case "--mods-in-judge-window": ModsInJudgeWindow = true; break;   // check only (audit/mod_window_boot.sh): the player's mod overlay under a judge window
+                    case "--mods-in-judge-window": ModsInJudgeWindow = true; break;
+                    // check only (audit/hp2_window_boot.sh): the player's windowed game (run log, mods, splash, saved settings),
+                    // every window hidden, drawn offscreen, no audio device or OS input — so no window reaches the screen
+                    case "--hidden-game": OffscreenWindow = HiddenGame = true; break;   // check only (audit/mod_window_boot.sh): the player's mod overlay under a judge window
                 }
 
             if (selftest is not null)   // no game files: synthetic scene (SdlSelfTest.cs)
@@ -88,6 +100,9 @@ namespace HPEngine
                 if (dialog) FatalBox(e.Message);
                 return HPEngine.Packaging.InstallRoot.ExitCode;
             }
+            // HP2's command line as Game.exe passes it to the engine (UEGameEngine.ParseHp2CommandLine).
+            var hp2Cmd = hp2CmdLine is null ? default : UEGameEngine.ParseHp2CommandLine(hp2CmdLine);
+            map ??= hp2Cmd.Map;
             // Startup map without --map, as in the original: UGameEngine::Init reads `[URL] LocalMap`
             // (Default.ini: LocalMap=Startup.unr, the main menu with the intro).
             map ??= System.IO.Path.GetFileNameWithoutExtension(
@@ -97,9 +112,20 @@ namespace HPEngine
             // A judge/bench window (hidden, or a scripted session) is no player session: no run log, mods, splash or saved settings.
             bool judgeWindow = Script is not null || OffscreenWindow;
             bool windowedGame = HPEngine.Packaging.FatalDialog.WindowedGame(args);
+            // The player's settings overlay, run logs and mod working copy: <install>/HPEngineData; HP2 (the launcher's HP2 tab):
+            // <HP2Data>/HPEngineData beside --hp2-savedir, never the HP2 install (DECISIONS 2026-11-16, HP2 ini overlay).
+            if (windowedGame && hp2CmdLine is not null && hp2SaveDir is null)
+            {
+                const string noData = "--hp2-cmdline without --hp2-savedir: the port's HP2 settings and logs have no directory (the HP2 install is never written)";
+                Console.Error.WriteLine(noData);
+                if (dialog) FatalBox(noData);
+                return HPEngine.Packaging.InstallRoot.ExitCode;
+            }
+            string DataDir(string dir) => hp2SaveDir is not null && hp2CmdLine is not null
+                ? HPEngine.Packaging.InstallRoot.Hp2DataDir(hp2SaveDir) : HPEngine.Packaging.InstallRoot.DataDir(dir);
             if (windowedGame)   // only the windowed game
             {
-                string logs = Path.Combine(HPEngine.Packaging.InstallRoot.DataDir(root), "logs");
+                string logs = Path.Combine(DataDir(root), "logs");
                 StartRunLog(logs);
                 // After StartRunLog's handler, so the log has the crash before the dialog waits for OK.
                 // ponytail: window thread only (Core tick failures are rethrown there, CoreThread.ThrowIfFailed); macOS
@@ -114,6 +140,14 @@ namespace HPEngine
             }
             // An edition UEEdition does not recognise runs, with its warning in the console and the run log.
             if (UEEdition.Of(root).Warning is string editionWarning) Console.Error.WriteLine("[Edition] WARNING: " + editionWarning);
+            // A game Core recognises but cannot play yet (HP2): refused before Boot, which would run it to its first STOP.
+            // NOT ORIGINAL: the launcher's HP2 tab (--hp2-cmdline) starts the partial port anyway; it runs to its first STOP.
+            if (hp2CmdLine is null && UEGameProfile.Of(UEEdition.Of(root).Game).NotPorted is string notPorted)
+            {
+                Console.Error.WriteLine("[Edition] " + notPorted);
+                if (dialog) FatalBox(notPorted);
+                return HPEngine.Packaging.InstallRoot.ExitCode;
+            }
             // Mods (packaging/ModOverlay.cs): only the windowed game; from here on `root` is the game data Core and the
             // frontend read (the install, or the working copy with the enabled mods), `install` keeps settings and saves.
             string install = root;
@@ -122,7 +156,7 @@ namespace HPEngine
             {
                 try
                 {
-                    var mods = HPEngine.Packaging.ModOverlay.Prepare(install, HPEngine.Packaging.InstallRoot.DataDir(install));
+                    var mods = HPEngine.Packaging.ModOverlay.Prepare(install, DataDir(install));
                     root = mods.GameRoot;
                     activeMods = mods.Active;
                     if (HPEngine.Packaging.GameLanguage.Selected(install) is string language)
@@ -155,8 +189,10 @@ namespace HPEngine
             {
                 var inis = UELevelRuntime.InstallInis(Path.Combine(root, "System"));
                 var splashConfig = new UEConfig(inis.System, inis.User);
-                splashConfig.BindStore(new UEConfig.FileStore(HPEngine.Packaging.InstallRoot.DataDir(install)));
-                Splash.Show(UELevelRuntime.SplashBitmapPath(root, splashConfig));
+                splashConfig.BindStore(new UEConfig.FileStore(DataDir(install)));
+                string splash = UELevelRuntime.SplashBitmapPath(root, splashConfig);
+                Console.WriteLine("[Splash] " + splash);
+                Splash.Show(splash, hidden: HiddenGame);
             }
             if (args.Contains("--prof")) Environment.SetEnvironmentVariable("HP1_TICK_PROF", "1");
             var sw = Stopwatch.StartNew();
@@ -165,10 +201,13 @@ namespace HPEngine
             // Only the windowed game owns the player's settings: snapshots and probes (--shot, --video, probe modes) get
             // the in-memory store (null), so a `--console "set ini:..."` in a check never rewrites the player's overlay.
             UEGameEngine host = UEGameEngine.Boot(root, map, selectHardwareRenderDevice: true,
-                configStore: windowedGame ? new UEConfig.FileStore(HPEngine.Packaging.InstallRoot.DataDir(install))
+                configStore: windowedGame ? new UEConfig.FileStore(DataDir(install))
                     : visual is null ? null : UEConfig.SeededMemory((UEConfig.ScopeSystem, UEConfig.HPEngineSection, UEConfig.VisualModeKey, visual)),
-                saveDir: root == install ? null : Path.Combine(install, "Save"), mods: activeMods);
+                // HP2 (DECISIONS 2026-11-16, save dir (b)): only the launcher's --hp2-savedir, never the install's Save.
+                saveDir: hp2CmdLine is not null ? hp2SaveDir : root == install ? null : Path.Combine(install, "Save"),
+                mods: activeMods, saveSlot: hp2Cmd.SaveSlot);
             Host = host;
+            if (hp2Cmd.LoadGame is int loadSlot) host.LoadGameAtInit(loadSlot);   // UGameEngine::Init's LOADGAME=
             // A port override whose function the loaded scripts (a mod's) no longer have does not run: say so in the log.
             if (windowedGame)
                 foreach (string line in UEGameEngine.ScriptOverrideWarnings()) Console.Error.WriteLine("[Overrides] WARNING: " + line);
@@ -191,7 +230,7 @@ namespace HPEngine
             Proc = new HPEngine.ProcTex.ProcTextures(procData.FireTextures(), procData.WetTextures());
             if (Environment.GetEnvironmentVariable("HP1_PROCDBG") == "1")
             {
-                var firePkg = UELib.UnrealLoader.LoadPackage(UEInstallPath.ScriptPackageFile(root, "Fire") ?? throw new FileNotFoundException("HP1_PROCDBG: no script package Fire under " + root), FileAccess.Read);
+                var firePkg = HP1.UEScript.UEPackageOpen.Load(UEInstallPath.ScriptPackageFile(root, "Fire") ?? throw new FileNotFoundException("HP1_PROCDBG: no script package Fire under " + root), FileAccess.Read);
                 firePkg.InitializePackage(UELib.UnrealPackage.InitFlags.All);
                 foreach (var e in firePkg.Exports)
                     if (e.Object is UELib.Core.UClass c && (e.ObjectName.ToString() is "IceTexture" or "FractalTexture" or "WaterTexture" or "WetTexture"))
@@ -319,7 +358,7 @@ namespace HPEngine
                 // mode as UGameEngine::Init -> OpenWindow (UEViewportStartup: StartupFullscreen and the mode key pair,
                 // -WINDOW for windowed); --size gives a window of the given size (debug).
                 SetWindowIcon(r, root);
-                var vp = new SdlViewportDevice(r.Window);
+                var vp = new SdlViewportDevice(r.Window, OffscreenWindow);
                 host.Natives.UseViewportDevice(vp);
                 WindowViewport = vp;
                 SdlViewportDevice.OpenStartup(vp, host.Runtime.Config, Environment.CommandLine, sizeFromArgs || OffscreenWindow ? (w, h) : null);
@@ -333,10 +372,12 @@ namespace HPEngine
                 // Native fonts (CreateNativeFont, RU edition): glyph page from Core's registry (runtime texture).
                 key => UENativeFonts.PagePaths(key) ?? Src.GetFont(key)?.PagePaths);
 
-            // The load frame emits static tiles of all lightmaps; the scene is built right after it.
+            // The load frame emits static tiles of all lightmaps; the scene is built from it (AfterTick). HP2 publishes no
+            // world frame before the first tick (UGameEngine::Draw is idle while GIsRunning is 0): its scene is built by the
+            // AfterTick of the first tick that does.
             host.RunOwedLoadFrame();
-            LoadScene(r);
-            Splash.Close();   // ExitSplash after InitEngine (HP.exe 0x1090b0eb)
+            AfterTick(r);
+            Splash.Close();   // ExitSplash after InitEngine (HP.exe 0x1090b0eb; HP2 Game.exe the same place, 0x1090d460)
             // Windowless travel probe: --travel-png <dir>, the same Core carriers as the window (fade frames and the
             // loading screen), but the frame goes to PNG. Together with --travel-at <tick> <map>.
             int tpIdx = Array.IndexOf(args, "--travel-png");
@@ -394,6 +435,8 @@ namespace HPEngine
                     fp.ProbeCamera = probe;
                 if (DrawLog.Path != null && i == 1) DrawLog.MarkFirst(host.Runtime.LatestFrame);
                 if (DrawLog.Path != null && i == Math.Max(0, warm - DrawLog.StillTicks)) DrawLog.MarkState(host.Runtime.LatestFrame);
+                foreach (var (pt, cmd) in probeExecAt)
+                    if (pt == i) Console.WriteLine($"probe-exec@{i} '{cmd}' -> '{host.ConsoleProbe(cmd)}'");
                 PrepareStep(w, h); var scene = Cur; host.Tick(1, WarmDt); AfterTick(r);
                 audio?.Update(!ReferenceEquals(scene, Cur));
             }
@@ -413,6 +456,8 @@ namespace HPEngine
                 if (probe is not null && host.Runtime.FrameProducer is { ProbeCamera: null } fpp) fpp.ProbeCamera = probe;
                 foreach (var (ct, cmd) in consoleAt)
                     if (ct == i) Console.WriteLine($"console@{i} '{cmd}' -> '{UEConsoleCommand.Execute(host.Runtime.Config, cmd)}'");
+                foreach (var (bt, page) in books)
+                    if (bt == i) Console.WriteLine($"open-book@{i} '{page}' -> {host.OpenBookProbe(page)}");
                 foreach (var (kt, key) in keys)
                     if (kt == i || kt + 1 == i) keySink.CauseInput(key, kt == i ? UEInput.InputAction.Press : UEInput.InputAction.Release, 0f);
                 PrepareStep(w, h); host.Tick(1, WarmDt); AfterTick(r);
@@ -493,8 +538,9 @@ namespace HPEngine
             Cur.Sprites = new HPEngine.Sprites.SpriteBuilder(size, texFlags, isIce, p => Anim.ChainLength(p), (p, k) => Anim.ChainAt(p, k), lifeSpan);
             Cur.Particles = new HPEngine.Sprites.ParticleBuilder(size, texFlags);
             Cur.Decals = new HPEngine.Sprites.DecalBuilder(size);
-            // AnimNext chain frame: UETextureAnim.CurrentFrame (clock via BeginFrame in AnimateWorld, before the builders).
-            Cur.Sprites.FrameOf = Cur.Particles.FrameOf = Cur.Decals.FrameOf = Cur.Actors.FrameOf = Anim.CurrentFrame;
+            // AnimNext chain frame: Core's WorldFrame.TextureFrames of the tick (TexFrame); the chain data for DT_SpriteAnimOnce
+            // and the mover note stay here (Anim: package reads only, no chain state).
+            Cur.Sprites.FrameOf = Cur.Particles.FrameOf = Cur.Decals.FrameOf = Cur.Actors.FrameOf = TexFrame;
             // Coronas: Core decides (UECoronas -> WorldFrame.Coronas); the builder only projects and emits tiles.
             Cur.Coronas = new HPEngine.Sprites.CoronaBuilder();
             SceneLoads++;
@@ -555,7 +601,8 @@ namespace HPEngine
             // The scene follows the world of Core's latest frame (UELevelRuntime.LatestFrameWorld): the held loading screen
             // of a browsing tick carries none, so the old scene stays (unused) until the new world's first frame.
             if (rt.LatestFrameWorld is null) return;
-            if (!ReferenceEquals(rt.LatestFrameWorld, Cur.World) && rt.LatestFrameWorld.Geometry is not null) { LoadScene(r); return; }
+            if (!ReferenceEquals(rt.LatestFrameWorld, Cur?.World) && rt.LatestFrameWorld.Geometry is not null) { LoadScene(r); return; }
+            if (Cur is null) return;   // no scene until Core publishes a world frame with geometry
             WorldFrame f = rt.LatestFrame;
             r.UpdateTiles(Cur.Atlas, rt.SurfaceLightmaps);
             if (rt.MoverLightmaps is { } ml) r.UpdateTiles(Movers.Atlas, ml.Tiles, moverAtlas: true);
@@ -589,6 +636,15 @@ namespace HPEngine
         static FogScene Fog;
         static UEGameEngine Host;
         static UETextureAnim Anim;
+        // The frame Core's TextureUses gave each chain head this tick (WorldFrame.TextureFrames, TakeTick). A chain the
+        // frame did not list was not used by Core this tick: drawn as its head, said once per texture (loud).
+        static IReadOnlyDictionary<string, string> TickTextureFrames = new Dictionary<string, string>();
+        static string TexFrame(string path)
+        {
+            if (path is not null && TickTextureFrames.TryGetValue(path, out string frame)) return frame;
+            if (path is not null && Anim.IsAnimated(path)) RenderUnhandled.Note("texanim", "chain-not-used-by-core", path);
+            return path;
+        }
         static HPEngine.ProcTex.ProcTextures Proc;
         static Dictionary<string, UEProceduralTextureData.Ice> IceDefs;
         static int RenderFrame;
@@ -684,6 +740,7 @@ namespace HPEngine
             TickConsoleOffsetX = Host.Runtime.FrameProducer?.ConsoleRegionOffsetX ?? 0;
             Fog.Fill(Host.Runtime.FogMaps);   // Core's fog maps of the tick, per frame of the tree
             Cur.Actors.Alpha = alpha;
+            TickTextureFrames = f.TextureFrames;
             Cur.Actors.Prepare(f, Wall.Elapsed.TotalSeconds);
             Movers.TakeTick(f.Tick);
             TickLifeSpans.Clear();
@@ -712,7 +769,7 @@ namespace HPEngine
             actors.Alpha = alpha;
             r.UploadFog(Fog);
             r.SetDrawn(f.Drawn, f.DrawnTextures);   // Core's world polygons per view and the textures DrawFrame updated
-            r.AnimateWorld(lt, Anim, Wall.Elapsed.TotalSeconds);
+            r.AnimateWorld(lt, f.TextureFrames);
             if (take) actors.EmitPrepared();
             else actors.Reemit(alpha);
             Movers.Build(f, lt, f.Tick, alpha);
@@ -898,7 +955,7 @@ namespace HPEngine
                 AfterTick(r); f = host.Runtime.LatestFrame;
                 var cam = Camera.From(f.Camera);
                 FrameDraws(r, f);
-                    r.RenderOffscreen(cam, out byte[] rgba);
+                r.RenderOffscreen(cam, out byte[] rgba);
                 Png.Write(Path.Combine(dir, $"f{i:D4}.png"), r.Width, r.Height, rgba);
             }
             Console.WriteLine($"video: {frames} frames -> {dir}");
@@ -954,7 +1011,9 @@ namespace HPEngine
         // Missing file or unparsed format: loud on stderr, the window stays without an icon.
         static void SetWindowIcon(Renderer r, string root)
         {
-            string path = UEInstallPath.File(Path.Combine(root, "System", "hp.ico")) ?? Path.Combine(root, "System", "hp.ico");
+            // The icon file the game ships beside its exe: HP1 System/hp.ico, HP2 System/Game.ico.
+            string ico = UEEdition.Of(root).Game == UEEdition.Game.HP2 ? "Game.ico" : "hp.ico";
+            string path = UEInstallPath.File(Path.Combine(root, "System", ico)) ?? Path.Combine(root, "System", ico);
             try
             {
                 var (w, h, rgba) = HPEngine.Packaging.GameIcon.DecodeLargest(File.ReadAllBytes(path));
@@ -983,7 +1042,7 @@ namespace HPEngine
         static WindowScript Script;
         static bool WindowStress;
         static StreamWriter DigestOut;
-        static bool OffscreenWindow, ModsInJudgeWindow;
+        static bool OffscreenWindow, ModsInJudgeWindow, HiddenGame;
 
         static int Window(UEGameEngine host, Renderer r, GameAudio audio)
         {
@@ -1127,6 +1186,7 @@ namespace HPEngine
                 jobBefore = host.Runtime.LatestFrame; jobBeforeLevelTime = host.Runtime.PresentedLevelTime; jobDt = dt;
                 host.Tick(1, dt);
                 if (DigestOut is not null) StateDigest.Write(DigestOut, host, k, dt, sink.UWindowActive);
+                if (WorldDigest.Path is not null) WorldDigest.Write(host, k);
                 if (Script is not null && Script.ProbeAt(k)) Console.WriteLine($"[Script] tick {k} menu: {WindowScript.MenuProbe(host)}");
                 jobEnd = Stopwatch.GetTimestamp();
             }
@@ -1174,10 +1234,14 @@ namespace HPEngine
             // Core thread: the pair the window interpolates switches when the next tick is posted (the frames drawn while it
             // runs show the taken tick), and the tick's Core reads are taken now, Core idle (TakeTick at the tick pose).
             bool firstFrame = false, jobPending = false;
+            // The previous frame is Core's too (jobBefore = LatestFrame before the tick): its actor list is one of the three
+            // Core rotates, which a tick that builds two frames (save progress, LoadMap fade) overwrites while it is drawn.
             var detached = new[] { new List<ActorSnapshot>(), new List<ActorSnapshot>() }; int detachedNext = 0;
+            var detachedPrev = new[] { new List<ActorSnapshot>(), new List<ActorSnapshot>() };
             void SwitchPair()
             {
                 curDraw = Interp.Detach(curFrame, detached[detachedNext ^= 1]);
+                prevFrame = Interp.Detach(prevFrame, detachedPrev[detachedNext]);
                 TakeTick(r, curDraw, 1f);
                 firstFrame = true;
                 presentedDuringJob = false;
@@ -1361,6 +1425,7 @@ namespace HPEngine
                 while (coreThread.Busy) { MainThread.Wake.WaitOne(5); MainThread.Service(); }
                 if (jobPending) coreThread.ThrowIfFailed();
             }
+            host.PreExit();   // Core idle: appPreExit's game part
             DigestOut?.Flush();
             double secs = sw.Elapsed.TotalSeconds;
             if (PerfTitle || QuitAfter > 0 || Script is not null)

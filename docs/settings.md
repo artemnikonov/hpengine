@@ -23,7 +23,10 @@
   With a gamepad in use, **Options → Controls** shows the gamepad's buttons under their own names (Xbox, PlayStation
   or Nintendo) and binds gamepad buttons; with the keyboard it is the original page. A button you bind stops doing
   what it did before. B, Start and the right stick are fixed. Camera and menu cursor speed follow the mouse
-  sensitivity slider in Options. **More → Reset Gamepad Bindings** in the Launcher brings the defaults back.
+  sensitivity slider in Options. In the Launcher, **Menu → Reset gamepad bindings** (under **This game**) brings the
+  defaults back.
+- **Launcher with a gamepad** (not original; both launchers): A selects, B goes back, LB/RB switch the game tab, Start
+  opens the Menu, Y plays, the d-pad or the left stick moves between buttons and through open lists.
 - **Options → Video → Interface Size** (in place of Object Detail; not original): **Smaller**, **Standard** or
   **Larger**. Menus, HUD and text are scaled by whole pixels so they stay sharp; only sizes that differ on your screen
   are offered (below 960 pixels of height, e.g. Steam Deck or 720p, Smaller would equal Standard and is not shown).

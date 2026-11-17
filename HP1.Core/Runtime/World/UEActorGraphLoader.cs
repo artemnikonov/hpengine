@@ -49,7 +49,9 @@ namespace HP1.UEScript
                 throw new ArgumentNullException(nameof(owner),
                     "loading binds LevelInfo to the interpreter — the owning world, "
                     + "which must release it on teardown, has to be specified");
-            var package = UnrealLoader.LoadPackage(mapPath, FileAccess.Read);
+            // LoadMap's LoadPackage creates the map's linker first: its names, then its imports' (UENameTable).
+            HP1.UEScript.UENameTable.Linker(mapPath);
+            var package = HP1.UEScript.UEPackageOpen.Load(mapPath, FileAccess.Read);
             package.InitializePackage(UnrealPackage.InitFlags.All);
             // All map exports are objects of the package in which runtime spawning looks for
             // a free name (UELevelRuntime.MakeUniqueSpawnName).
@@ -122,6 +124,31 @@ namespace HP1.UEScript
                 var entry = new ActorEntry(exportIndex, export.ObjectName.ToString(), className, source, obj);
                 result.Add(entry);
                 byExport.Add(exportIndex, entry);
+            }
+
+            // LoadPackage -> ULinkerLoad::LoadAllObjects [HP2 Core 0x1014b910] constructs every export in TABLE order
+            // (CreateExport); a ParticleFX constructor makes its particle list there unless its default bDeleteMe, before
+            // any instance tag is read (UELevelRuntime.CreateParticleList; named at the world's LoadMap,
+            // UELevelRuntime.AttachLoadedParticleLists).
+            var fxClass = new Dictionary<UObjectTableItem, UClass>();
+            for (int i = 0; i < package.Exports.Count; i++)
+            {
+                var export = package.Exports[i];
+                if ((export.ObjectFlags & GameLoadContext) == 0) continue;
+                if (byExport.TryGetValue(i + 1, out ActorEntry placed))
+                {
+                    if (!UEInterpreter.ClassIsA(placed.Runtime.Class, "ParticleFX")) continue;
+                    UELevelRuntime.CheckParticleListCtor(placed.Runtime);
+                    if (UELevelRuntime.CreatesParticleList(placed.Runtime.GetProp("bDeleteMe")))
+                        owner.PendingLoadedParticleLists.Add(placed.Runtime);
+                }
+                else if (export.Class is { } ci)
+                {
+                    if (!fxClass.TryGetValue(ci, out UClass fx))
+                        fxClass[ci] = fx = ExportClassOrNull(package, export) is { } c && UEInterpreter.ClassIsA(c, "ParticleFX") ? c : null;
+                    if (fx is not null && UELevelRuntime.CreatesParticleList(UEObject.ClassDefaultScalar(fx, "bDeleteMe")))
+                        owner.PendingLoadedParticleLists.Add(null);   // constructed, not in ULevel::Actors
+                }
             }
 
             // UE1 resolves every reference before any lifecycle event. Apply all
@@ -243,7 +270,7 @@ namespace HP1.UEScript
             string file = HP1.Core.UEClassRegistry.PhysicalPath(packagePath);
             if (!_exportPackages.TryGetValue(file, out UnrealPackage package))
             {
-                package = UnrealLoader.LoadPackage(packagePath, System.IO.FileAccess.Read);
+                package = HP1.UEScript.UEPackageOpen.Load(packagePath, System.IO.FileAccess.Read);
                 package.InitializePackage(UnrealPackage.InitFlags.All);
                 _exportPackages[file] = package;
             }
@@ -559,7 +586,7 @@ namespace HP1.UEScript
                     LoadImportedScriptPackages(registry.GetOrLoadPackage(path), mapPath);
                 else if (UEInstallPath.MapPackageFile(gameRoot, packageName) is string map)
                 {
-                    var package = UnrealLoader.LoadPackage(Path.GetFullPath(map), FileAccess.Read);
+                    var package = HP1.UEScript.UEPackageOpen.Load(Path.GetFullPath(map), FileAccess.Read);
                     package.InitializePackage(UnrealPackage.InitFlags.All);
                     registry.RegisterLevelPackage(package);   // released with the level (UELevelRuntime.ResetWorld)
                     LoadImportedScriptPackages(package, mapPath);
@@ -579,18 +606,22 @@ namespace HP1.UEScript
         // known to the registry (script, defaults, super chain) by cataloguing the map package (idempotent) and takes the
         // class by its export INDEX, not by name.
         internal static UClass ResolveExportClass(UnrealPackage package, UExportTableItem export, string className)
+            => ExportClassOrNull(package, export) ?? throw new InvalidDataException($"export class {ImportPackageName(export) ?? "<not an import>"}.{className} not found "
+                + "in the import package (VerifyImport; D-14 item 23 — short-name matching removed)");
+
+        // The script class of any export, or null when its class is not a script class of the catalogue (Core/Engine
+        // natives such as Model or Polys): such an object cannot be a ParticleFX.
+        static UClass ExportClassOrNull(UnrealPackage package, UExportTableItem export)
         {
-            var registry = HP1.Core.UEClassRegistry.Shared;
             if (export.Class is UExportTableItem own) return OwnClassExport(package, own.Index);
-            UnrealPackage home = registry.FindPackage(ImportPackageName(export));
+            string className = export.Class?.ObjectName?.ToString() ?? "";
+            UnrealPackage home = HP1.Core.UEClassRegistry.Shared.FindPackage(ImportPackageName(export));
             if (home is not null)
                 foreach (var e in home.Exports)
-                    if (e.Object is UClass c && e.OuterIndex == 0
-                        && string.Equals(c.Name, className, StringComparison.OrdinalIgnoreCase)
-                        && c.Super is not null)
+                    if (e.Object is UClass c && e.OuterIndex == 0 && c.Super is not null
+                        && string.Equals(c.Name, className, StringComparison.OrdinalIgnoreCase))
                         return c;
-            throw new InvalidDataException($"export class {ImportPackageName(export) ?? "<not an import>"}.{className} not found "
-                + "in the import package (VerifyImport; D-14 item 23 — short-name matching removed)");
+            return null;
         }
 
         // Class export #exportIndex0 (0-based) of `package`, through the catalogued instance of that package.

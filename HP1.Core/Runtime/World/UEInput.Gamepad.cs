@@ -141,7 +141,9 @@ namespace HP1.UEScript
         // AltFire = cast (Alt), LookToggle (Enter), broom brake/boost (Z/A), the arrow keys' commands on the left stick
         // directions. The d-pad has none (author decision 2026-11-13: with it the movement rows did not fit the page's key
         // buttons); the player may bind it, and in menus it navigates.
-        public static readonly (string Key, string Command)[] GamepadDefaultBindings =
+        public static (string Key, string Command)[] GamepadDefaultBindings
+            => UEGameProfile.Current.Game == UEEdition.Game.HP2 ? Hp2GamepadDefaultBindings : Hp1GamepadDefaultBindings;
+        static readonly (string Key, string Command)[] Hp1GamepadDefaultBindings =
         {
             ("Joy1", "Jump"),
             ("Joy3", "AltFire"),
@@ -153,6 +155,25 @@ namespace HP1.UEScript
             ("Joy14", "MoveBackward | Button bBroomPitchDown"),
             ("Joy15", "RotLeft | StrafeLeft | Button bBroomYawLeft"),
             ("Joy16", "RotRight | StrafeRight | Button bBroomYawRight"),
+        };
+        // HP2 (author decision 2026-11-16: HP1's improvements apply to HP2; NOT ORIGINAL). The same rule over HP2's shipped
+        // DefUser.ini where a key keeps its function: Jump (Ctrl: "Jump | Button bBroomAction"), AltFire = cast (Alt), the
+        // arrow keys' commands on the left stick directions (HP2's carry the spell-lesson Buttons, without HP1's strafes).
+        // Y, LB, RB keep HP1's commands (LookToggle, bBroomBrake, bBroomBoost: hgame reads them; HP2's DefUser.ini binds
+        // Enter to bSkipCutScene and Z/A to nothing / StrafeLeft). HP2-only keys (Tab map, 1-3 duel spells, Enter skip) get
+        // no pad default: an author choice (inventory hp2_improvements_parity.md); the player can bind them.
+        static readonly (string Key, string Command)[] Hp2GamepadDefaultBindings =
+        {
+            ("Joy1", "Jump | Button bBroomAction"),
+            ("Joy3", "AltFire"),
+            ("Joy4", "LookToggle"),
+            ("Joy5", "Button bBroomBrake"),
+            ("Joy6", "Button bBroomBoost"),
+            ("Joy12", "AltFire"),
+            ("Joy13", "MoveForward | Button bBroomPitchUp | Button bSpellLessonUp"),
+            ("Joy14", "MoveBackward | Button bBroomPitchDown | Button bSpellLessonDown"),
+            ("Joy15", "RotLeft | Button bBroomYawLeft | Button bSpellLessonLeft"),
+            ("Joy16", "RotRight | Button bBroomYawRight | Button bSpellLessonRight"),
         };
         // The pad's keys are the EInputKey Joy* family (Joy1-16, JoyX..JoyV, JoyPov*); no other key name starts with "Joy".
         internal static bool IsPadKey(string key) => key is not null && key.StartsWith("Joy", StringComparison.OrdinalIgnoreCase);

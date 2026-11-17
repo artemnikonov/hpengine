@@ -122,7 +122,7 @@ namespace HP1.UEScript
                 if (!Directory.Exists(sysDir)) throw new InvalidDataException($"procedural textures: no directory {sysDir}");
                 foreach (string pkgPath in UEInstallPath.PackageFiles(_root, "System").OrderBy(x => System.IO.Path.GetFileName(x), StringComparer.Ordinal))
                 {
-                    var pkg = UnrealLoader.LoadPackage(pkgPath, FileAccess.Read);
+                    var pkg = HP1.UEScript.UEPackageOpen.Load(pkgPath, FileAccess.Read);
                     pkg.InitializePackage(UnrealPackage.InitFlags.All);
                     foreach (var exp in pkg.Exports)
                     {
@@ -156,7 +156,7 @@ namespace HP1.UEScript
         UnrealPackage Open(string pkgPath, HashSet<string> textureClasses)
         {
             if (_open.TryGetValue(pkgPath, out var pkg)) return pkg;
-            pkg = UnrealLoader.LoadPackage(pkgPath, FileAccess.Read);
+            pkg = HP1.UEScript.UEPackageOpen.Load(pkgPath, FileAccess.Read);
             foreach (string tc in textureClasses) pkg.AddClassType(tc, typeof(UELib.Engine.UTexture));
             pkg.InitializePackage(UnrealPackage.InitFlags.All);
             _open[pkgPath] = pkg;

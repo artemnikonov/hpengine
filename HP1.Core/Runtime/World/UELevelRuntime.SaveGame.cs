@@ -26,6 +26,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using UELib.Core;
 using HP1.Core;
@@ -61,7 +62,12 @@ namespace HP1.UEScript
         //    across a shipped save load is not established, so the game's own ?RESTART/travel base stays untouched). A
         //    load restores it, and a save that does not fit the scripts restarts its level with it. Versions 1..4 have
         //    neither: written before mods existed — "saved without mods", GUIDs and entry set unknown.
-        const int SaveVersion = 5;
+        // 6: the ULevel::Actors SLOTS after the travel set: int32 S, S × int32 object-table index (< actors). The original
+        //    SaveGame ([HP1 0x103A2280] [HP2 0x103AB430]: PreSaveGame per slot, CleanupDestroyed(1), SavePackage)
+        //    serializes ULevel::Actors as is (ULevelBase::Serialize: Num, Max, one object reference per slot), so an actor
+        //    the shipped map holds in two slots (UEActorGraphLoader) is in two slots after the load too. Versions 1..5 wrote
+        //    each actor once; their slots are the actor records in order.
+        const int SaveVersion = 6;
         // COMPATIBILITY ACROSS BUILDS (author decision): a save of ANY earlier format
         // version must load. Game bytecode and map data are immutable, so only this
         // record can break the format: every change to it bumps SaveVersion and adds a
@@ -125,9 +131,18 @@ namespace HP1.UEScript
             // (vtbl+0xc0 = 0x10302419): a Core frame with its script and game RNG, BEFORE SavePackage;
             // the frontend only decides whether to show PendingProgressFrame.
             level.Props["LevelAction"] = (byte)2;
+            bool hp2 = UEGameProfile.Current.Game == UEEdition.Game.HP2;
             try
             {
-                PaintProgress(interp);
+                // HP2 UGameEngine::SaveGame [HP2 0x103ab430]: PreSaveGame on every actor (Actors(i)->ProcessEvent(
+                // FindFunctionChecked(PreSaveGame)), 0x103ab56a..0x103ab59d), then PaintProgress only when Viewports(0).Actor
+                // has no bShowLoadingScreen (+0x92c & 1, 0x103ab5a6..0x103ab5c7). PaintProgress [HP2 0x103a0550] is HP1's
+                // body (native_match: consts only — the FlashFog, draw-flag and Client offsets).
+                if (hp2)
+                    for (int i = 0; i < Actors.Count; i++)
+                        if (Actors[i] is UEObject a) UELifecycle.CallEvent(interp, a, "PreSaveGame");
+                if (!hp2 || !(Viewport?.GetProp(PK.Actor) is UEObject vpa && UEInterpreter.ToBool(vpa.GetProp("bShowLoadingScreen"))))
+                    PaintProgress(interp);
                 // 0x103a23af-0x103a23c5: delete Level->BrushTracker; = 0 — BEFORE
                 // CleanupDestroyed: the model is truncated to the constructor counts (mover fragments
                 // go away, UEMovingBrushTracker.cs); the destructor does not touch actors.
@@ -153,6 +168,16 @@ namespace HP1.UEScript
             finally { level.Props["LevelAction"] = (byte)0; }
         }
 
+        // HP2 UGameEngine::SaveGame's tail after GCache.Flush [HP2 0x103ab90d..0x103ab94f]: SavePersistentActorCache, the
+        // thumbnail copy (SetThumbnailForSaveSlot, from LevelInfo+0x458), then PostSaveGame on every actor.
+        internal void Hp2SaveGameTail(UEInterpreter interp, string slotDir, string systemDir)
+        {
+            SavePersistentActorCache(slotDir);
+            SetThumbnailForSaveSlot(slotDir, interp.GetLevelInfo()?.GetProp(PK.LevelEnterText) as string, systemDir);
+            for (int i = 0; i < Actors.Count; i++)
+                if (Actors[i] is UEObject a) UELifecycle.CallEvent(interp, a, "PostSaveGame");
+        }
+
         // FMemCache::Flush(&GCache, 0, ~0, 0) — Core.dll.c:93626-93680 (FUN_10127c70): Id 0 zeroes the mask, so every
         // item is flushed. The game-visible GCache items Core models: the skeleton headers (CFSkelHeader: pose, root
         // motion, tween — _skelCache) and the ULodMesh::GetFrame vertex tween caches (id index·0x100+0x1d,
@@ -163,6 +188,7 @@ namespace HP1.UEScript
         {
             _skelCache.Clear();
             _vertexFrames.Clear();
+            _actorLights?.Lighting.FlushCache();   // SetupForActor's actor caches (UEActorLighting, key Index·0x100+0x30)
             if (EntryWorld is UELevelRuntime e && !ReferenceEquals(e, this)) e.FlushGCache();
         }
 
@@ -316,9 +342,15 @@ namespace HP1.UEScript
             }
         }
 
-        byte[] SerializeWorld(UEInterpreter interp, UEObject level, IReadOnlyList<string> mods)
+        // The world as SaveGame writes it, without saving (no LevelAction, progress frame, brush tracker, CleanupDestroyed or
+        // GCache flush, not counted in SaveSerializations): the Core-thread judge's per-tick world digest
+        // (hpengine --world-digest, audit/core_thread_judge.sh) — state the per-tick projection digest does not cover.
+        public byte[] WorldStateBytes(UEInterpreter interp)
+            => SerializeWorld(interp, interp.GetLevelInfo() ?? throw new InvalidOperationException("WorldStateBytes: no LevelInfo"), null, save: false);
+
+        byte[] SerializeWorld(UEInterpreter interp, UEObject level, IReadOnlyList<string> mods, bool save = true)
         {
-            SaveSerializations++;
+            if (save) SaveSerializations++;
 
             // Object table: first ULevel::Actors in their order, then everything
             // reachable from properties that is neither an actor nor a struct.
@@ -345,16 +377,27 @@ namespace HP1.UEScript
             w.Write(actorCount);
             w.Write(table.Count);
             _saveDeps = new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            // The entry travel set follows the package record in the file, but its class values are dependencies too
+            // (e.g. a travelling class-valued property): written first into its own buffer, appended after the record.
+            using var travel = new MemoryStream();
             try
             {
                 for (int i = 0; i < table.Count; i++) WriteObject(w, table[i], index, interp);
+                using (var tw = new BinaryWriter(travel, Encoding.UTF8, leaveOpen: true))
+                {
+                    WriteEntryTravel(tw, LevelEntryTravel);
+                    var slots = Actors.Where(a => a is not null).ToList();
+                    tw.Write(slots.Count);
+                    foreach (UEObject a in slots) tw.Write(index[a]);
+                }
                 // Script packages (format 5).
                 w.Write(_saveDeps.Count);
                 foreach (var kv in _saveDeps) { w.Write(kv.Key); w.Write(kv.Value); }
             }
             finally { _saveDeps = null; }
-            WriteEntryTravel(w, LevelEntryTravel);
+            w.Write(travel.ToArray());
             w.Flush();
+            if (!save) return ms.ToArray();
             Log($"savegame_entry_travel {EntryTravelText(LevelEntryTravel)}");
             Log($"savegame map={Path.GetFileName(LoadedMapPath)} actors={actorCount} objects={table.Count} bytes={ms.Length} "
                 + $"clock={_clockFixed} time={UEInterpreter.AsFloat(level.GetProp(PK.TimeSeconds))} "
@@ -362,9 +405,13 @@ namespace HP1.UEScript
             return ms.ToArray();
         }
 
+        // A CPF_Transient property is not serialized (WriteObject, TransientProps), so SavePackage never tags an object
+        // reached only through one — e.g. the ParticleFX constructor's UParticleListPriv (ParticleList, transient, no UClass):
+        // the load's constructor makes it again (UELevelRuntime.CreateParticleList).
         void CollectReachable(UEObject o, List<UEObject> table, Dictionary<UEObject, int> index)
         {
-            foreach (var kv in o.Props) CollectValue(kv.Value, table, index);
+            HashSet<string> transient = o.IsStruct ? null : TransientProps(o.Class);
+            foreach (var kv in o.Props) if (transient is null || !transient.Contains(kv.Key)) CollectValue(kv.Value, table, index);
             if (o.StateFrame?.Variables is not null)
                 foreach (var kv in o.StateFrame.Variables) CollectValue(kv.Value, table, index);
         }
@@ -654,9 +701,10 @@ namespace HP1.UEScript
                 scan.EntryTravelAt = r.BaseStream.Position;
                 SkipEntryTravel(r);
             }
+            if (ver >= 6) ReadActorSlots(r, actorCount);
             if (r.BaseStream.Position != r.BaseStream.Length)
                 throw new InvalidDataException($"{r.BaseStream.Length - r.BaseStream.Position} extra bytes after the "
-                    + (ver >= 5 ? "level-entry travel set" : "object table"));
+                    + (ver >= 6 ? "actor slots" : ver >= 5 ? "level-entry travel set" : "object table"));
             return scan;
         }
 
@@ -669,6 +717,18 @@ namespace HP1.UEScript
             if (n < 0) throw new InvalidDataException("mod count < 0");
             for (int i = 0; i < n; i++) mods.Add(r.ReadString());
             return mods;
+        }
+
+        // Format 6: the ULevel::Actors slots, each an index into the actor records.
+        static int[] ReadActorSlots(BinaryReader r, int actorCount)
+        {
+            int n = r.ReadInt32();
+            if (n < 0) throw new InvalidDataException("actor slot count < 0");
+            var slots = new int[n];
+            for (int i = 0; i < n; i++)
+                if ((slots[i] = r.ReadInt32()) < 0 || slots[i] >= actorCount)
+                    throw new InvalidDataException($"actor slot {i}: record {slots[i]} is not one of the {actorCount} actors");
+            return slots;
         }
 
         static List<(string, string)> ReadDeps(BinaryReader r)
@@ -825,6 +885,7 @@ namespace HP1.UEScript
                             $"LoadSavedWorld: {clsName}#{i} carries {dis} entries of the removed event-disable table "
                             + "(D-20) — the game did not write it; the file is not a game save");
                     bool hasFrame = r.ReadBoolean();
+                    Action restoreFrame = null;
                     if (hasFrame)
                     {
                         string stName = r.ReadString();
@@ -834,11 +895,15 @@ namespace HP1.UEScript
                         LatentRunState latent = ver >= 3 ? LatentFromName(r.ReadString()) : LatentFromV2(r.ReadInt32());
                         float sleep = r.ReadSingle();
                         var vars = ReadProps(r, table, interp, $"{clsName}#{i}.StateFrame");
-                        interp.RestoreStateFrame(table[i], stName, stOwner, cursor, probe, latent, sleep, vars,
+                        UEObject o = table[i];
+                        restoreFrame = () => interp.RestoreStateFrame(o, stName, stOwner, cursor, probe, latent, sleep, vars,
                             cursorIsCodeOffset: ver >= 3);
                     }
                     var props = ReadProps(r, table, interp, $"{clsName}#{i}");
                     foreach (var kv in props) table[i].Props[kv.Key] = kv.Value;
+                    // After the properties: the frame's sleep slot writes LatentFloat (UEFrame.SleepTimeLeft); a save from
+                    // before it became the property carries LatentFloat 0 in its properties and the remaining time here.
+                    restoreFrame?.Invoke();
                 }
                 // Format 5 trailer: the script packages (checked before teardown) and the level-entry travel set, which
                 // BootstrapLoadedWorld makes this level's TravelInfo again. 1..4: unknown, the level carries none.
@@ -848,6 +913,7 @@ namespace HP1.UEScript
                     ReadDeps(r);
                     _loadedEntryTravel = ReadEntryTravel(r, interp, mapPath, null);
                 }
+                int[] slots = ver >= 6 ? ReadActorSlots(r, actorCount) : Enumerable.Range(0, actorCount).ToArray();
                 // Which packages the load ITSELF brought up (the catalog only grows):
                 // witness that the "package not yet in the process" branch ran.
                 var raised = new List<string>();
@@ -856,8 +922,8 @@ namespace HP1.UEScript
                 // References resolved by table indices: objects were created in the
                 // first loop BEFORE reading properties, so an ObjRef to a not yet
                 // read object points at an already existing instance.
-                var actors = new List<UEObject>(actorCount);
-                for (int i = 0; i < actorCount; i++) actors.Add(table[i]);
+                var actors = new List<UEObject>(slots.Length);
+                foreach (int i in slots) actors.Add(table[i]);
                 // The save package is `open saveN.usa`: package name from URL.Map
                 // (saveN), not the map it was taken on. Without a travel request
                 // (direct call) there is no name — the actor path becomes a STOP label.
@@ -1279,7 +1345,11 @@ namespace HP1.UEScript
             ArmLoadStutter();                  // see UELevelRuntime.EmulateLoadStutter
             cfg.TravelInfo = null;
             WriteLoadMapComputerName(interp);                      // 246880..246917
+            // HP2 LoadMap calls it for a save package too (0x103a62c6..0x103a62f0): URL.Map is the save's path, so the
+            // name is <Save N>.usa_pa.usa — a file SAVEPACTORS never writes (it names files by LevelEnterText).
+            LoadPersistentActors(interp);
             AdoptLoadedUrl(cfg);
+            WriteLoadMapVersions(interp);                          // HP1 0x1039d3c1, HP2 0x103a63f4
             // The loaded level keeps the entry set it was saved with (format 5), not the empty one of this load (D-82).
             LevelEntryTravel = _loadedEntryTravel ?? new Dictionary<string, List<TravelActor>>(UEPropNameComparer.Instance);
             _loadedEntryTravel = null;
@@ -1309,10 +1379,28 @@ namespace HP1.UEScript
             return pawn;
         }
 
-        public UEObject LoadSavedWorldAndBootstrap(UEInterpreter interp, string mapPath, byte[] data, PlayWorldConfig cfg)
+        public UEObject LoadSavedWorldAndBootstrap(UEInterpreter interp, string mapPath, byte[] data, PlayWorldConfig cfg,
+            string urlMap = null)
         {
+            _loadUrlMap = urlMap;   // URL.Map of this LoadMap (the save's path): HP2's LoadPersistentActors takes it
             TeardownPlayWorld(interp);
             LoadSavedWorld(mapPath, data, interp);
+            // The save package's exports are CreateExport'ed, and AParticleFX's constructor (CreateParticleList [HP1 0x103C1B70]
+            // [HP2 0x103CF030]) makes the particle list of every emitter whose class default bDeleteMe ([this+0x28] & 0x200 /
+            // HP2 0x400: AActor's first bool word, hp2_particles.md item 1) is false — both games; the save never carries the
+            // lists (ParticleList is transient, CollectReachable).
+            {
+                var defaults = new Dictionary<UClass, UEObject>(UERefComparer<UClass>.Instance);
+                foreach (UEObject fx in Actors)
+                {
+                    if (fx is null || !UEInterpreter.ClassIsA(fx.Class, "ParticleFX")) continue;
+                    if (!defaults.TryGetValue(fx.Class, out UEObject cdo))
+                    { cdo = new UEObject { Class = fx.Class, Interp = interp }; cdo.LoadDefaults(); defaults[fx.Class] = cdo; }
+                    if (CreatesParticleList(cdo.GetProp("bDeleteMe"))) AttachParticleList(interp, fx);
+                }
+                Log($"load_savegame_particle_lists emitters={Actors.Count(a => a is not null && UEInterpreter.ClassIsA(a.Class, "ParticleFX"))} "
+                    + $"lists={Actors.Count(a => a?.GetProp("ParticleList") is not null)}");
+            }
             BuildLoadMapScreenOfLoadedLevel(interp);
             return BootstrapLoadedWorld(interp, cfg);
         }
@@ -1351,8 +1439,21 @@ namespace HP1.UEScript
         // `[Core.System] SavePath=../Save` relative to System (headless —
         // the same `<game>/Save`), a frontend may use its host's writable directory.
         // The file NAME is the shipped name in both cases, without an extension of our own.
+        // HP2 reads its directory from GSys+0x40 instead of GSys->SavePath (+0x34): HP2 bodies
+        // Engine.dll ?execSaveGameSaveInfo@AActor@@QAEXAAUFFrame@@QAX@Z [HP1 0x10413d10] [HP2 0x104224e0] (0x10422586) and
+        // Engine.dll ?execLoadGameSaveInfo@AActor@@QAEXAAUFFrame@@QAX@Z [HP1 0x10413f70] [HP2 0x10422760] (0x1042284a);
+        // otherwise HP1's: a NULL Info gives 0 before the path is made (load only), the record and the answer the same.
         public static string GameSaveInfoPath(string saveDir, string name)
             => Path.Combine(saveDir, name ?? "");
+
+        // Original: Core.dll not exported: appInit's save-slot tail [HP2 0x101571a2..0x10157249] (after the "SAVESLOT="
+        // string 0x101b981c; the same text as ?appSetSaveSlotDir@@YAPBGH@Z [HP2 0x101566e0], which nothing calls):
+        // Parse(appCmdLine(), "SAVESLOT=", n) ? GSys+0x40 = GSys->SavePath * "Slot" + appSprintf("%d", n)
+        //                                     : GSys+0x40 = GSys->SavePath;
+        // then GFileManager->MakeDirectory(GSys+0x40). The port's SavePath is its own save directory (D-01); the slot
+        // directory below it is the original's rule (DECISIONS.md 2026-11-16, save slot directory, option a).
+        public static string SaveSlotDir(string saveDir, int? slot)
+            => slot is int n ? Path.Combine(saveDir, "Slot" + n.ToString(System.Globalization.CultureInfo.InvariantCulture)) : saveDir;
 
         public static bool WriteGameSaveInfo(string path, UEObject info)
         {
@@ -1383,6 +1484,57 @@ namespace HP1.UEScript
                 && !File.Exists(SaveBodyPath(saveDir, "save" + name.Substring(prefix.Length))))
                 return false;
             return ReadGameSaveInfo(GameSaveInfoPath(saveDir, name), info);
+        }
+
+        // Original: Engine.dll ?SetThumbnailForSaveSlot@UGameEngine@@QAE_NXZ [HP2 0x103abb00] (HP2 only; UGameEngine::SaveGame
+        // calls it after SavePersistentActorCache, 0x103ab916). No screenshot: a shipped BMP is copied.
+        //   name = Info+0x458 (the level's name field) from after its last '\' (an inlined InStr from the end,
+        //          0x103abc50..0x103abc9e; none: the whole text), cut at its first '.' (appStrstr, then Left(InStr(".")),
+        //          0x103abd25..0x103abd7a);
+        //   src  = appBaseDir() * "Thumbnails" * name + ".bmp"; FileSize(src) > 0 ?               (0x103abd9a..0x103abe41)
+        //            GFileManager->Copy(GSys+0x40 * "Save0.bmp", src, 1, 1, 0, 0)               (0x103abe8e)
+        //        : the same with appBaseDir() * "Thumbnails" * "Default.bmp"                       (0x103abf69)
+        // The slot-directory and name pointer tests at entry (0x103abb3a, 0x103abbab) test a Data-or-"" pointer, never
+        // NULL: they never return early. Always Save0.bmp, whatever the save number. systemDir: appBaseDir, the install's
+        // System; the file is found as Windows finds it (UEInstallPath: case-insensitive).
+        public static void SetThumbnailForSaveSlot(string slotDir, string levelName, string systemDir)
+        {
+            string name = levelName ?? "";
+            name = name.Substring(name.LastIndexOf('\\') + 1);
+            int dot = name.IndexOf('.');
+            if (dot >= 0) name = name.Substring(0, dot);
+            foreach (string leaf in new[] { name + ".bmp", "Default.bmp" })
+                if (UEInstallPath.File(Path.Combine(systemDir, "Thumbnails", leaf)) is { } src && new FileInfo(src).Length > 0)
+                {
+                    File.Copy(src, Path.Combine(slotDir, "Save0.bmp"), overwrite: true);
+                    return;
+                }
+        }
+
+        // Original: Core.dll ?SerializeTaggedPersistentProperties@UStruct@@QAEXAAVFArchive@@PAEPAVUClass@@@Z [HP2 0x10129300]
+        // (HP2 only), the save branch 0x101297f9..0x10129a74 — what AActor::SerializePersistence [HP2 0x103811d0] writes of
+        // a bPersistent actor into its map's PA file (ULevel::SavePersistentActors [HP2 0x103b9030]). Every UProperty of
+        // the struct chain (TFieldIterator: Children +0x38, Next +0x2c, then GetInheritanceSuper vt+0x6c) but
+        //   PropertyFlags & 0x1000 (0x1012984a), PropertyFlags & 0x2000 while ArIsPersistent (0x10129853; the PA file
+        //   writer and reader both set it, Game.exe 0x109093ce / 0x109087fc), the name AuxAnims (FName compare, 0x1012987b);
+        // each of its ArrayDim elements (0x1012988b) — no comparison with the class defaults. Object and class values carry
+        // nothing (UObjectProperty::SerializeItem -> Ar << UObject*&, vt+0x18, FArchive's no-op in both PA archives); a
+        // load reads them back as nothing too (FPropertyTag::SerializeTaggedProperty 0x1012ee00 never uses the tag Size),
+        // so they keep the level's value. persistent(flags): the pure rule; names come with their ArrayDim.
+        internal static IEnumerable<(string Name, int Dim)> Hp2PersistentProperties(IEnumerable<(string Name, ulong Flags, int Dim)> chain)
+        {
+            foreach (var (name, flags, dim) in chain)
+                if ((flags & 0x1000) == 0 && (flags & 0x2000) == 0 && !string.Equals(name, "AuxAnims", StringComparison.OrdinalIgnoreCase))
+                    yield return (name, dim);
+        }
+
+        internal static IEnumerable<(string Name, int Dim)> Hp2PersistentProperties(UClass cls)
+        {
+            var chain = new List<(string, ulong, int)>();
+            for (UClass c = cls; c is not null; c = UEInterpreter.CanonicalSuper(c))
+                foreach (UProperty p in c.EnumerateFields<UProperty>())
+                    if (p is not null) chain.Add((p.Name.ToString(), Convert.ToUInt64(p.PropertyFlags), p.ArrayDim));
+            return Hp2PersistentProperties(chain);
         }
 
         // The port's save body (D-01, own format): `SaveGame N` writes and `open saveN.usa` reads this file.

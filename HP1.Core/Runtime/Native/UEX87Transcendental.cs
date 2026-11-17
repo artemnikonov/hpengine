@@ -122,6 +122,7 @@ namespace HP1.Core
         // 0x780289e3 NaN -> NaN (a signalling one quieted by fadd qword [0x78030018]); ±inf -> the indefinite NaN.
         // The error paths (_87except, _matherr, errno) only change the value through a user _matherr: none modelled,
         // the value is NaN.
+        // Original: MSVCRT.dll _CIacos (system msvcrt 6.00.8337.0, 0x78028905; not shipped, called from Core 0x101260c0)
         public static X87Ext CIacos(X87Ext x, bool pc24)
         {
             if (x.IsNaN) return x;                              // fld quieted it; fadd of a number keeps it
@@ -133,7 +134,9 @@ namespace HP1.Core
                 if (Math.Abs(d) != 1.0) return X87Ext.Indefinite;   // fld tbyte [0x7803ae20]
                 if (d > 0) return X87Ext.From(0f);              // fldz: exact, rounding to double changes nothing
                 // fldpi sets no precision flag: the result is the 80-bit π or the double π depending on the caller's
-                // sticky PE, which the port does not model. No shipped caller passes −1 (SlerpQuat: |cos| < 1).
+                // sticky PE, which the port does not model. Unreachable (an invariant, not a gap): the only caller is
+                // SlerpQuat (Core 0x1014f5a0), which passes |cos| after fchs (0x1014f5da) and only when |cos| < 1, and
+                // Core.u declares no Acos native, so no script reaches _CIacos.
                 throw new NotSupportedException("_CIacos(-1): result depends on the caller's sticky x87 precision flag (not modelled)");
             }
             X87Ext R(X87Ext v) => pc24 ? X87Ext.Round24(v) : X87Ext.Round64(v);
@@ -458,13 +461,16 @@ namespace HP1.Core
         // appExp (Core 0x10126060): fldl2e; fmul qword [esp+4]; fld st0; frndint; fxch st1; fsub st,st1;
         // f2xm1; fld1; faddp st1,st; fscale; fstp st1. fmul, fsub and fadd round at the caller's precision control (PC24
         // inside the render window, PC64 outside); fldl2e (RC nearest: 0x3FFF:B8AA3B295C17F0BC), frndint (nearest even)
-        // and fscale (exact) do not depend on PC; f2xm1 by the model (F2xm1). Operands that would make fscale overflow,
-        // underflow or meet inf/NaN are refused: no shipped caller reaches them (particle damping, AWind fluctuation).
+        // and fscale do not depend on PC; f2xm1 by the model (F2xm1). Every exception is masked in both shipped control
+        // words (0x037F, 0x007F): a NaN operand passes every step; ±inf makes fsub ±inf − ±inf (the indefinite);
+        // fscale's masked overflow is +inf, its masked underflow the 80-bit denormal (Fscale).
         static readonly X87Ext L2E = X87Ext.FromScaled(new BigInteger(0xB8AA3B295C17F0BCUL), -63);
         // Memo: the Ziv evaluation costs ~30 us; particle substeps repeat (step, Damping) pairs. Cleared past 4096 entries.
         static readonly ConcurrentDictionary<(double, bool), X87Ext> ExpMemo = new();
+        // Original: Core.dll ?appExp@@YANN@Z [HP1 0x10126060] (thunk 0x10102d51)
         public static X87Ext AppExp(double x, bool pc24)
         {
+            if (double.IsNaN(x)) return AppExpBody(x, pc24);   // NaN keys of different payloads compare equal: no memo
             if (ExpMemo.TryGetValue((x, pc24), out X87Ext hit)) return hit;
             if (ExpMemo.Count > 4096) ExpMemo.Clear();
             return ExpMemo[(x, pc24)] = AppExpBody(x, pc24);
@@ -474,7 +480,9 @@ namespace HP1.Core
         {
             X87Ext R(X87Ext v) => pc24 ? X87Ext.Round24(v) : X87Ext.Round64(v);
             X87Ext t = R(L2E * X87Ext.From(x));
-            if (!t.IsFinite) throw new NotSupportedException($"appExp({x}): non-finite operand (not modelled)");
+            // NaN: frndint keeps it, fsub of the same NaN twice, f2xm1, faddp and fscale pass it on. ±inf: frndint keeps
+            // it and fsub ±inf − ±inf is an invalid operation: the indefinite, passed on the same way.
+            if (!t.IsFinite) return t.IsNaN ? t : X87Ext.Indefinite;
             var (m, e) = t.Scaled;
             BigInteger n = m;
             if (e < 0)
@@ -484,15 +492,79 @@ namespace HP1.Core
                 n = m.Sign < 0 ? -q : q;
             }
             else n = m << e;
-            if (BigInteger.Abs(n) > 16000) throw new NotSupportedException($"appExp({x}): fscale out of the 80-bit range (not modelled)");
             X87Ext f = R(t - X87Ext.FromScaled(n, 0));
             X87Ext s = R(X87Ext.From(1f) + F2xm1(f));
+            return Fscale(s, n);
+        }
+
+        // fscale of appExp's sum s (finite, > 0) by the integer n: exact inside the 80-bit range; past it the masked
+        // responses (Intel SDM vol. 1 §4.9.1.4 overflow: RC nearest -> +inf; §4.9.1.5 underflow: the result denormalized,
+        // rounded to the denormal grid 2^-16445, nearest even). |n| is unbounded: |t| reaches 4.9e38 for a float x.
+        static X87Ext Fscale(X87Ext s, BigInteger n)
+        {
             var (sm, se) = s.Scaled;
-            return X87Ext.FromScaled(sm, se + (int)n);
+            BigInteger e = se + n, top = e + (long)sm.GetBitLength() - 1;
+            if (top > 16383) return X87Ext.From(float.PositiveInfinity);
+            if (top >= -16382) return X87Ext.FromScaled(sm, (int)e);
+            BigInteger shift = -16445 - e;                  // bits below the denormal grid
+            if (shift <= 0) return X87Ext.FromScaled(sm, (int)e);   // already on it
+            if (shift > sm.GetBitLength()) return X87Ext.From(0f);   // under half of 2^-16445
+            int k = (int)shift;
+            BigInteger half = BigInteger.One << (k - 1), q = BigInteger.DivRem(sm + half, half << 1, out BigInteger rem);
+            if (rem.IsZero && !q.IsEven) q -= 1;            // a tie rounds to even
+            return X87Ext.FromScaled(q, -16445);
+        }
+
+        // appLoge (Core 0x10126080): fldln2; fld qword [esp+4]; fyl2x; ret. fldln2 loads ln 2 rounded to 64 bits
+        // (RC nearest: 0x3FFE:B17217F7D1CF79AC); fld and fyl2x do not depend on PC (no window branch).
+        static readonly X87Ext LN2 = X87Ext.FromScaled(new BigInteger(0xB17217F7D1CF79ACUL), -64);
+
+        // Original: Core.dll ?appLoge@@YANN@Z [HP1 0x10126080] (thunk 0x10102d15)
+        public static X87Ext AppLoge(double x) => Fyl2x(LN2, X87Ext.From(x));
+
+        // fyl2x: st1 = y, st0 = x -> y·log2(x) CORRECTLY ROUNDED to the 64-bit mantissa (the D-71 rule of fsin / fpatan /
+        // f2xm1), PC not applied. Only y finite > 0 (fldln2) is reachable. Intel SDM FYL2X table, row ST(1) = +F, every
+        // exception masked: x NaN -> x; x < 0 or −inf -> the indefinite; x = ±0 -> −inf (divide by zero); x = +inf ->
+        // +inf; x = 1 -> +0. Otherwise x = M·2^k with u = M/2^(L−1) in (√2/2, √2]: log2 x = k + 2·atanh(z)/ln 2,
+        // z = (u − 1)/(u + 1) exact, |z| <= 0.172; x a power of two: y·k exact, rounded once.
+        static X87Ext Fyl2x(X87Ext y, X87Ext x)
+        {
+            if (!y.IsFinite || y.Sign <= 0) throw new NotSupportedException("fyl2x: st1 other than a positive finite value is not modelled");
+            if (x.IsNaN) return x;
+            if (x.IsInfinity) return x.IsNegative ? X87Ext.Indefinite : x;
+            if (x.Sign == 0) return X87Ext.From(float.NegativeInfinity);
+            if (x.Sign < 0) return X87Ext.Indefinite;
+            x = X87Ext.Round64(x);
+            var (mx, ex) = x.Scaled; var (my, ey) = y.Scaled;
+            int len = (int)mx.GetBitLength();
+            BigInteger lead = BigInteger.One << (len - 1);
+            long k = ex + len - 1;
+            if (mx * mx > lead * lead * 2) { lead <<= 1; k++; }   // u > √2 -> u/2
+            BigInteger p = mx - lead, q = mx + lead;            // z = p/q
+            if (p.IsZero) return X87Ext.Round64(X87Ext.FromScaled(my * k, ey));
+            return Ziv(prec =>
+            {
+                int g = prec + 20 + (int)(q.GetBitLength() - BigInteger.Abs(p).GetBitLength());   // relative to z
+                Approx lnU = Atanh(p, q, g);
+                lnU = new Approx(lnU.V, lnU.Err, lnU.Exp + 1);  // 2·atanh(z)
+                Approx v = Div(lnU, Ln2(g + 8), prec + 8) + new Approx(k, 0, 0);
+                return new Approx(my, 0, ey) * v;
+            });
+        }
+
+        // atanh(p/q), |p/q| <= 0.172, at 2^−g: Z = trunc(2^g·p/q) (error < 1), Z2 = floor(Z²/2^g), t_j = t_{j−1}·Z2/2^g
+        // truncated, term t_j/(2j+1): <= 3 units each; z's own error passes through 1/(1 − z²) < 1.04: <= 2 units.
+        static Approx Atanh(BigInteger p, BigInteger q, int g)
+        {
+            BigInteger z = (BigInteger.Abs(p) << g) / q, z2 = (z * z) >> g, t = z, sum = z;   // on |z|: >> floors
+            int j = 0;
+            while (!t.IsZero) { j++; t = (t * z2) >> g; sum += t / (2 * j + 1); }
+            return new Approx(p.Sign < 0 ? -sum : sum, 3 * j + 6, -g);
         }
 
         // f2xm1: 2^x − 1 CORRECTLY ROUNDED to the 64-bit mantissa (the same rule as fsin/fpatan), PC not
-        // applied; ±0 -> ±0. Only |x| <= 1/2 is modelled (frndint leaves appExp's operand there); beyond that a refusal.
+        // applied; ±0 -> ±0. Only |x| <= 1/2 is modelled: the only caller is appExp, whose operand is t − frndint(t)
+        // (|.| <= 1/2 exactly, and rounding it at PC24 / PC64 keeps it there) or NaN; the refusal is an invariant.
         public static X87Ext F2xm1(X87Ext x)
         {
             if (x.IsNaN) return x;

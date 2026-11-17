@@ -53,7 +53,10 @@ namespace HPEngine.Audio
             return (int)X87Ext.Round64(x * X87Ext.From(127f)).TruncateToInteger();  // 0x1063a3e8
         }
 
-        // Integer L/R gains (0..0x7fff) of a voice with volume vol and pan pan.
+        // Integer L/R gains (0..0x7fff) of a voice with volume vol and pan pan. Pan bit 15 (UseSurround's 0xc000,
+        // Update 0x10608abd) is call flag 4 (:12940 `uVar4 >> 0xd & 4`); the mixer template then negates the RIGHT words
+        // of all three buses (0x106200f4-0x10620102: neg [ebp+0x28], [ebp+0x30], [ebp+0x38]) — a right gain of -R here,
+        // and GalaxyMixKernel.Send keeps the negation outside its shift.
         public static void Gains(int vol, int pan, int master, out int left, out int right)
         {
             int a = (InitVolume12 * master * master * 2) >> 15;
@@ -65,6 +68,7 @@ namespace HPEngine.Audio
             int p = pan & 0x7fff;
             right = (UEGalaxyVoiceMix.PanTable(p) * a) >> 15;
             left = (UEGalaxyVoiceMix.PanTable(0x7fff - p) * a) >> 15;
+            if ((pan & 0x8000) != 0) right = -right;
         }
     }
 }

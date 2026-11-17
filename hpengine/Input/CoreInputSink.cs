@@ -60,6 +60,7 @@ namespace HPEngine.Input
             _rt.Input.ResetInputFull(_interp, Console, Player);
         }
 
+        public void AudioViewport(bool present) => _rt.FrameProducer?.AudioDevice?.SetViewport(present);
 
         // Window device (the same as Core's UseViewportDevice); without it Alt+Enter is a loud refusal.
         public IViewportDevice Viewport;
@@ -67,7 +68,7 @@ namespace HPEngine.Input
         public void ToggleFullscreen()
         {
             if (Viewport is null) { Warn?.Invoke("[Input] Alt+Enter: the sink has no window device — screen not switched"); return; }
-            UEConsoleCommand.Execute(_rt.Config, "ToggleFullscreen", null, Viewport);
+            UEConsoleCommand.ToggleFullscreen(_rt.Config, Viewport);
         }
     }
 }

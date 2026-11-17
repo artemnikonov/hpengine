@@ -263,6 +263,16 @@ namespace HP1.UEScript
         }
 
         // APawn::physSpider 0x103f4a00 (APawn::performPhysics case 10).
+        // HP2's speed clamp test [HP2 0x10401245..0x10401273]: MaxSpeed² below (X² + Y²) + Z² (HP1: (Y² + Z²) + X²), in the
+        // register; C0 as the original tests it.
+        internal static bool SpiderOverSpeed(Vector3 v, float maxSpeed, bool hp2) => RsLt(SwR(SwX(maxSpeed) * SwX(maxSpeed)), hp2
+            ? SwR(SwR(SwR(SwX(v.x) * SwX(v.x)) + SwR(SwX(v.y) * SwX(v.y))) + SwR(SwX(v.z) * SwX(v.z)))
+            : SwR(SwR(SwR(SwX(v.y) * SwX(v.y)) + SwR(SwX(v.z) * SwX(v.z))) + SwR(SwX(v.x) * SwX(v.x))));
+
+        internal static bool SpiderKeepsYaw(Vector3 floor) => RsEq(SwX(floor.x), SwX(0f)) && RsEq(SwX(floor.y), SwX(0f))
+            && System.BitConverter.SingleToInt32Bits(floor.z) == 0x3f800000;
+
+        // Original: Engine.dll ?physSpider@APawn@@QAEXMH@Z [HP1 0x103F4A00] [HP2 0x10400F40]
         public void PhysSpider(UEInterpreter interp, UEObject actor, float dt, int iterations)
         {
             UEObject zone = RsZone(actor);
@@ -307,8 +317,7 @@ namespace HP1.UEScript
             float maxSpeed = SwF(SwX(UEInterpreter.AsFloat(actor.GetProp(PK.GroundSpeed)))
                 * SwX(UEInterpreter.AsFloat(actor.GetProp(PK.DesiredSpeed))));
             iterations++;
-            if (RsLt(SwR(SwX(maxSpeed) * SwX(maxSpeed)),
-                    SwR(SwR(SwR(SwX(vel.y) * SwX(vel.y)) + SwR(SwX(vel.z) * SwX(vel.z))) + SwR(SwX(vel.x) * SwX(vel.x)))))
+            if (SpiderOverSpeed(vel, maxSpeed, UEGameProfile.Current.Game == UEEdition.Game.HP2))
             {
                 Vector3 n = vel.normalized;
                 vel = new Vector3(SwF(SwX(maxSpeed) * SwX(n.x)), SwF(SwX(maxSpeed) * SwX(n.y)), SwF(SwX(maxSpeed) * SwX(n.z)));
@@ -351,6 +360,10 @@ namespace HP1.UEScript
             floor = UEInterpreter.AsVector3(actor.GetProp(PK.Floor));
             UERotator fr = UEValue.RotatorFromVector(floor);
             actor.Props["DesiredRotation"] = new UERotator(unchecked(fr.Pitch + -0x4000), fr.Yaw, 0);
+            // HP2 [0x1040166b..0x10401699]: on a floor of exactly (0, 0, 1) (X and Y compare equal to 0 — C3, a NaN too — Z
+            // the bits of 1.0f) the yaw is kept: DesiredRotation.Yaw = Rotation.Yaw.
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2 && SpiderKeepsYaw(floor))
+                actor.Props["DesiredRotation"] = new UERotator(unchecked(fr.Pitch + -0x4000), RsRot(actor, PK.Rotation).Yaw, 0);
             Vector3 dirOrig = dir;   // [ebp-0x30]
             X87Ext dotAF = SwR(SwR(SwR(SwX(accDir.y) * SwX(floor.y)) + SwR(SwX(accDir.z) * SwX(floor.z)))
                 + SwR(SwX(accDir.x) * SwX(floor.x)));

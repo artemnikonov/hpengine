@@ -23,7 +23,8 @@ reads the maps, UnrealScript code, textures, sounds and music from a copy you ow
 
 Until version 0.2.0 this project was called OpenHP1.
 
-Status: **beta (0.3.0)**. Only Harry Potter 1 is playable; Harry Potter 2 is planned. The full campaign was completed
+Status: **beta (0.4.0)**. Only Harry Potter 1 is playable; Harry Potter 2 is planned (the launcher shows its tab as
+"Coming soon"). The full campaign was completed
 on 0.1.0. Coming from 0.1.0? See [CHANGELOG.md](CHANGELOG.md) for how to move your saves.
 
 ## Quick start
@@ -62,8 +63,8 @@ Step by step, with the first-launch warnings of macOS and Windows: [Install](#in
   scaled by whole pixels, and fast displays get up to 120 interpolated frames per second while the game logic keeps
   its native 60 Hz.
 - **Easy setup.** A launcher on macOS, Windows and Linux installs the game from the CD, the game's installer or an
-  already installed folder (on macOS also from a disc image), switches mods on and off and starts the game. On macOS
-  it also keeps itself up to date.
+  already installed folder (on macOS also from a disc image), switches mods on and off, starts the game and keeps
+  itself up to date. It works with the mouse, the keyboard or a gamepad.
 
 <table>
   <tr>
@@ -92,7 +93,8 @@ detail, marked "not original", under [Differences from the original](docs/differ
 
 - **Picture:** wide-screen view without stretching (menus and 2D screens stay 4:3), sharp interface at every size,
   smooth motion up to 120 fps, 16x anisotropic and trilinear filtering, models at full detail at any distance, no dark
-  band on glasses, light flares hidden behind Harry instead of shining through him.
+  band on glasses, light flares hidden behind Harry instead of shining through him, Harry's robe not showing through
+  his neck at high resolutions.
 - **Timing:** the game logic is locked to 60 Hz, as its scripts assume; it never runs fast on high-refresh displays,
   and torch flames do not stop above 128 fps as they do in the original.
 - **Sound:** mixed at 44.1 kHz instead of 22 kHz; music continues from the same place after Alt-Tab or the pause menu
@@ -158,8 +160,9 @@ does not update to HPEngine: download this one once.)
 1. Download `HPEngine-win-x64.zip` from [Releases](../../releases) and unpack it into an **empty folder**. Inside are
    `HPEngine Launcher.exe`, `README.txt` and the folder `HPEngine\`; keep them together. No admin rights needed.
 2. Run `HPEngine Launcher.exe`. The files are not signed: if SmartScreen warns, choose **More info → Run anyway**.
-3. Add your game with **Add folder…** (an installed game, or the CD drive) or **Add file…** (the game's `Setup.exe`
-   or a `.zip`), click **Install**, then **Play**. A disc image: double-click it to mount it, then add the new drive.
+3. Drop your copy of the game onto the launcher window, or add it with **Choose folder…** (an installed game, or the
+   CD drive) or **Choose files…** (the game's `Setup.exe` or a `.zip`); click **Install**, then **Play**. A disc
+   image: double-click it to mount it, then add the new drive.
 
 ### Linux / Steam Deck
 
@@ -168,10 +171,11 @@ does not update to HPEngine: download this one once.)
    `README.txt` and the folder `HPEngine/`; keep them together.
 2. Run `HPEngine-Launcher` (double-click; if the file manager asks, choose **Execute**, or allow running it in the
    file's properties). Needs a Vulkan driver.
-3. Add your game with **Add folder…** or **Add file…**, click **Install**, then **Play**. A disc image: mount it
-   first (Steam Deck: right-click in Dolphin → **Mount**), then add the mounted folder.
+3. Add your game with **Choose folder…** or **Choose files…** (or drop it onto the window), click **Install**, then
+   **Play**. A disc image: mount it first (Steam Deck: right-click in Dolphin → **Mount**), then add the mounted
+   folder.
 
-Steam Deck: in Desktop Mode, close Steam and choose **More → Add to Steam…** in the launcher (it keeps a backup of
+Steam Deck: in Desktop Mode, close Steam and choose **Menu → Add to Steam…** in the launcher (it keeps a backup of
 Steam's shortcut list), or in Steam → **Add a Game → Add a Non-Steam Game…** → browse to `HPEngine-Launcher`. Then
 start it from the Steam library (in Game Mode, and in Desktop Mode too). Started from Steam, the Deck's controls work
 as a gamepad; started from a desktop shortcut, Steam keeps its desktop layout (trackpad as mouse, triggers as clicks)
@@ -223,16 +227,16 @@ missing and exits with code 4.
 | mods | `<game folder>/Mods/` | same | same |
 
 Without the launcher the game folder is `HPEngine/game/` (HP1Setup) or your own game folder (manual install). The
-launcher's **More** menu opens the saves and the logs. The shipped `.ini` files are never rewritten. Saves are in
+launcher's **Menu** opens the saves and the logs folder (**This game**). The shipped `.ini` files are never rewritten. Saves are in
 HPEngine's own format: they stay loadable across HPEngine versions, but saves of the original game are not read.
 
-### Game language (Windows and Linux)
+### Game language
 
-The launcher's **Game language** chooser lists the languages included in your game files. Select one before pressing
+The launcher's **Language** row lists the languages included in your game files (it is shown only when there is
+more than one). Select one before pressing
 **Play**; the choice is remembered. For multilingual discs, the language is read from each numbered `System` folder's
 `Default.ini`, rather than assuming folder `0` is the language you want. The corresponding text, dialogue, menu art
-and splash are used together. **Game default** restores the original data selection. The macOS launcher has no
-chooser yet.
+and splash are used together. **Game default** restores the original data selection.
 
 No language files are downloaded. If your copy contains only one language, you need your own game data containing
 another language to use it. Original files stay unchanged: the engine builds a working copy (links where available) in
@@ -251,8 +255,8 @@ set is detected from installed files; identifying an exact source image requires
 Keyboard and mouse work as in the original (rebind keys in **Options → Controls**); **Alt+Enter** toggles fullscreen.
 A gamepad works out of the box (not original): left stick moves, right stick looks, A jumps, X or the right trigger
 casts, B skips, Start opens the book; **Options → Controls** shows and rebinds the gamepad's buttons while you use it.
-Any key skips the start-up splash screens, and Space turns a story-book page from the second page on once it has been
-shown for 2 seconds (not original: the original allows both only in its hidden debug mode).
+Any key skips the start-up splash screens, and Space turns a story-book page once it has been shown for 2 seconds (not
+original: the original allows both only in its hidden debug mode, and never from a story's first page).
 The full layout, interface size, the original-look mode and the other HPEngine settings:
 [docs/settings.md](docs/settings.md).
 
@@ -264,7 +268,8 @@ Existing HP1 mods can be switched on and off without changing your game copy:
    **Open Mods Folder** opens it). Loose packages such as `HPBase.u` are fine: each file goes where the game itself
    looks for that kind of file.
 2. Switch the mod on in the launcher (or add `Enabled=<mod name>` under `[Mods]` in `HPEngineData/Mods.ini`). When two
-   mods change the same file, the one lower in the list wins.
+   mods change the same file, the launcher numbers the enabled mods in apply order and the higher number wins; the
+   Mods page names two enabled mods with the same file.
 
 A mod that adds its own maps: choose the map in **Start map** next to **Play** (without the launcher:
 `--map <map name>`).
@@ -284,6 +289,9 @@ please report it with the mod's name. Check any other bug without mods before re
 - Native Windows startup and localized menus were tested on Windows 11 Pro 26H2 (OS build 26300.9818) with the Nordic
   multilingual CD. A full campaign and save/load on Windows still need verification; earlier tests were under CrossOver.
 - Mods are in beta: a mod not listed in [Mods](#mods) has not been checked and may not work.
+- Loading a save made with a mod (for example Restored) while that mod is switched off restarts the level, and Harry
+  can die at once, with a death reload that never completes. Switch the mod back on to load such a save; a fix is
+  planned for 0.4.1.
 - The 0.1.0 launcher and folders (OpenHP1) are not moved to HPEngine automatically: see [CHANGELOG.md](CHANGELOG.md).
 - macOS and Windows builds are not signed: Gatekeeper and SmartScreen warn on first launch.
 - UK 1.1 and Russian: supported, not yet proven exact against those builds. Russian menu text uses a substitute font
@@ -302,7 +310,7 @@ Please [open an issue](../../issues/new/choose). What helps most:
 - **Where and what:** the map or the place in the story, what you did, what happened and what you expected. If you
   can compare with the original game, say how it behaves there.
 - **The log** of that session: the newest `run_<date>_<time>.log` in `<game folder>/HPEngineData/logs/` (the
-  launcher: **More → Open Logs**). It names files on your computer, so it may contain your user name; remove it if
+  launcher: **Menu → Open logs folder**). It names files on your computer, so it may contain your user name; remove it if
   you prefer.
 - **A save** close to the problem, if there is one: `save<N>.hp1sav` and `GameSaveInfo<N>` from `<game folder>/Save/`.
 
@@ -325,7 +333,8 @@ not yet on an Intel Mac; reports are welcome.
 gamepad. For Game Mode add `HPEngine-Launcher` in Desktop Mode: Steam → **Add a Game → Add a Non-Steam Game**. A full
 playthrough there is still to do.
 
-**Chamber of Secrets?** Not yet. It is planned in this project, on the same engine, after Philosopher's Stone.
+**Chamber of Secrets?** Not yet. It is planned in this project, on the same engine, after Philosopher's Stone; the
+launcher already shows its tab as "Coming soon".
 
 **Is this legal?** HPEngine contains no code, data or assets of the original game; it runs a copy you own. See
 [Legal](#legal).

@@ -307,4 +307,28 @@ namespace HPEngine
             w.WriteLine($"tick {tick} dt={F(dt)} map={map} frame={f?.Tick} time={time} actors={n} menu={menu} rand={nat.GameRandomDraws}/{nat.RenderRandomDraws} sha={Convert.ToHexString(hash, 0, 12)}");
         }
     }
+
+    // World digest (--world-digest <file>, judge): every Every-th tick, right after the tick like StateDigest, the hash of
+    // the whole world as SaveGame serialises it (UELevelRuntime.WorldStateBytes) — every object and property, also what the
+    // per-tick projection does not cover. --world-ref <file>: the first sampled tick whose hash differs from that file's
+    // writes this run's world bytes to <file>.t<tick>.bin; --world-dump <tick>: write them at that tick (the baseline's side
+    // of the difference). tools/save_dump.py prints the bytes as one line per field.
+    static class WorldDigest
+    {
+        public const int Every = 20;
+        public static string Path, RefPath; public static int DumpAt = -1;
+        static Dictionary<int, string> _ref; static bool _dumped;
+
+        public static void Write(UEGameEngine host, int tick)
+        {
+            if (tick % Every != 0) return;
+            byte[] b = host.Runtime.WorldStateBytes(host.Interp);
+            string sha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(b), 0, 12);
+            File.AppendAllText(Path, $"{tick} {sha}\n");
+            if (tick == DumpAt) File.WriteAllBytes($"{Path}.t{tick}.bin", b);
+            if (RefPath is null || _dumped) return;
+            _ref ??= File.ReadAllLines(RefPath).Select(l => l.Split(' ')).ToDictionary(p => int.Parse(p[0]), p => p[1]);
+            if (_ref.TryGetValue(tick, out string want) && want != sha) { _dumped = true; File.WriteAllBytes($"{Path}.t{tick}.bin", b); }
+        }
+    }
 }

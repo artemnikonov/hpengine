@@ -60,6 +60,12 @@ namespace HPEngine.Packaging
             return dir;
         }
 
+        // NOT ORIGINAL: the port's HP2 settings overlay and run logs, <HP2Data>/HPEngineData beside the port's HP2 save dir
+        // <HP2Data>/Save (the launcher's --hp2-savedir, Hp2FrontEnd.SaveDir; its Sound page writes Default.ini here). The HP2
+        // install is never written. Created; returned.
+        public static string Hp2DataDir(string hp2SaveDir) =>
+            DataDir(Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(hp2SaveDir))));
+
         const string Hint =
             "\nHint: the easy way is the HPEngine Launcher: it installs your copy of the game and starts it. Or run HP1Setup "
             + "next to HPEngine with your copy of the game, or unpack HPEngine into the game install directory (where System/ "

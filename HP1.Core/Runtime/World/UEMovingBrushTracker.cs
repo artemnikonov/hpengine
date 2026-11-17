@@ -801,7 +801,7 @@ namespace HP1.UEScript
 
             // *=(FRotator) (Core 0x1011d780): yaw, pitch, roll; /=(FRotator) (0x1011e190): roll, pitch,
             // yaw transposed; same matrices as BrushCoords.MulRotator/DivRotator.
-            static void MulRotator<F>(float[] a, int pitch, int yaw, int roll) where F : struct, IFpuMode<F>
+            internal static void MulRotator<F>(float[] a, int pitch, int yaw, int roll) where F : struct, IFpuMode<F>
             {
                 float sy = BrushCoords.SinAngle(yaw), cy = BrushCoords.CosAngle(yaw);
                 MulCoords<F>(a, new[] { cy, sy, 0f, -sy, cy, 0f, 0f, 0f, 1f });

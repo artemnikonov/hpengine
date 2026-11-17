@@ -7,8 +7,8 @@ namespace HP1.UEScript
     // FLightManager::SetupForSurf (Render.dll.c:20006-20260), the light record fields of
     // ComputeFromActor (:479-500), the colour ramp (:435-470), the blend table
     // (:16430-16436) and the table FastSqrt (:16500-16509 ==
-    // FGlobalMath +0x1008c, Core.dll.c:47370-47380). Checked against an independent
-    // transcription of the same decompile, not against disassembly or unicorn execution.
+    // FGlobalMath +0x1008c, Core.dll.c:47370-47380). Density, Build and VertexFog are judged against the real
+    // texel and vertex loops under unicorn (se_harness/bsp_diff/validate_fogmap.py).
     //
     // NOT decided here: the light set (LeafVolumetricLighting +
     // SetupDynamics — Core, LevelFogMaps),
@@ -104,14 +104,15 @@ namespace HP1.UEScript
 
         // The fog record of a frame light (ComputeFromActor thunk_FUN_10b06920), shared by the surface fog maps
         // (LevelFogMaps) and actor vertex fog (ActorFogFrame). The type function scales +0x3c = B·(1/255), never the
-        // byte (FUN_10b06810, then the clamp 0x10b068a6..0x10b068ce); colour = FGetHSV·(Level.Brightness·+0x3c)
+        // byte (FUN_10b06810, then the clamp 0x10b068a6..0x10b068ce); colour = TypeColour·(Level.Brightness·+0x3c)
         // (0x10b06b0c..0x10b06b2d); K reads the same +0x3c (MakeLight).
         public static Light FromSnapshot(in ActorSnapshot a, float lx, float ly, float lz, float levelBrightness)
         {
             LightState L = a.Light;
-            float b3c = SurfLightmap.LightBrightness(MoverMode3.FromSnapshot(in a).L);
+            SurfLightmap.Light SL = MoverMode3.FromSnapshot(in a).L;
+            float b3c = SurfLightmap.LightBrightness(in SL);
             float f = levelBrightness * b3c;
-            UEVector hsv = SurfLightmap.FGetHSV(L.Hue, L.Saturation, 255);
+            UEVector hsv = SurfLightmap.TypeColour(in SL);
             return MakeLight(lx, ly, lz, L.VolumeRadius, L.VolumeBrightness, b3c, L.VolumeFog,
                              f * hsv.x, f * hsv.y, f * hsv.z, L.Source);
         }
@@ -133,19 +134,31 @@ namespace HP1.UEScript
             }
         }
 
-        // Light fog density along the camera→texel ray T (camera coordinates),
-        // :20035-20120. outside — global DAT_10b658d8 (the "previous texel outside
-        // the sphere" hysteresis switches the test form, not the result).
-        public static float Density(Light L, float tx, float ty, float tz, ref int outside)
+        // Light fog density along the camera→texel ray T (camera coordinates). outside — global DAT_10b658d8 (the
+        // "previous texel outside the sphere" hysteresis switches the test form). vertex — LightAndFog's point, else a
+        // SetupForSurf texel; blend — a texel of a later (blending) record. Sums in the disassembly's order: dot (Z·Lz + Y·Ly) + X·Lx (SetupForSurf inline
+        // 0x10b081bf / 0x10b08563; LightAndFog Core FVector::operator| [HP1 Core 0x10119190]); |T|² of a texel
+        // (X² + Z²) + Y² (0x10b081f8 / 0x10b0859f), of the by-depth record and of a vertex Core FVector::SizeSquared
+        // [HP1 Core 0x10119700] (X² + Y²) + Z²; HP2's blend loop alone sums a texel's |T|² as (Z² + Y²) + X²
+        // [HP2 0x10b08114..0x10b0812e] (its overwrite loop, LightAndFog and Core's two bodies are HP1's). The clamp to 1
+        // compares the bits unsigned (0x10b083bd): −0 gives 1.
+        // Judge: se_harness/bsp_diff/validate_fogmap.py (both bodies under unicorn at PC24).
+        // Original: Render.dll not exported: FLightManager::SetupForSurf FUN_10b077f0 [HP1 0x10b077f0] [HP2 0x10b07380] (FLightManagerBase vtable 0x10b386d4 slot 3; texel loops 0x10b08115..0x10b0886b)
+        // Original: Render.dll not exported: FLightManager LightAndFog FUN_10b02b10 [HP1 0x10b02b10] [HP2 0x10b02b10] (vtable 0x10b386d4 slot 6; fog loop 0x10b0303e..0x10b03407)
+        public static float Density(Light L, float tx, float ty, float tz, ref int outside, bool vertex = false,
+            bool blend = false)
         {
-            float t2 = (ty * ty + tz * tz) + tx * tx;
+            float size2 = (tx * tx + ty * ty) + tz * tz;
             if (L.Source == 2)
             {
-                float v = (L.InvR * L.K) * FastSqrt(t2);
-                return BitConverter.SingleToInt32Bits(v) > 0x3f7fffff ? 1f : v;
+                float v = (L.InvR * L.K) * FastSqrt(size2);
+                return (uint)BitConverter.SingleToInt32Bits(v) > 0x3f7fffffu ? 1f : v;
             }
-            float dot = (tx * L.Lx + ty * L.Ly) + tz * L.Lz;
+            float dot = (tz * L.Lz + ty * L.Ly) + tx * L.Lx;
             if (!L.Inside && (uint)BitConverter.SingleToInt32Bits(dot) >= 0x80000000u) return 0f;
+            float t2 = vertex ? size2
+                : blend && UEGameProfile.Current.Game == UEEdition.Game.HP2 ? (tz * tz + ty * ty) + tx * tx
+                : (tx * tx + tz * tz) + ty * ty;
             if (outside != 0 && !(t2 * L.L2 - dot * dot <= t2 * L.R2)) return 0f;
             float d2 = L.L2 - (dot * dot) / t2;
             if (!(d2 <= L.R2)) { outside = 1; return 0f; }
@@ -159,17 +172,22 @@ namespace HP1.UEScript
             else if (-h <= tcd) { lo = tcd; hi = h; }
             else { full = true; lo = -h; hi = h; }
             if (!(lo < hi)) return 0f;
-            float b = hi * L.InvR;
-            float F = 3f - (d2 * L.InvR2) * 3f;
-            float v2;
-            if (full) { v2 = ((F - b * b) * b) * L.K; v2 = v2 + v2; }
+            // b, F and v2 stay in the PC24 register up to v2's sign test and store (0x10b08336..0x10b083ad): 24-bit
+            // mantissa, wide exponent. On the sphere's edge (d2 == R2: h = FastSqrt(0), F = 0) v2 = −2·b³·K is about
+            // 1e-63, negative in the register (no fog) where a float chain underflows to −0 (which the clamp makes 1).
+            static double R(double x) => HP1.Core.X87Ext.Round24(x);
+            double b = R((double)hi * L.InvR);
+            double F = R(3.0 - R((double)(d2 * L.InvR2) * 3.0));
+            double v2;
+            if (full) { v2 = R(R(R(F - R(b * b)) * b) * L.K); v2 = R(v2 + v2); }
             else
             {
-                float a = lo * L.InvR;
-                v2 = ((F - b * b) * b - (F - a * a) * a) * L.K;
+                double a = R((double)lo * L.InvR);
+                v2 = R(R(R(R(F - R(b * b)) * b) - R(R(F - R(a * a)) * a)) * L.K);
             }
-            if (!(0f <= v2)) return 0f;
-            return BitConverter.SingleToInt32Bits(v2) > 0x3f7fffff ? 1f : v2;
+            if (!(0.0 <= v2)) return 0f;
+            float stored = (float)v2;
+            return (uint)BitConverter.SingleToInt32Bits(stored) > 0x3f7fffffu ? 1f : stored;
         }
 
         // ACTOR VERTEX FOG — FLightManager::LightAndFog, PF_RenderFog branch
@@ -189,7 +207,7 @@ namespace HP1.UEScript
             for (int i = 0; i < lights.Count; i++)
             {
                 Light L = lights[i];
-                float f = Density(L, tx, ty, tz, ref outside);
+                float f = Density(L, tx, ty, tz, ref outside, vertex: true);
                 f = f + f;
                 if (f == 0f) continue;
                 float fa = f * L.FogA;
@@ -221,7 +239,7 @@ namespace HP1.UEScript
                     float tx = rx, ty = ry, tz = rz;
                     for (int x = 0; x < width; x++)
                     {
-                        float f = Density(L, tx, ty, tz, ref outside);
+                        float f = Density(L, tx, ty, tz, ref outside, blend: !first);
                         int o = (y * width + x) * 4;
                         if (first)
                         {

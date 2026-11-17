@@ -104,7 +104,8 @@ not consume the game `rand()` stream (the stream owner is unchanged). Ice consum
    RenderIce always draws; the port draws on the first Update, the same. One difference remains: at `now == 0` the port
    draws with shift (0,0), while the original keeps the package mip until the first Tick.
 10. **Ice sizes.** The constructor requires source and glass sizes = ice size (powers of two), otherwise a named
-    exception. `PanningStyle` outside 0..4 is an exception (EPanningType has five values). Original behaviour per the
+    exception. `PanningStyle` 5..255 runs the original's `ja` exit (0x10505be2): UD/VD are not written (judge
+    `ice_oracle.py --style-out`); a value that is not a byte is an exception. Original behaviour per the
     `UIceTexture::PostLoad` disassembly (0x10509fca-0x1050a0bb): a smaller source or no usable glass -> the source is
     stretched into the ice mip, +0x114 != 0, and both blits return at once (0x10505ec4, 0x10506256): the ice is STILL.
     Ported: `IceTexture(localSource)`, `UEProceduralTextureData.IceLocalSource`, `SdlProcTex`. The constructor refusal

@@ -94,8 +94,8 @@ namespace HPEngine
         public float Alpha = 1f;
         // AnimNext chain frame at draw time: UTexture::Get(Viewport->CurrentTime) = Update + AnimCur
         // (skins in DrawMesh/DrawLodMesh Render.dll.c:9252-9256, 14771-14776; Engine 0x103040f7; Update is UTexture
-        // vtable 0x1046df90 +0x7c). In game: UETextureAnim.CurrentFrame, the same as BSP batches
-        // (SdlRenderer.AnimateWorld). Unset: chain head.
+        // vtable 0x1046df90 +0x7c). In game: Core's frame of the chain (WorldFrame.TextureFrames, HPEngineProgram.TexFrame),
+        // the same as BSP batches (SdlRenderer.AnimateWorld). Unset: chain head.
         public Func<string, string> FrameOf = static p => p;
         readonly PoseHistory _poses = new();
 
@@ -219,8 +219,9 @@ namespace HPEngine
             return raw is null ? null : e;
         }
 
-        // VERTEX MESH (ULodMesh): frame points from the Core body ULodMesh::GetFrame (UELevelRuntime.VertexMeshFrame),
-        // triangles/wedges/materials are the same fields as skeletal, so the common path follows (light, fog, emit).
+        // VERTEX MESH (ULodMesh, plain UMesh): frame points from the Core bodies ULodMesh::GetFrame / UMesh::GetFrame
+        // (UELevelRuntime.VertexMeshFrame), triangles/wedges/materials are the same fields as skeletal (a plain UMesh's
+        // Tris in that shape, UEMeshSource.BuildVertex), so the common path follows (light, fog, emit).
         // Special faces (SpecialFaces, the weapon point) are not drawn by the original. No LOD selection: all FrameVerts.
         readonly Dictionary<string, (UERawSkeletalMesh raw, string[] slots)> _vert = new(StringComparer.OrdinalIgnoreCase);
         (UERawSkeletalMesh raw, string[] slots)? Vertex(string path)
@@ -234,6 +235,8 @@ namespace HPEngine
                     numWedges = v.numWedges, wedgeVertex = v.wedgeVertex, wedgeU = v.wedgeU, wedgeV = v.wedgeV,
                     numTris = v.numTris, triWedge = v.triWedge, triMaterial = v.triMaterial,
                     materialFlags = v.materialFlags, materialTexIdx = v.materialTexIdx, textures = v.textures };
+                // A plain UMesh: Core's DrawMesh normals (UEActorLighting.ConnectNormals) and triangle list (TriangleOrder).
+                if (v.plain) { raw.connectNumTris = v.connectNumTris; raw.connectOffset = v.connectOffset; raw.vertLinks = v.vertLinks; }
                 foreach (int pi in raw.wedgeVertex)
                     if (pi < 0 || pi >= raw.numPoints)
                     { Stats.Problems.Add($"vertex mesh {path}: wedge to point {pi} outside FrameVerts {raw.numPoints}"); raw = null; break; }
@@ -283,6 +286,7 @@ namespace HPEngine
             public UEActorLighting.Exported[] Lights = new UEActorLighting.Exported[UEActorLighting.ExportCap];
             public int Count; public UEActorLighting.ActorInputs In;
             public int[] Order;   // Core's DrawLodMesh triangle order for this frame (null: the material layout)
+            public float[] DepthScale;   // Core's DrawLodMesh two-sided depth bias per wedge (null: none)
             public readonly List<ActorDraw> Runs = new();   // the ordered path's draws of this tick, reused by Reemit
             public float[] Light = Array.Empty<float>();
             public float[] Fog = Array.Empty<float>(); public bool Fogged;   // 4 floats per point (ActorFogFrame.Apply)
@@ -332,6 +336,7 @@ namespace HPEngine
                 if (o.Light.Length < np * 3) o.Light = new float[np * 3];
                 UEActorLighting.LightPoints(a, o.In, j.Draw, N, np, o.Lights, o.Count, o.Eye, o.Light, UEActorLighting.UnlitFlag(a, _core.ViewLit));
                 o.Order = _core.TriangleOrder(a, view, j.Raw.triWedge, j.Raw.wedgeVertex, j.Raw.triMaterial, j.Raw.materialFlags, j.Tick);
+                o.DepthScale = _core.TwoSidedDepthScale(a, view, j.Raw.triWedge, j.Raw.wedgeVertex, j.Raw.triMaterial, j.Raw.materialFlags, j.Tick);
                 o.Runs.Clear();
             }
         }
@@ -379,10 +384,12 @@ namespace HPEngine
             string meshTex = slotTable != null && texIdx >= 0 && texIdx < slotTable.Length && !string.IsNullOrEmpty(slotTable[texIdx]) ? slotTable[texIdx] : null;
             // bMeshEnviroMap -> PF_Environment (FUN_10b338f0, Render.dll.c:39793) on all triangles: the texture is the
             // same 0x10b65980 as for an empty slot (Render.dll.c:14933-14935), UV and light via EnviroMapping.Of.
+            // A slot texture is drawn as its AnimCur (DrawMesh's slot loop, Render.dll.c:9241-9262); the empty-slot texture as
+            // Core's MeshFallbackTexture gives it (an override is drawn as is).
             bool env = a.MeshEnviroMap;
-            string tex = env ? FallbackTexture(a, slotTable) : SlotTexture(a, meshTex, texIdx) ?? FallbackTexture(a, slotTable);
+            string slot = env ? null : UEWorldFrameProducer.MeshSlotTexture(a, meshTex, texIdx);
+            string tex = slot is not null ? FrameOf(slot) : UEWorldFrameProducer.MeshFallbackTexture(a, slotTable, FrameOf);
             if (tex is null) { Stats.EmptySlot++; return null; }
-            tex = FrameOf(tex);
             var fx = HPEngine.ActorFx.ActorOpacity.Resolve(a.Style, flags, a.Opacity);
             if ((flags & ~RenderUnhandled.MeshMaterialHandled) != 0) RenderUnhandled.MeshMaterial(flags, $"{a.MeshPath} mat{matIdx}");
             bool opacityMasked = fx.Mode == HPEngine.ActorFx.ActorFxBlendMode.AlphaBlend && fx.MaskedPalette;
@@ -398,8 +405,14 @@ namespace HPEngine
             ActorSnapshot a = j.A; UERawSkeletalMesh raw = j.Raw; UEVector[] pts = j.Draw; float[] light = o.Light;
             float[] fog = o.Fogged ? o.Fog : null;
             int pi = raw.wedgeVertex[w];
-            UEVector p = pts[pi];
-            var vx = new Vertex { X = p.x, Y = p.y, Z = p.z, U = raw.wedgeU[w], V = raw.wedgeV[w],
+            UEVector p = pts[pi], q = p;
+            if (o.DepthScale is { } ds && ds[w] != 1f)
+            {
+                // Core's biased depth: the point moved along its ray from the frame origin keeps the screen position.
+                float s = ds[w];
+                q = new UEVector(o.Eye.x + (p.x - o.Eye.x) * s, o.Eye.y + (p.y - o.Eye.y) * s, o.Eye.z + (p.z - o.Eye.z) * s);
+            }
+            var vx = new Vertex { X = q.x, Y = q.y, Z = q.z, U = raw.wedgeU[w], V = raw.wedgeV[w],
                 R = light[pi * 3], G = light[pi * 3 + 1], B = light[pi * 3 + 2], A = alpha };
             if (a.MeshEnviroMap)
             {
@@ -515,30 +528,5 @@ namespace HPEngine
             HPEngine.ActorFx.ActorFxBlendMode.AlphaBlend => ActorBlend.AlphaBlend,
             _ => ActorBlend.Opaque,
         };
-
-        static string SlotTexture(in ActorSnapshot a, string meshTexture, int count)
-        {
-            if (a.MultiSkins != null && count >= 0 && count < a.MultiSkins.Count
-                && !string.IsNullOrEmpty(a.MultiSkins[count]) && a.MultiSkins[count] != "None")
-                return a.MultiSkins[count];
-            bool meshHas = !string.IsNullOrEmpty(meshTexture);
-            if (count != 0 && meshHas) return meshTexture;
-            if (!string.IsNullOrEmpty(a.Skin) && a.Skin != "None") return a.Skin;
-            return meshHas ? meshTexture : null;
-        }
-
-        // Empty material slot: environment texture of DrawLodMesh/DrawMesh (Render.dll 0x10b1174b-0x10b1183f; same block
-        // in DrawMesh, Render.dll.c:9240-9268). Initial value is the last non-null GetTexture(i, Owner) over
-        // i < Textures.Num (call [vtbl+0x88], push Owner, push i); overridden by Actor.Texture (+0x15c), else
-        // Region.Zone.EnvironmentMap (+0xa0 -> +0x2dc), else Level.EnvironmentMap (+0x7c -> +0x2dc). A triangle with
-        // an empty slot is drawn with this texture (0x10b65980, Render.dll.c:14934); if there is none the mesh is not drawn.
-        string FallbackTexture(in ActorSnapshot a, string[] slotTable)
-        {
-            string last = null;
-            if (slotTable != null)
-                for (int i = 0; i < slotTable.Length; i++)
-                    last = SlotTexture(a, string.IsNullOrEmpty(slotTable[i]) ? null : slotTable[i], i) ?? last;
-            return RenderRules.MeshFallbackTexture(a.TexturePath, a.ZoneEnvironmentMap, a.LevelEnvironmentMap, last);
-        }
     }
 }

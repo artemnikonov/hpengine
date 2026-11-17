@@ -19,7 +19,7 @@ namespace HPEngine.Sprites
         public readonly SpriteReport Report = new();
         // AnimNext chain frame at draw time: UTexture::Get(Viewport->CurrentTime) = Update + AnimCur
         // (decals in URender::DrawFrame Render.dll.c:1468-1475, Engine 0x103040f7; Update is UTexture vtable
-        // 0x1046df90 +0x7c). In game: UETextureAnim.CurrentFrame, the same as for BSP batches (SdlRenderer.AnimateWorld).
+        // 0x1046df90 +0x7c). In game: Core's WorldFrame.TextureFrames, the same as for BSP batches (SdlRenderer.AnimateWorld).
         // Unset: chain head.
         public Func<string, string> FrameOf = static p => p;
 

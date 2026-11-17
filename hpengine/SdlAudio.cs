@@ -61,10 +61,10 @@ namespace HPEngine
             System.ApplyChannels(channels, resumeSerial, _world);
         }
 
-        // WinDrv WM_ACTIVATE/WM_SIZE -> Audio->SetViewport(NULL / viewport): input for Core (UEGalaxyAudio.SetViewport).
+        // WinDrv WM_ACTIVATE/WM_SIZE -> Audio->SetViewport(NULL / viewport): the mixer's half. Core's half
+        // (UEGalaxyAudio.SetViewport) goes through the input queue (InputStage.AudioViewport -> CoreInputSink).
         public void Focus(bool present)
         {
-            _host.Runtime?.FrameProducer?.Audio.SetViewport(present);
             System.SetPaused(!present);
         }
 

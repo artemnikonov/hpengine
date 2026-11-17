@@ -59,6 +59,18 @@ namespace HPEngine.Audio
         public void Restart() => _s.Restart();
     }
 
+    // HP2 XA: Core's UEXaStream laps (the predictor carries over a Restart, as FFileStream::Read type 4).
+    public sealed class XaSoundStream : ISoundStream
+    {
+        readonly UEXaStream _s;
+        public XaSoundStream(UEXaStream s) { _s = s; }
+        public int SampleRate => _s.SampleRate;
+        public int Channels => _s.Channels;
+        public int SampleBytes => 2;
+        public int Read(short[] dst, int offset, int count) => _s.ReadLap(dst, offset, count);
+        public void Restart() => _s.Restart();
+    }
+
     // Music stream (UEMp2SoundStream — the engine's MP2SoundStream: Read/Restart, channel-interleaved samples).
     public interface IMusicStream
     {
@@ -93,6 +105,7 @@ namespace HPEngine.Audio
         public string PathForUniqueLeaf(string leaf) => UESoundCatalog.Shared.PathForUniqueLeaf(leaf);
         public ISoundStream OpenStream(string objectPath)
         {
+            if (UESoundCatalog.Shared.OpenXaStream(objectPath) is UEXaStream xa) return new XaSoundStream(xa);   // HP2 streamed sound
             var (mp2, wav) = UESoundCatalog.Shared.OpenStream(objectPath);
             return mp2 != null ? new Mp2SoundStream(mp2) : new PcmSoundStream(wav);
         }
@@ -100,6 +113,17 @@ namespace HPEngine.Audio
 
     public sealed class CoreMusicSource : IMusicSource
     {
+        // HP2: the song is the OGG file PlayMusic names (UEMusicCatalog.OpenOggStream); Restart = ov_time_seek(0.0).
+        sealed class OggStream : IMusicStream
+        {
+            readonly UEOggVorbis _s;
+            public OggStream(UEOggVorbis s) { _s = s; }
+            public int SampleRate => _s.SampleRate;
+            public int Channels => _s.Channels;
+            public int Read(short[] dst, int offset, int count) => _s.Read(dst, offset, count);
+            public void Restart() => _s.Restart();
+        }
+
         sealed class Stream : IMusicStream
         {
             readonly UEMp2SoundStream _s;
@@ -117,7 +141,11 @@ namespace HPEngine.Audio
         public IMusicStream Open(string songPath)
         {
             if (string.IsNullOrEmpty(songPath)) return null;
-            try { return new Stream(UEMusicCatalog.Shared.OpenStream(songPath)); }
+            try
+            {
+                if (UEGameProfile.Current.Game == UEEdition.Game.HP2) return new OggStream(UEMusicCatalog.Shared.OpenOggStream(songPath));
+                return new Stream(UEMusicCatalog.Shared.OpenStream(songPath));
+            }
             catch (Exception e)
             {
                 Failures++;

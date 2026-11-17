@@ -50,6 +50,9 @@ namespace HP1.UEScript
             // LightPeriod (+0x1e7) and LightPhase (+0x1e8): read by the own
             // fillers SlowWave/Interference (0x10b04388/0x10b043cd).
             public byte Period, Phase;
+            // LightType 8/9: the Skin palette entry the type function reads this frame (LightPalette.Pack), 0 — no Skin
+            // or no Palette (the type function returns at once). LightState.Palette.
+            public int Palette;
         }
 
         // FRAME STATE THAT SHIPPED READS INSIDE SetupForSurf. The lightmap
@@ -103,10 +106,13 @@ namespace HP1.UEScript
             return true;
         }
 
+        // lum = (0.7/(appSqrt(x) + 0.01))·x (0x10420de3..0x10420e09: fsqrt, fadd qword 0.01f, fdivr qword 0.7f, fmul dword x),
+        // one rounding per operation at the render's PC24.
+        // Original: Engine.dll ?FGetHSV@@YA?AVFPlane@@EEE@Z [HP1 0x10420DD0]
         public static UEVector FGetHSV(int h, int s, int b)
         {
             float x = b * 0.005490196f;                       // 1.4/255
-            float lum = x > 0f ? Clamp01(0.7f * x / ((float)Math.Sqrt(x) + 0.01f)) : 0f;
+            float lum = x > 0f ? Clamp01(0.7f / (MathF.Sqrt(x) + 0.01f) * x) : 0f;
             float wr, wg, wb;
             if (h < 0x56) { wb = 0f; wr = (85 - h) * 0.011764706f; wg = h * 0.011764706f; }
             else if (h < 0xab) { wr = 0f; wg = (170 - h) * 0.011764706f; wb = (h - 85) * 0.011764706f; }
@@ -172,13 +178,15 @@ namespace HP1.UEScript
         //   6 -> 0x10b04700 (FastWave = SlowWave body, sin scale 512);
         //   4 -> 0x10b03bc0 (Searchlight), 18 -> 0x10b03f80 (Rotor), 14 -> 0x10b06090 (Shell), 9 -> 0x10b04aa0 (Shock), 10 -> 0x10b04ea0 (Disco);
         //   every effect 0..19 now has its filler (4/6/9/10/14/18 ported 2026-11-13 for mods, each judged
-        //     under unicorn); an index outside the table is a loud refusal. Census (41 maps, --dump-lightworld + defaults of
+        //     under unicorn); an effect >= 20 takes entry 0, the radial filler with flags 0/0: ComputeFromActor clamps the
+        //     index (0x10b06aac `cmp dl,0x14; jae` -> `xor edx,edx`; R:19262) — the categoriser does not (MoverMode3.Categorize).
+        //     Census (41 maps, --dump-lightworld + defaults of
         //     363 placed classes + .uc defaults): NO carriers of 4/6/9/10/14/18;
         //     5 — 42 lights (Lev2_fire1/Fire2, Lev3_Dungeon, Lev3_Quid2,
         //     Lev4_Sneak2), 16 — 3 (Lev2_HogFront*).
         // Effects 1/2/3 use the radial body but are modulated per texel
         // during merge (Merge, FUN_10b03430).
-        enum Filler { Radial, Spot, NonIncidence, Cylinder, SlowWave, FastWave, Interference, Searchlight, Rotor, Shell, Shock, Disco, Unported }
+        enum Filler { Radial, Spot, NonIncidence, Cylinder, SlowWave, FastWave, Interference, Searchlight, Rotor, Shell, Shock, Disco }
 
         static Filler FillerFor(byte effect)
         {
@@ -196,23 +204,8 @@ namespace HP1.UEScript
                 case 9: return Filler.Shock;
                 case 10: return Filler.Disco;
                 case 16: return Filler.Interference;
-                default: return Filler.Unported;
+                default: return Filler.Radial;   // >= 20: entry 0 (0x10b06aac)
             }
-        }
-
-        static string UnportedFiller(byte effect) =>
-            "outside table 0x10b38110 (shipped -> writes 0, R:19262; not present in the data)";
-
-        // Whether the LightEffect has a ported filler. Effects that need
-        // frame state (NeedsFrame) are also "supported", but FillLight
-        // refuses without FrameFx.
-        public static bool EffectSupported(byte effect, out bool nonIncidence, out bool spot, out bool cylinder)
-        {
-            Filler f = FillerFor(effect);
-            nonIncidence = f == Filler.NonIncidence;
-            spot = f == Filler.Spot;
-            cylinder = f == Filler.Cylinder;
-            return f != Filler.Unported;
         }
 
         // The effect reads frame state: per-texel modulation 1/2/3 (FGlobalRandoms tables) or the time/phase of the
@@ -334,9 +327,10 @@ namespace HP1.UEScript
         //     0x10b06370..0x10b06805): 0 -> br = 0; 1, 6 and >= 10 -> unchanged;
         //     2/3/4/5/7 -> br·factor (factor = BrightnessScale,
         //     computed by WorldFrameProjector.LightAnim); 8/9 (TexturePalette)
-        //     change the COLOUR from the texture palette — NOT ported, refusal;
+        //     -> brightness and colour from the Skin palette entry (LightPalette);
         //   clamp: !(br >= 0) -> 0, !(br < 1) -> 1       disasm 0x10b068a6-0x10b068ce
-        //   f = Level.Brightness · br; colour = f · FGetHSV(Hue, Sat, 0xff)   R:19276
+        //   f = Level.Brightness · br; colour = f · TypeColour (FGetHSV(Hue, Sat, 0xff), or the
+        //   palette colour of 8/9)   R:19276
         // A zero call flag (ShowFlags bit 11, R:19275) forces type 1;
         // the port has only the game viewport, where it is set (ShowFlags = 0x480c,
         // UELevelRuntime.Bootstrap), so the "flag = 0" (editor) branch is not
@@ -358,9 +352,7 @@ namespace HP1.UEScript
         {
             float br = (float)L.Brightness * InvByte255;
             if (L.Type == 0) br = 0f;
-            else if (L.Type == 8 || L.Type == 9)
-                throw new InvalidOperationException($"{L.Name}: LightType {L.Type} (TexturePalette, 0x10b06590/0x10b066d0) " +
-                    "takes its color from the texture palette — not ported (no carriers in the campaign, census 2026-09-25)");
+            else if (L.Type == 8 || L.Type == 9) { if (L.Palette != 0) br = LightPalette.Brightness(L.Palette, br); }
             else br = L.BrightnessScale * br;
             if (!(br >= 0f)) br = 0f;
             else if (!(br < 1f)) br = 1f;
@@ -371,8 +363,23 @@ namespace HP1.UEScript
         {
             float br = LightBrightness(in L);
             float f = fx != null ? fx.LevelBrightness * br : br;
-            UEVector hsv = FGetHSV(L.Hue, L.Saturation, 255);
+            UEVector hsv = TypeColour(in L);
             return new UEVector(f * hsv.x, f * hsv.y, f * hsv.z);
+        }
+
+        // The colour GlobalLighting hands back (FLightInfo +0x8c before the Level.Brightness·br scale): FGetHSV(Hue, Sat,
+        // 0xff), or for LightType 8/9 with a palette the type function's normalised entry. The black entry of type 9
+        // gives the x87 indefinite NaN; every consumer turns the colour into integer steps through fistp (0x80000000) and
+        // merges them packed (FUN_10b03430), which the port does not model: refused loudly (STOP, DECISIONS 2026-11-15).
+        // Original: Render.dll not exported: FUN_10b06810 GlobalLighting [HP1 0x10B06810] — the colour: FGetHSV (0x10b06868), then type table 0x10b38288 (0x10b06897)
+        public static UEVector TypeColour(in Light L)
+        {
+            if ((L.Type != 8 && L.Type != 9) || L.Palette == 0) return FGetHSV(L.Hue, L.Saturation, 255);
+            UEVector c = LightPalette.Colour(L.Type, L.Palette);
+            if (float.IsNaN(c.x))
+                throw new InvalidOperationException($"{L.Name}: LightType 9 (TexturePaletteLoop) on a black palette entry: " +
+                    "colour 1/sqrt(0)·0 = NaN, shipped turns it into 0x80000000 steps of the packed merge — not modelled (STOP)");
+            return c;
         }
 
         [ThreadStatic] static byte[] _illum;
@@ -392,14 +399,15 @@ namespace HP1.UEScript
         // Order as in shipped: the filler writes an illumination byte into the light
         // rectangle buffer (0 where there is no contribution), then merge
         // FUN_10b03430 adds the buffer into the accumulator (Merge).
+        // held — cache 0x16 of this light on this surface (Held), null — no such cache (every other record).
+        // Original: Render.dll not exported: FUN_10b06920 FLightInfo::ComputeFromActor [HP1 0x10B06920] (rectangle, colour) — thunk 0x10b0100f
+        // Original: Render.dll not exported: FUN_10b037c0 [HP1 0x10B037C0] — the radial filler, entry 0 of the filler table 0x10b38110
+        // Original: Render.dll not exported: FUN_10b03430 [HP1 0x10B03430] — the merge, thunk 0x10b01154 (call 0x10b0956f)
         public static bool FillLight(UEVector[] acc, in Surface s, in Map m, in Basis bs, in Light L, float[] mask,
-                                     FrameFx fx = null)
+                                     FrameFx fx = null, Held held = null)
         {
             if (bs.Degenerate) return false;
             Filler kind = FillerFor(L.Effect);
-            if (kind == Filler.Unported)
-                throw new InvalidOperationException($"{L.Name}: LightEffect {L.Effect} — its own filler " +
-                    $"{UnportedFiller(L.Effect)} is not ported (census 2026-09-25: no carriers in the campaign)");
             if (NeedsFrame(L.Effect) && fx == null)
                 throw new InvalidOperationException($"{L.Name}: LightEffect {L.Effect} reads frame state " +
                     "(FGlobalRandoms / TimeSeconds / LightPhase), but FrameFx not passed — a static bake of this " +
@@ -411,7 +419,11 @@ namespace HP1.UEScript
             int stepR = RoundHalfEven(lightColor.x * 65536f - 0.5f);
             int stepG = RoundHalfEven(lightColor.y * 65536f - 0.5f);
             int stepB = RoundHalfEven(lightColor.z * 65536f - 0.5f);
-            if (!Rect(in s, in m, in L, radius, out int col0, out int col1, out int row0, out int row1)) return false;
+            if (!Rect(in s, in m, in L, radius, out int col0, out int col1, out int row0, out int row1))
+            {
+                if (held is { Filled: false }) held.Keep(Array.Empty<byte>(), col0, col1, row0, row1);   // the first build fills nothing
+                return false;
+            }
 
             float invR = 1f / radius;
             float field44; float[] table;
@@ -438,6 +450,12 @@ namespace HP1.UEScript
             byte[] illum = _illum;
             if (illum == null || illum.Length < rw * rh) _illum = illum = new byte[Math.Max(rw * rh, 1024)];
             Array.Clear(illum, 0, rw * rh);
+            if (held is { Filled: true })
+            {
+                held.Give(illum, col0, col1, row0, row1, L.Name);
+                Merge(acc, W, illum, col0, col1, row0, row1, stepR, stepG, stepB, L.DarkLight, L.Effect, fx);
+                return true;
+            }
 
             bool own = true;
             if (kind == Filler.Disco)
@@ -457,6 +475,7 @@ namespace HP1.UEScript
             else own = false;
             if (own)
             {
+                held?.Keep(illum, col0, col1, row0, row1);
                 Merge(acc, W, illum, col0, col1, row0, row1, stepR, stepG, stepB, L.DarkLight, L.Effect, fx);
                 return true;
             }
@@ -554,8 +573,39 @@ namespace HP1.UEScript
             if (nNonInc != 0) Interlocked.Add(ref NonIncidenceTexels, nNonInc);
             if (nCyl != 0) Interlocked.Add(ref CylinderTexels, nCyl);
             if (nSpot != 0) Interlocked.Add(ref SpotTexels, nSpot);
+            held?.Keep(illum, col0, col1, row0, row1);
             Merge(acc, W, illum, col0, col1, row0, row1, stepR, stepG, stepB, L.DarkLight, L.Effect, fx);
             return true;
+        }
+
+        // CACHE 0x16 (SetupForSurf 0x10b093cd..0x10b09484, key light index + iSurf): a category-1 light with flag 0x84 = 0
+        // keeps for a surface the filler output of its first per-frame build — the cache is made then whatever the rectangle
+        // (FMemCache::Create 0x10b0952c, size (VClamp+1)·UClamp+1; filler call 0x10b09548) — and later builds skip the filler
+        // (a hit without bLightChanged, 0x10b09493 -> 0x10b09551); the merge (0x10b0956f, FUN_10b03430) reads the buffer, row
+        // stride UClamp, inside the light's rectangle of the CURRENT build. The filler writes only its own rectangle (FUN_10b037c0) and
+        // FMemCache::Create does not clear the item: a texel outside the first build's rectangle is cache memory nobody
+        // wrote — not defined by the source, a loud STOP (Give).
+        // Original: Render.dll not exported: FUN_10b077f0 FLightManager::SetupForSurf [HP1 0x10B077F0] — slot 3 of the FLightManager vtable 0x10b386d4 (unwind string "FLightManager::SetupForSurf") (its cache 0x16, 0x10b093cd..0x10b09551)
+        public sealed class Held
+        {
+            public bool Filled { get; private set; }
+            int _col0, _col1, _row0, _row1;
+            byte[] _illum;
+            internal void Keep(byte[] illum, int col0, int col1, int row0, int row1)
+            {
+                int n = Math.Max(col1 - col0, 0) * Math.Max(row1 - row0, 0);
+                _illum = illum.AsSpan(0, n).ToArray();
+                _col0 = col0; _col1 = col1; _row0 = row0; _row1 = row1; Filled = true;
+            }
+            internal void Give(byte[] illum, int col0, int col1, int row0, int row1, string light)
+            {
+                if (col0 < _col0 || col1 > _col1 || row0 < _row0 || row1 > _row1)
+                    throw new InvalidOperationException($"{light}: cache 0x16 merged over [{col0},{col1})x[{row0},{row1}), outside its first fill " +
+                        $"[{_col0},{_col1})x[{_row0},{_row1}) — shipped reads cache memory the filler never wrote (FUN_10b037c0, FMemCache::Create): STOP");
+                int rw = col1 - col0, hw = _col1 - _col0;
+                for (int j = row0; j < row1; j++)
+                    Array.Copy(_illum, (j - _row0) * hw + (col0 - _col0), illum, (j - row0) * rw, rw);
+            }
         }
 
         // OWN FILLERS SlowWave (effect 5, FUN_10b04360) and
@@ -978,6 +1028,99 @@ namespace HP1.UEScript
                     }
                 }
             if (k != 0) Interlocked.Add(ref ModulatedTexels, k);   // k counts exactly the modulated texels
+        }
+    }
+
+    // LIGHT TYPES 8/9 — TexturePaletteOnce / TexturePaletteLoop, entries 8/9 of the GlobalLighting type table
+    // 0x10b38288 (Render.dll; GlobalLighting FUN_10b06810 calls them at 0x10b06897 with (light, &brightness, &colour)).
+    // Both return without touching brightness or colour when the light has no Skin (+0x160) or the Skin no Palette
+    // (UTexture +0x2c); otherwise they read Palette->Colors(i) (UPalette +0x28, FColor bytes R,G,B; no bound check):
+    //   brightness = ((G·3 + (R+R)) + B)·brightness·0.0018229167 (0x10b38670)
+    //   colour.xyz = (R,G,B) normalised — 8 through Core FVector::SafeNormal ((0,0,0) when R²+G²+B² < 1e-8), 9 inline:
+    //                1/appSqrt(B²+R²+G²) times each channel (a black entry: 1/0 = +inf, inf·0 = the indefinite NaN).
+    // The entry: 8 — x = 1 − LifeSpan/Class.Defaults.LifeSpan (+0x4c), x < 0 or NaN -> 0 (C0 of fcom 0.0),
+    //   !(x < 1) -> 1, i = fistp(float(x·255) − 0.5); 9 — i = (fistp(float(((TimeSeconds·35)/max(Period,1) + Phase)·256))
+    //   & 0xff) % 255. Render calls (lightmaps, fog, actor lighting) run inside PreRender..PostRender at PC24 — one float
+    // rounding per x87 operation, which is C# float arithmetic; Galaxy's (UpdateAmbience) at PC64 — the *Pc64 bodies.
+    public static class LightPalette
+    {
+        static readonly float K = BitConverter.Int32BitsToSingle(0x3aeeeeef);   // 0x10b38670
+        static readonly float Indefinite = BitConverter.Int32BitsToSingle(unchecked((int)0xFFC00000));
+
+        // Light.Palette / LightState.Palette: 0x01RRGGBB; 0 = the type function returns (no Skin or no Palette).
+        public static int Pack(byte r, byte g, byte b) => 0x1000000 | (r << 16) | (g << 8) | b;
+
+        // Original: Render.dll not exported: FUN_10b06590 [HP1 0x10B06590] — LightType 8 TexturePaletteOnce, table 0x10b38288 entry 8 (the entry 0x10b065e0..0x10b0662a)
+        public static int IndexOnce(float lifeSpan, float defaultLifeSpan)
+        {
+            float x = 1f - lifeSpan / defaultLifeSpan;
+            if (!(x >= 0f)) x = 0f;
+            else if (!(x < 1f)) x = 1f;
+            float y = x * 255f;
+            return MeshTriangleOrder.Fistp(y - 0.5f);
+        }
+
+        // Original: Render.dll not exported: FUN_10b066d0 [HP1 0x10B066D0] — LightType 9 TexturePaletteLoop, table 0x10b38288 entry 9 (the entry 0x10b066f2..0x10b0674a)
+        public static int IndexLoop(float time, int period, int phase)
+        {
+            int p = period < 1 ? 1 : period;
+            float x = ((time * 35f) / p + phase) * 256f;
+            return (MeshTriangleOrder.Fistp(x) & 0xff) % 255;
+        }
+
+        // 0x10b06689..0x10b066ba (8) and 0x10b067de..0x10b06800 (9): the same four instructions.
+        // Original: Render.dll not exported: FUN_10b06590 [HP1 0x10B06590] — LightType 8, the brightness 0x10b06689..0x10b066ba
+        // Original: Render.dll not exported: FUN_10b066d0 [HP1 0x10B066D0] — LightType 9, the brightness 0x10b067de..0x10b06800
+        public static float Brightness(int palette, float br)
+        {
+            float r = (palette >> 16) & 0xff, g = (palette >> 8) & 0xff, b = palette & 0xff;
+            return ((g * 3f + (r + r)) + b) * br * K;
+        }
+
+        // 8: Core ?SafeNormal@FVector@@QBE?AV1@XZ [HP1 0x1014F4E0] ((X²+Y²)+Z², fcom 1e-8, appSqrt = fsqrt, 1.0f/s, ·X);
+        // 9: 0x10b06785..0x10b067d9 ((B²+R²)+G², appSqrt, 1.0/s, ·R/G/B). The sums are exact integers.
+        // Original: Core.dll ?SafeNormal@FVector@@QBE?AV1@XZ [HP1 0x1014F4E0]
+        // Original: Render.dll not exported: FUN_10b066d0 [HP1 0x10B066D0] — LightType 9, the colour 0x10b06785..0x10b067d9
+        public static UEVector Colour(int type, int palette)
+        {
+            float r = (palette >> 16) & 0xff, g = (palette >> 8) & 0xff, b = palette & 0xff;
+            float sum = type == 8 ? (r * r + g * g) + b * b : (b * b + r * r) + g * g;
+            if (type == 8 && !(sum >= 1e-8f)) return new UEVector(0f, 0f, 0f);
+            if (sum == 0f) return new UEVector(Indefinite, Indefinite, Indefinite);
+            float inv = 1f / MathF.Sqrt(sum);
+            return new UEVector(inv * r, inv * g, inv * b);
+        }
+
+        // PC64 (Galaxy UpdateAmbience): the same instructions on a 64-bit mantissa (X87Ext), fstp dword where they store.
+        // Original: Render.dll not exported: FUN_10b06590 [HP1 0x10B06590] — LightType 8 at PC64 (the entry 0x10b065e0..0x10b0662a)
+        public static int IndexOncePc64(float lifeSpan, float defaultLifeSpan)
+        {
+            HP1.Core.X87Ext x = HP1.Core.X87Ext.Round64(HP1.Core.X87Ext.From(1f)
+                - HP1.Core.X87Ext.Div64(HP1.Core.X87Ext.From(lifeSpan), HP1.Core.X87Ext.From(defaultLifeSpan)));
+            if ((HP1.Core.X87Ext.Fcom(x, HP1.Core.X87Ext.From(0f)) & HP1.Core.X87Ext.C0) != 0) x = HP1.Core.X87Ext.From(0f);
+            else if ((HP1.Core.X87Ext.Fcom(x, HP1.Core.X87Ext.From(1f)) & HP1.Core.X87Ext.C0) == 0) x = HP1.Core.X87Ext.From(1f);
+            float y = HP1.Core.X87Ext.Round64(x * HP1.Core.X87Ext.From(255f)).ToFloat();
+            return (int)Math.Round((double)y - 0.5, MidpointRounding.ToEven);   // fsub 0.5 exact at PC64; y - 0.5 in [-0.5, 254.5]
+        }
+
+        // Original: Render.dll not exported: FUN_10b066d0 [HP1 0x10B066D0] — LightType 9 at PC64 (the entry 0x10b066f2..0x10b0674a)
+        public static int IndexLoopPc64(float time, int period, int phase)
+        {
+            int p = period < 1 ? 1 : period;
+            HP1.Core.X87Ext x = HP1.Core.X87Ext.Round64(HP1.Core.X87Ext.From(time) * HP1.Core.X87Ext.From(35f));
+            x = HP1.Core.X87Ext.Div64(x, HP1.Core.X87Ext.From(p));
+            x = HP1.Core.X87Ext.Round64(x + HP1.Core.X87Ext.From(phase));
+            x = HP1.Core.X87Ext.Round64(x * HP1.Core.X87Ext.From(256f));
+            return (MeshTriangleOrder.Fistp(x.ToFloat()) & 0xff) % 255;
+        }
+
+        // Original: Render.dll not exported: FUN_10b06590 [HP1 0x10B06590] — LightType 8 at PC64, the brightness 0x10b06689..0x10b066ba
+        // Original: Render.dll not exported: FUN_10b066d0 [HP1 0x10B066D0] — LightType 9 at PC64, the brightness 0x10b067de..0x10b06800
+        public static float BrightnessPc64(int palette, float br)
+        {
+            int r = (palette >> 16) & 0xff, g = (palette >> 8) & 0xff, b = palette & 0xff;
+            HP1.Core.X87Ext t = HP1.Core.X87Ext.Round64(HP1.Core.X87Ext.From((g * 3 + (r + r)) + b) * HP1.Core.X87Ext.From(br));
+            return HP1.Core.X87Ext.Round64(t * HP1.Core.X87Ext.From(K)).ToFloat();
         }
     }
 }

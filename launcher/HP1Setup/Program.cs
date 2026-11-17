@@ -176,7 +176,9 @@ static class Program
     {
         int bad = 0;
         foreach (var d in Enum.GetValues<UEEdition.DataSet>())
-            if (UEEdition.TierOf(d) is UEEdition.Support.Exact or UEEdition.Support.Supported && !Editions.ContainsKey(d))
+            // HP2 sets: HP1Setup never installs HP2 (the launcher's HP2 tab plays an existing HP2 folder), so no manifest.
+            if (UEEdition.TierOf(d) is UEEdition.Support.Exact or UEEdition.Support.Supported && !Editions.ContainsKey(d)
+                && d is not (UEEdition.DataSet.HP2_EN or UEEdition.DataSet.HP2_RU_EA or UEEdition.DataSet.HP2_MODIFIED))
             { Console.WriteLine($"{d}: {UEEdition.TierOf(d)} without a manifest"); bad++; }
         foreach (var (data, ed) in Editions)
         {
@@ -480,6 +482,9 @@ static class Program
     static List<Entry> Check(string root)
     {
         var files = Index(root);
+        if (UEEdition.Identify(root).Game == UEEdition.Game.HP2)
+            throw new Reject("other_game", "This is Harry Potter and the Chamber of Secrets (2002). HPEngine runs Harry Potter and the "
+                + "Philosopher's Stone (PC, 2001); the Chamber of Secrets is not supported yet.");
         string[] keys = { "System/Engine.dll", "System/Render.dll", "System/HPBase.u" };
         if (keys.FirstOrDefault(k => !files.ContainsKey(k)) is string absent)
             throw new Reject("missing_files", $"{absent} is missing. A full copy of the game is needed: the installed game folder or the game CD.");

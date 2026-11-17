@@ -12,7 +12,8 @@
 //   n         = Min(fistp(verts) (round to nearest even), ModelVerts); n >= ModelVerts -> no LOD.
 // URender::Init (Render.dll.c:15206-15212) sets GlobalShapeLOD = GlobalShapeLODAdjust = ShapeLODFix = 1.0 and ShapeLODMode = 1;
 // the only other writers are the copy constructor / operator= and the console commands MLOD / MLMODE / MLFIX
-// (URender::Exec, Render.dll.c:29186-29260; GlobalShapeLODAdjust has no command). Those commands are not ported.
+// (URender::Exec, Render.dll.c:29186-29260; GlobalShapeLODAdjust has no command). MLOD is ported for HP2 (its
+// FESoundVideoPage sends it; ConsoleGlobalShapeLOD, which the selection reads); MLMODE / MLFIX are not ported.
 // URender::PostRender rewrites GlobalShapeLODAdjust every frame; the port does not (decided improvement, see the constant).
 // GetFrame then clamps the request through its LODRequest reference (0x10b10255): USkeletalMesh::GetFrame
 // (Engine.dll.c:29208) n = Min(n, FrameVerts); ULodMesh::GetFrame (Engine.dll.c:57244) n = Min(SpecialVerts + n, FrameVerts)
@@ -33,6 +34,10 @@ namespace HP1.UEScript
         // MinDesiredFrameRate fps; the port keeps the Init value 1.0.
         public const float GlobalShapeLOD = 1f, GlobalShapeLODAdjust = 1f, ShapeLODFix = 1f;
         public const int ShapeLODMode = 1;
+        // GlobalShapeLOD as the console command MLOD leaves it (UEConsoleCommand; HP2's FESoundVideoPage sends it, no HP1
+        // script does). One URender per process, as the original. DrawLodMesh's LOD request reads it (UEWorldFrameProducer
+        // .Views; HP2's selection block is HP1's instructions: tools/hp2/meshlod_judge.py).
+        public static float ConsoleGlobalShapeLOD = GlobalShapeLOD;
         const float AreaScale = 0.04f;                     // 0x10b387e0 = 0x3d23d70a
         const double SizeScale = 4.0;                      // 0x10b38600
 

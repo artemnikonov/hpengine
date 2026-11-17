@@ -54,7 +54,10 @@ namespace HP1.UEScript
             interp.LevelActors = e.Actors;
             try
             {
-                e.LoadWorld(entryMapPath, interp);
+                // URL.Map "Entry": UGameEngine::Init loads FURL(L"Entry") [HP1 0x10398703] [HP2 0x103a10c3], the one-argument
+                // FURL constructor keeps the text as the map (no extension), and LoadMap copies it into an empty
+                // LevelEnterText [HP1 0x1039cc20] [HP2 0x103a5c71]. Live HP2 EN at Entry's InitGame: LevelEnterText "Entry".
+                e.LoadWorld(entryMapPath, interp, urlMap: "Entry");
                 e.InitializeLevelClock(interp);
                 e.BootstrapLevelWithoutPlayer(interp, cfg);
                 e._entryLevelInfo = interp.PeekLevelInfo()
@@ -117,7 +120,11 @@ namespace HP1.UEScript
 
         void AdoptSessionServices(UELevelRuntime main)
         {
-            Config = main.Config;
+            // One process: GConfig is up from appInit (UEConfig.Global) before UGameEngine::Init loads Entry, while the main
+            // runtime binds it later (LoadInputBindingsFromInstall); the mesh catalog is the session's. Entry's own actors
+            // read both (HP2's Harry0: HasAnim/BoneNumber, ConsoleCommand GET; HP1's Entry reads neither while it loads).
+            Config = main.Config ?? UEConfig.Global;
+            MeshCatalog = main.MeshCatalog;
             LocalTimeSource = main.LocalTimeSource;
             HighDetailActors = main.HighDetailActors;
             Journal = main.Journal;

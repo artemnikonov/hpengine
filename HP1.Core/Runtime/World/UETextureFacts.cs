@@ -99,15 +99,14 @@ namespace HP1.UEScript
 
             UnrealPackage package = Package(material);
             UExportTableItem export = FindExport(package, material);
-            var facts = FactsOfExport(export, out _);
+            var facts = FactsOfExport(export);
             _cache[key] = facts;
             return facts;
         }
 
-        // Export flag word and the AnimNext tag marker (read only by the HUD path).
-        private UETextureFacts FactsOfExport(UExportTableItem export, out bool hasAnimNext)
+        // Export flag word.
+        private UETextureFacts FactsOfExport(UExportTableItem export)
         {
-            hasAnimNext = false;
             UObject source = export.Object;
             source.Load<UObjectRecordStream>();
 
@@ -134,8 +133,6 @@ namespace HP1.UEScript
                         if (tag.BoolValue == true) poly |= bit;
                         else poly &= ~bit;
                     }
-                    else if (name.Equals("AnimNext", StringComparison.OrdinalIgnoreCase))
-                        hasAnimNext = true;
                 }
 
             return new UETextureFacts(footstep, poly);
@@ -145,14 +142,14 @@ namespace HP1.UEScript
         //
         // The body passes the device `(Texture->PolyFlags & PF_Masked) | exec flags`
         // (disasm 0x1038781f-0x1038782e: `mov edx,[esi+0x80]; and edx,2; or edx, [ebp+0x54]`). Here — the flag word
-        // of the texture the body passes to the device. That texture is Texture->AnimCur if non-null, after
-        // Texture->Update(Viewport->CurrentTime) (0x103877c8-0x103877f5). Update of animated textures is not ported,
-        // so a texture with AnimNext is a loud STOP, not first-frame flags.
+        // of the texture the body passes to the device: Texture->AnimCur if non-null, after Texture->Update(Viewport->CurrentTime)
+        // (0x103877c8-0x103877f5) — the caller (UEWorldFrameProducer.CanvasAnimCur) passes that texture, so its own word is
+        // returned whatever its AnimNext. A runtime texture's chain has no Core state: its AnimNext is a loud STOP.
         //
         // The resource reference is resolved EXACTLY (UEClassRegistry.ResolveResourceExport: package, full outer chain,
         // name, class), and the word by the same parse as TraceTexture (class defaults + tags). A Core runtime
         // texture (CreateTextureFromBMP) is a live object: its bool properties.
-        private readonly Dictionary<string, (int Poly, bool Anim)> _resourceFlags =
+        private readonly Dictionary<string, int> _resourceFlags =
             new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, UnrealPackage> _packagesByPath =
             new(StringComparer.OrdinalIgnoreCase);
@@ -165,8 +162,8 @@ namespace HP1.UEScript
                 case UEObject o when !o.IsStruct:
                     if (o.GetProp(PK.AnimNext) is not null)
                         throw new NotSupportedException(
-                            $"UCanvas::DrawTile: texture {o.GetProp(PK.Name)} has AnimNext — "
-                            + "flags are taken from AnimCur after UTexture::Update, which is not ported");
+                            $"UCanvas::DrawTile: runtime texture {o.GetProp(PK.Name)} has AnimNext — the chain of a "
+                            + "CreateTextureFromBMP texture has no Core UTexture::Update state (UETextureAnim keeps package chains): not ported");
                     int live = 0;
                     foreach (var pair in PolyBits())
                         if (UEInterpreter.ToBool(o.GetProp(pair.Key))) live |= pair.Value;
@@ -186,22 +183,17 @@ namespace HP1.UEScript
                 string file = HP1.Core.UEClassRegistry.PhysicalPath(at.PackagePath);
                 if (!_packagesByPath.TryGetValue(file, out UnrealPackage pkg))
                 {
-                    pkg = UnrealLoader.LoadPackage(at.PackagePath, FileAccess.Read);
+                    pkg = HP1.UEScript.UEPackageOpen.Load(at.PackagePath, FileAccess.Read);
                     pkg.InitializePackage(UnrealPackage.InitFlags.All);
                     _packagesByPath[file] = pkg;
                 }
-                UETextureFacts facts = FactsOfExport(pkg.Exports[at.ExportIndex - 1], out bool anim);
-                hit = (facts.PolyFlags, anim);
+                hit = FactsOfExport(pkg.Exports[at.ExportIndex - 1]).PolyFlags;
                 _resourceFlags[key] = hit;
             }
-            if (hit.Anim)
-                throw new NotSupportedException(
-                    $"UCanvas::DrawTile: texture {path} has AnimNext — flags are taken from "
-                    + "AnimCur after UTexture::Update, which is not ported");
             // Bits WRITTEN by bytecode into this texture object, over the package word: FEBook.Created sets
             // LogoTexture1/2.bMasked = true, and shipped draws the logo masked (without it — black index-0 background
             // under the menu buttons). The proxy carries only written properties and sizes.
-            int poly = hit.Poly;
+            int poly = hit;
             if (UEInterpreter.ExistingTextureProxy(tex) is UEObject written)
                 foreach (var pair in PolyBits())
                     if (written.Props.TryGetValue(pair.Key, out object v))
@@ -256,7 +248,7 @@ namespace HP1.UEScript
                         $"TraceTexture: package {material.SourcePackage} not found on any "
                         + $"of the [Core.System] paths under {root}");
             }
-            UnrealPackage package = UnrealLoader.LoadPackage(path, FileAccess.Read);
+            UnrealPackage package = HP1.UEScript.UEPackageOpen.Load(path, FileAccess.Read);
             package.InitializePackage(UnrealPackage.InitFlags.All);
             _packages[packageName] = package;
             return package;

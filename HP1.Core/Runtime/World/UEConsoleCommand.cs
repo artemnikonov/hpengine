@@ -13,10 +13,28 @@ namespace HP1.UEScript
     public sealed class UEIniFile
     {
         readonly Dictionary<string, Dictionary<string, string>> _sections;
+        // Every pair in TMultiMap Pairs order: FConfigFile::Read inserts with TMultiMap::Add (Engine FUN_103a2e20), so a
+        // repeated key keeps all its values — what UObject::LoadConfig's MultiFind of a dynamic array reads.
+        readonly Dictionary<string, List<KeyValuePair<string, string>>> _pairs =
+            new Dictionary<string, List<KeyValuePair<string, string>>>(UEPropNameComparer.Instance);
 
         public UEIniFile(string path)
         {
-            _sections = UELocalization.ParseIni(UELocalization.LoadFileToString(path));
+            string text = UELocalization.LoadFileToString(path);
+            _sections = UELocalization.ParseIni(text);
+            foreach (var (name, pairs) in UELocalization.ParseIniPairs(text)) _pairs[name] = pairs;
+        }
+
+        public bool HasSection(string section) => _sections.ContainsKey(section);
+
+        // All values of `key` in `section`, in Pairs order (appStricmp key match).
+        public List<string> GetAll(string section, string key)
+        {
+            var all = new List<string>();
+            if (_pairs.TryGetValue(section, out var pairs))
+                foreach (var kv in pairs)
+                    if (UEPropNameComparer.Instance.Equals(kv.Key, key)) all.Add(kv.Value);
+            return all;
         }
 
         public string Get(string section, string key)
@@ -65,6 +83,10 @@ namespace HP1.UEScript
         // Without a handler the command fails loudly instead of a silent "".
         public static Func<int, string> SaveGameHandler;
         public static Func<string, string> OpenHandler;
+        // HP2 SAVEPACTORS: the host binds it to MakeDirectory x2 + UELevelRuntime.SavePersistentActors (see the branch).
+        public static Func<string> SavePActorsHandler;
+        // HP2 LOADGAME n: the host binds it to LoadPersistentActorCache + the ServerTravel to the slot's save (see the branch).
+        public static Func<int, string> LoadGameHandler;
         // EXIT / QUIT — UGameEngine::Exec (Engine.dll.c:244045-244066): logs
         // "Closing by request" and appRequestExit(0) — exit after the current frame.
         // The host (frontend) decides how to end the process. Not ported:
@@ -82,17 +104,104 @@ namespace HP1.UEScript
         // are not in the table). Config file is StaticConfigName: Core exports
         // ONE, UObject::StaticConfigName = "System" (:17665); USystem has none of
         // its own. Section is "Package.Class".
+        // HP2: the DLL-only packages UGameEngine::Init binds only after Login — the viewport's D3DDrv and InitAudio's
+        // ALAudio (live HP2 EN Game.log: "Bound to D3DDrv.dll" and "Bound to ALAudio.dll" after "Login: Player"; Entry and
+        // the start map load before). OpenWindow binds D3DDrv after Login, InitAudio ALAudio (UELevelRuntime.InitClientTail
+        // adds them to UEConfig.BoundDllPackages at those points).
+        static readonly HashSet<string> Hp2BoundAfterLogin = new(StringComparer.OrdinalIgnoreCase) { "ALAudio", "D3DDrv" };
+
+        // HP2 only: null when `ini:<ref>` does not resolve into an HP2 late-bound DLL package, else whether it is bound yet.
+        static bool? Hp2LateBound(UEConfig config, string classTok)
+        {
+            if (UEGameProfile.Current.Game != UEEdition.Game.HP2) return null;
+            if (config.TryResolveSection(UEConfig.ScopeSystem, classTok.Substring(4)) is not string late) return null;
+            int pd = late.IndexOf('.');
+            if (pd <= 0 || !Hp2BoundAfterLogin.Contains(late.Substring(0, pd))) return null;
+            return config.BoundDllPackages.Contains(late.Substring(0, pd));
+        }
+
         static readonly (string Pkg, string Cls, string Prop)[] IntrinsicConfigStrings =
         {
             ("Core", "System", "PurgeCacheDays"), ("Core", "System", "SavePath"),
             ("Core", "System", "CachePath"), ("Core", "System", "CacheExt"),
         };
 
+        // `interp` — owner of the class default objects that GET of a non-config property exports.
+        // `alAudio` — HP2's Engine->Audio (null before InitAudio).
         public static string Execute(UEConfig config, string command, UEInput input = null,
-            IViewportDevice viewport = null)
+            IViewportDevice viewport = null, UEInterpreter interp = null, UEALAudio alAudio = null,
+            IEnumerable<UEObject> liveActors = null)
         {
             command = command ?? "";
-            // UGameEngine::Exec SAVEGAME (Engine.dll.c:244086-244098): ParseCommand(SAVEGAME);
+            // HP2: only the judged commands run. GET (plan 11.4: UGameEngine::Exec [HP2 0x103a20f0] has no GET, UEngine::Exec
+            // consts, StaticExec's GET HP1's). KEYNAME / KEYBINDING: UInput::Exec [HP1 0x103a5200] [HP2 0x103aec60],
+            // UInput::GetKeyName [HP1 0x103a6150] [HP2 0x103afbb0] and FindKeyName [HP1 0x103a6280] [HP2 0x103afce0] are
+            // HP1's bodies (native_match @: identical but the EH throw info), and the route to them is HP1's
+            // (tools/hp2/exec_chain_words.py: UWindowsViewport::Exec and UViewport::Exec add only IsFullscreen, THUMBNAIL,
+            // SAVETHUMBNAIL, SHOWCOLL, SHOWPATHS, none before Input->Exec). Every other HP2 command stops: HP2 adds
+            // IsFullscreen, THUMBNAIL/SAVETHUMBNAIL, LOADGAME/SAVEPACTORS (SAVEPACTORS below; and changes SAVEGAME), and its audio words are
+            // ALAudio's, and the other words' bodies are not compared.
+            // SET ini: StaticExec's SET branch is HP1's (the HP2 body differs only in the OBJ MARKCHECK texts and assert
+            // line constants) and GlobalSetProperty's closure is HP1's but appUnwindf (unwind only); its ResolveName is
+            // GET's (the late-bound DLL rule below). A SET into a bound HP2 device section (ALAudio, D3DDrv) stops:
+            // GlobalSetProperty writes the live device object, which the port's HP2 devices are not judged to read.
+            // SET <Class> <Property> <Value>: the same StaticExec branch and GlobalSetProperty (ExecSet below;
+            // tools/hp2/console_set_judge.py). SET Input stays stopped (UInput's config section is not judged for HP2).
+            bool hp2 = UEGameProfile.Current.Game == UEEdition.Game.HP2;
+            // SETVOLUMES / MUTESOUNDS / UNMUTESOUNDS: no executor before UEngine::Exec's Audio takes them (exec_chain_words:
+            // nor the Game.exe hook, whose words are HEAT, MPLAYER, Preferences, HideLog, EditActor, TakeFocus, ShowLog), and
+            // UEngine::Exec [HP2 0x1039bdc3] asks Audio only when there is one: UALAudioSubsystem::Exec (UEALAudio.Exec);
+            // with no device nobody takes them (output "").
+            if (hp2 && (ParseCommand(command, "SETVOLUMES", out _) || ParseCommand(command, "MUTESOUNDS", out _)
+                        || ParseCommand(command, "UNMUTESOUNDS", out _) || ParseCommand(command, "RESTARTSOUNDS", out _)))
+            {
+                if (alAudio is null || !alAudio.Exec(command))
+                    HP1.Core.UETrace.Warn($"ConsoleCommand(\"{command}\"): no audio device takes it");
+                return "";
+            }
+            // Original: Engine.dll ?Exec@UGameEngine@@UAEHPBGAAVFOutputDevice@@@Z [HP2 0x103a20f0], the LOADGAME branch
+            // 0x103a29b5..0x103a2be7 (HP1: no such word): the remainder's first char not '0'..'9' -> 1 and nothing; else
+            // LoadPersistentActorCache(), MakeDirectory(SavePath), MakeDirectory(GSys+0x40), "%s\Save%i.usa"
+            // (slot dir, appAtoi), Logf, GetLevelInfo()->eventServerTravel(that, bItems 0); 1.
+            if (hp2 && ParseCommand(command, "LOADGAME", out string loadTail))
+            {
+                if (loadTail.Length == 0 || loadTail[0] < '0' || loadTail[0] > '9') return "";
+                if (LoadGameHandler is null)
+                    throw new InvalidOperationException("ConsoleCommand(\"" + command + "\"): the host did not set LoadGameHandler");
+                return LoadGameHandler(AppAtoi(loadTail)) ?? "";
+            }
+            // Original: Engine.dll ?Exec@UGameEngine@@UAEHPBGAAVFOutputDevice@@@Z [HP2 0x103a20f0], the SAVEPACTORS branch
+            // 0x103a2bef..0x103a2cde (HP1: no such word): ParseCommand(SAVEPACTORS); GLevel NULL -> 0; MakeDirectory(GSys->SavePath),
+            // MakeDirectory(GSys+0x40), GLevel->SavePersistentActors(GetLevelInfo()->LevelEnterText (+0x458)); 1. Issued by hgame's
+            // harry.LoadLevel (ConsoleCommand("SavePActors")) before it changes the level.
+            if (hp2 && ParseCommand(command, "SAVEPACTORS", out _))
+            {
+                if (SavePActorsHandler is null)
+                    throw new InvalidOperationException("ConsoleCommand(\"" + command + "\"): the host did not set SavePActorsHandler");
+                return SavePActorsHandler() ?? "";
+            }
+            // The resolution words: UWindowsViewport::Exec [HP1 WinDrv 0x11107bf0] [HP2 WinDrv 0x11107e90] differs from
+            // HP1's only by the IsFullscreen insertion [HP2 0x11107f23..0x11107f74] and the GetRes enumeration's temp-string
+            // frees [HP2 0x1110817e..0x11108256] (the port answers GetRes with the improvement below either way);
+            // GetCurrentRes, GetCurrentColorDepth, GetColorDepths and SetRes are HP1's instructions (body_diff, masked
+            // addresses; their strings pinned by exec_chain_words), and ResizeViewport's step 4 writes the same client
+            // fields (+0x58..+0x6c, UClient::StaticConstructor native_match identical) then SaveConfig.
+            // FLUSH (HP2's FESoundVideoPage.BrightnessChanged sends it): UEngine::Exec [HP1 0x103932e0] [HP2 0x1039bcf0] and
+            // UEngine::Flush [HP1 0x103930b0] [HP2 0x1039bab0] differ from HP1's only by member offsets (tools/hp2/body_diff.py: Exec — Client/Audio fields
+            // +0x24/+0x28/+0x2c -> +0x2c/+0x30/+0x34; Flush — Client +0x4c -> +0x54; callees identical); the FLUSH branch is
+            // the same `push 1; call [vtbl+0x70]` then Log("Flushed engine caches") [HP2 Engine.dll.c:54371..54477].
+            if (hp2 && !ParseCommand(command, "GET", out _) && !ParseCommand(command, "KEYNAME", out _)
+                && !ParseCommand(command, "KEYBINDING", out _)
+                && !ParseCommand(command, "GetRes", out _) && !ParseCommand(command, "IsFullscreen", out _)
+                && !ParseCommand(command, "GetCurrentRes", out _) && !ParseCommand(command, "GetCurrentColorDepth", out _)
+                && !ParseCommand(command, "GetColorDepths", out _) && !ParseCommand(command, "SetRes", out _)
+                && !ParseCommand(command, "MLOD", out _) && !ParseCommand(command, "GETPING", out _) && !ParseCommand(command, "GETLOSS", out _)
+                && !ParseCommand(command, "SAVEGAME", out _) && !ParseCommand(command, "FLUSH", out _)
+                && !(ParseCommand(command, "SET", out string hp2Set) && !(Tokens(hp2Set) is { Length: > 0 } hs
+                     && string.Equals(hs[0], "Input", StringComparison.OrdinalIgnoreCase))))
+                UEGameProfile.Stop(UEEdition.Game.HP2, $"ConsoleCommand(\"{command}\") (only GET, SET but SET Input, KEYNAME, KEYBINDING, MLOD, GETPING, GETLOSS, SAVEGAME and the resolution words of HP2's exec chain are judged)");
+            // UGameEngine::Exec SAVEGAME (Engine.dll.c:244086-244098; HP2 0x103a28a3..0x103a29ad the same test and appAtoi):
+            // ParseCommand(SAVEGAME);
             // if the first char of the remainder is not '0'..'9' the command is ACCEPTED silently, with no save and no
             // output (return 1); otherwise appAtoi(remainder) — leading digits — and SaveGame(N) (vtbl +0xb8).
             if (ParseCommand(command, "SaveGame", out string saveTail))
@@ -100,7 +209,10 @@ namespace HP1.UEScript
                 if (saveTail.Length == 0 || saveTail[0] < '0' || saveTail[0] > '9') return "";
                 if (SaveGameHandler is null)
                     throw new InvalidOperationException("ConsoleCommand(\"" + command + "\"): the host did not set SaveGameHandler");
-                return SaveGameHandler(AppAtoi(saveTail)) ?? "";
+                string saved = SaveGameHandler(AppAtoi(saveTail)) ?? "";
+                // HP2 [0x103a28d0..0x103a29ad]: MakeDirectory x2 and a log before (the handler), Exec("RestartSounds") after.
+                if (hp2) Execute(config, "RestartSounds", input, viewport, interp, alAudio);
+                return saved;
             }
             // EXIT/QUIT (Engine.dll.c:244045): ParseCommand — leading spaces/tabs
             // are skipped, the word is followed by any non-[A-Za-z0-9] char or the end.
@@ -120,6 +232,8 @@ namespace HP1.UEScript
                     throw new InvalidOperationException("ConsoleCommand(\"" + command + "\"): the host did not set OpenHandler");
                 return OpenHandler(openTail.Trim()) ?? "";
             }
+            // HP2: the same (UViewport::Exec [HP2 0x1038c195] ParseCommand(GETPING) -> Log("0" @0x104d8a88); no executor of HP2's
+            // chain takes GETLOSS: exec_chain_words).
             // GETPING — UViewport::Exec (0x103845f5): ParseCommand(GETPING), outputs the string @0x104d5990 — 4 bytes before
             // the word GETPING, L"0" (per .rdata layout). GETLOSS in the Engine disasm is only UNetConnection::Exec
             // (0x1043a348): in single player nobody handles it, ConsoleCommand output stays EMPTY (FStringOutputDevice
@@ -132,16 +246,31 @@ namespace HP1.UEScript
             // GET/SET — UObject::StaticExec (Core.dll.c:3373-3419): ParseCommand(GET|SET), then ParseToken of the class
             // (StaticFindObject; "ini:"/"usr:" resolved by ResolveName) and ParseToken of the property; for SET — spaces
             // and the whole rest of the line as the value.
+            // Original: UObject::StaticExec misses (disasm 0x1015ce7d..0x1015d086): both write to the command's output
+            // device with Logf(NAME_ExecWarning, ...) and return 1 —
+            //   GET: class token empty / StaticFindObject NULL -> "Unrecognized class %s" (0x101c0498, the class token);
+            //        property token empty / FindField NULL     -> "Unrecognized property %s" (0x101c0464, the property token);
+            //   SET: the same pair (0x101c0500 with SET's class token, 0x101c04cc with its property token).
+            // ParseToken always terminates its buffer (Core.dll.c:50928), so an absent token prints as "".
             bool isGet = ParseCommand(command, "GET", out string getTail);
-            string[] getTok = isGet ? Tokens(getTail) : null;
-            if (isGet && getTok.Length > 0 && getTok[0].StartsWith("ini:", StringComparison.OrdinalIgnoreCase))
+            int gpos = 0;
+            string getClassTok = isGet ? UEExecChain.ParseToken(getTail, ref gpos, 0x100, useEscape: true) : null;
+            string getPropTok = isGet ? UEExecChain.ParseToken(getTail, ref gpos, 0x100, useEscape: true) : null;
+            if (isGet && getClassTok.StartsWith("ini:", StringComparison.OrdinalIgnoreCase))
             {
                 if (config is null)
                     throw new InvalidOperationException(
                         "ConsoleCommand(\"" + command + "\") before config state is up");
-                if (getTok.Length < 2)
-                    throw new NotSupportedException("ConsoleCommand: " + command + " — no property (shipped: Unrecognized)");
-                (string section, string property) = SplitIniRef(config, getTok[0].Substring(4) + " " + getTok[1]);
+                // HP2: StaticFindObject's ResolveName [HP2 Core 0x10161db0, HP1's body] finds no package object for a
+                // DLL-only package UGameEngine::Init has not bound yet, so StaticExec answers "Unrecognized class".
+                if (Hp2LateBound(config, getClassTok) == false) return UnrecognizedClass + getClassTok;
+                string section = config.TryResolveSection(UEConfig.ScopeSystem, getClassTok.Substring(4));
+                if (section is null) return UnrecognizedClass + getClassTok;
+                if (getPropTok.Length == 0) return UnrecognizedProperty;
+                string property = getPropTok;
+                // FindField first: a DLL-only class's undeclared property is "Unrecognized property" whatever the ini holds
+                // (HP2's `get ini:Engine.Engine.AudioDevice Use3dHardware`: ALAudioSubsystem declares no Use3dHardware).
+                if (UENativeClassDefaults.Undeclared(section, property)) return UnrecognizedProperty + property;
                 string value = config.Get(UEConfig.ScopeSystem, section, property);
                 // ── A MISSING KEY IS NOT BROKEN DATA ─────────────────────────────
                 //
@@ -160,8 +289,8 @@ namespace HP1.UEScript
                 // taken from the binary. A plausible number must not be substituted —
                 // an invented answer is indistinguishable from a real one.
                 if (value is null)
-                    throw new KeyNotFoundException(
-                        "get ini: [" + section + "] " + property + " — the key is absent from the ini, and that is NORMAL: "
+                    throw new NotSupportedException(
+                        "get ini: [" + section + "] " + property + " (STOP) — the key is absent from the ini, and that is NORMAL: "
                         + "shipped answers with the CLASS DEFAULT (ResolveName substitutes the name, "
                         + "Core.dll.c:52103; UClass::Register raises the CDO and only then calls "
                         + "LoadConfig). The default of this particular property was not taken from the binary, so "
@@ -186,10 +315,8 @@ namespace HP1.UEScript
                 if (config is null)
                     throw new InvalidOperationException(
                         "ConsoleCommand(\"" + command + "\") before config state is up");
-                string[] tok = getTok;
-                if (tok.Length < 2)
-                    throw new NotSupportedException("ConsoleCommand: " + command + " — no class or property (shipped: Unrecognized)");
-                string classRef = tok[0], propName = tok[1];
+                if (getClassTok.Length == 0) return UnrecognizedClass;
+                string classRef = getClassTok, propName = getPropTok;
                 int dot = classRef.LastIndexOf('.');
                 string pkg = dot > 0 ? classRef.Substring(0, dot) : null;
                 string clsName = dot > 0 ? classRef.Substring(dot + 1) : classRef;
@@ -214,11 +341,24 @@ namespace HP1.UEScript
                 for (UELib.Core.UClass c = cls; c is not null && prop is null; c = HP1.Core.UEClassRegistry.Shared.CanonicalSuper(c))
                     foreach (UELib.Core.UProperty f in c.EnumerateFields<UELib.Core.UProperty>())
                         if (string.Equals(f.Name?.ToString(), propName, StringComparison.OrdinalIgnoreCase)) { prop = f; owner = c; break; }
-                if (prop is null)
-                    throw new NotSupportedException("ConsoleCommand: " + command + " — " + classRef + " has no property " + propName + " (shipped: Unrecognized property)");
+                if (prop is null || propName.Length == 0) return UnrecognizedProperty + propName;
                 bool global = prop.PropertyFlags.HasFlag(UELib.Flags.PropertyFlag.GlobalConfig);
+                // Not a config property: ExportText(0, Temp, Defaults, Defaults, PortFlags 1) of the class default object
+                // (disasm 0x1015cf0d..0x1015cf59; Data == Delta, so always ExportTextItem), then Log(Temp). Temp holds 256
+                // TCHARs: a longer text overruns the original's stack — not emulable, loud.
                 if (!global && !prop.PropertyFlags.HasFlag(UELib.Flags.PropertyFlag.Config))
-                    throw new NotSupportedException("ConsoleCommand: " + command + " — property is not config; ExportText of class defaults is not ported");
+                {
+                    if (interp is null)
+                        throw new InvalidOperationException("ConsoleCommand(\"" + command + "\") without the interpreter that owns class defaults");
+                    UEObject defs = interp.ClassDefaultsBag(cls);
+                    object v = defs.GetProp(UEObject.PropKey(cls, owner.Name, prop.Name.ToString()));
+                    if (prop.ArrayDim > 1) v = v is System.Collections.IList l && l.Count > 0 ? l[0] : null;
+                    string text = UEObjectConfig.ExportTextItem(prop, v, portFlags: 1);
+                    if (text.Length >= 256)
+                        throw new NotSupportedException("ConsoleCommand: " + command + " — the exported default (" + text.Length
+                            + " chars) overruns StaticExec's 256-TCHAR buffer in the original — STOP, §4");
+                    return text;
+                }
                 // CPF_GlobalConfig — section of the declaring class, otherwise of the class itself.
                 UELib.Core.UClass sectionOf = global ? owner : cls;
                 string scope = string.Equals(cls.ConfigName?.ToString(), "User", StringComparison.OrdinalIgnoreCase)
@@ -270,15 +410,32 @@ namespace HP1.UEScript
                 if (config is null)
                     throw new InvalidOperationException(
                         "ConsoleCommand(\"" + command + "\") before config state is up");
-                string tail = setTail.Substring(4).TrimStart();
-                int classEnd = tail.IndexOf(' ');
-                if (classEnd <= 0) throw new InvalidDataException("bad set ini command: " + command);
-                string classRef = tail.Substring(0, classEnd);
-                string rest = tail.Substring(classEnd + 1).TrimStart();
-                int propEnd = rest.IndexOf(' ');
-                string property = propEnd < 0 ? rest : rest.Substring(0, propEnd);
-                string value = propEnd < 0 ? "" : rest.Substring(propEnd + 1).TrimStart();
-                string section = config.ResolveSection(UEConfig.ScopeSystem, classRef);
+                // ParseToken class, ParseToken property, then only SPACES are skipped (Core.dll.c:3381) and the rest is
+                // the value.
+                int spos = 0;
+                string classTok = UEExecChain.ParseToken(setTail, ref spos, 0x100, useEscape: true);
+                // HP2: the same ResolveName as GET: an unbound late DLL package is "Unrecognized class"; a bound one stops.
+                bool? bound = Hp2LateBound(config, classTok);
+                if (bound == false) return UnrecognizedClass + classTok;
+                string section = config.TryResolveSection(UEConfig.ScopeSystem, classTok.Substring(4));
+                if (section is null) return UnrecognizedClass + classTok;
+                string property = UEExecChain.ParseToken(setTail, ref spos, 0x100, useEscape: true);
+                if (property.Length == 0) return UnrecognizedProperty;
+                while (spos < setTail.Length && setTail[spos] == ' ') spos++;
+                string value = setTail.Substring(spos);
+                // HP2, a bound late DLL class: GlobalSetProperty [HP2 Core 0x1015f300] ImportTexts the value into every live
+                // object of the class, calls its PostEditChange (vtable +0x40), then into the defaults and SaveConfig (the
+                // config write below). Ported for the live ALAudio device's MusicVolume / SoundVolume (UFloatProperty:
+                // appAtof; UEALAudio.PostEditChange); any other live device property stops.
+                if (bound == true)
+                {
+                    bool music = string.Equals(property, "MusicVolume", StringComparison.OrdinalIgnoreCase);
+                    if (!section.StartsWith("ALAudio.", StringComparison.OrdinalIgnoreCase) || alAudio is null
+                        || !(music || string.Equals(property, "SoundVolume", StringComparison.OrdinalIgnoreCase)))
+                        UEGameProfile.Stop(UEEdition.Game.HP2, $"ConsoleCommand(\"{command}\") (SET into a live HP2 device object)");
+                    if (music) alAudio.MusicVolume = UEValue.LeadingAtof(value); else alAudio.SoundVolume = UEValue.LeadingAtof(value);
+                    alAudio.PostEditChange();
+                }
                 config.Set(UEConfig.ScopeSystem, section, property, value);
                 return "";
             }
@@ -325,6 +482,21 @@ namespace HP1.UEScript
                         "SET Input without config state: the rebinding would not survive a restart");
                 config.Set(UEConfig.ScopeUser, InputSection, key, bound);
                 return "";
+            }
+            // ── SET <Class> <Property> <Value…> (every other SET) ───────────────
+            // Original: Core.dll ?StaticExec@UObject@@SAHPBGAAVFOutputDevice@@@Z [HP1 0x1015cf96..0x1015d086] [HP2 0x10160356..0x10160446] (SET branch)
+            //   ParseToken(0x100, escape) -> StaticFindObject(UClass, ANY_PACKAGE) -> ParseToken -> FindField (thunk 0x101011f9,
+            //   FUN_10147c30: the class's properties, then each GetInheritanceSuper's, appStricmp) -> skip ' ' only -> the rest
+            //   is the value -> GlobalSetProperty(value, Class, Property, Property->Offset, 1). No property-flag test anywhere
+            //   on this path (disasm): edit-only, const, native and config properties are all set alike.
+            if (isSet)
+            {
+                if (interp is null || liveActors is null)
+                    throw new InvalidOperationException("ConsoleCommand(\"" + command + "\") without the live objects and class defaults it writes");
+                // AActor::PostEditChange [HP1 Engine 0x10379aa0] [HP2 0x103049e4 thunk]: UObject::PostEditChange -> Modify (GUndo
+                // NULL in the game: nothing) and the RF flag only under GIsEditor — no effect in the game.
+                return ExecSet(command, interp, liveActors, _ => { },
+                    defaults => UEObjectConfig.SaveConfig(config, defaults, interp, isInstance: false));
             }
             // ── KEYNAME <n> (Engine.dll.c:251664 -> UInput::GetKeyName :72765) ──
             //
@@ -390,8 +562,16 @@ namespace HP1.UEScript
             // NOT ORIGINAL: the device's screen modes in any window
             // mode, see IViewportDevice.DisplayModes; the menu filter
             // (FEOptionsPage.IsSupportedResolution) is replaced — UEPortScriptOverrides.
+            // HP2 too (author decision 2026-11-16, DECISIONS.md): the same improvement; HP2's FESoundVideoPage list is
+            // rebuilt with every mode after its shipped filter (UEPortScriptOverrides.HP2Table).
             if (ParseCommand(command, "GetRes", out _))
                 return RequireViewport(viewport, "GetRes").DisplayModes;
+
+            // Original: WinDrv.dll ?Exec@UWindowsViewport@@UAEHPBGAAVFOutputDevice@@@Z [HP2 0x11107e90] (IsFullscreen branch 0x11107f23..0x11107f74, HP2 only)
+            // IsFullscreen: Logf("True" @0x1111e140 / "False" @0x1111e130) on BlitFlags & 1 ([this+0x190], IsFullscreen()'s
+            // bit, IViewportDevice.Fullscreen); returns that bit, which execConsoleCommand discards [HP2 Engine 0x103e2d76].
+            if (hp2 && ParseCommand(command, "IsFullscreen", out _))
+                return RequireViewport(viewport, "IsFullscreen").Fullscreen ? "True" : "False";
 
             // ToggleFullscreen (UWindowsViewport::Exec, WinDrv.dll.c:5090 -> ToggleFullscreen :697): from a window —
             // TryRenderDevice(GameRenderDevice, -1, -1, -1, Fullscreen=1), size from the Fullscreen* keys (ResizeViewport
@@ -399,11 +579,7 @@ namespace HP1.UEScript
             // pair of the new mode (:15366-15379) — the same step 4 as SetRes.
             if (ParseCommand(command, "ToggleFullscreen", out _))
             {
-                if (config is null) throw new InvalidOperationException("ToggleFullscreen before config state is up");
-                IViewportDevice vp = RequireViewport(viewport, "ToggleFullscreen");
-                bool toFull = !vp.Fullscreen;
-                (int x, int y) = UEViewportStartup.SavedSize(config, toFull);
-                if (vp.Resize(x, y, 0, toFull) == ViewportResizeOutcome.Applied) CommitAppliedResize(config, vp);
+                ToggleFullscreen(config, viewport);
                 return "";
             }
 
@@ -495,6 +671,21 @@ namespace HP1.UEScript
                 return "Flushed engine caches";
             }
 
+            // Original: Render.dll ?Exec@URender@@UAEHPBGAAVFOutputDevice@@@Z [HP1 0x10b1f240] [HP2 body_diff identical] (MLOD branch)
+            // MLOD: no executor before URender::Exec takes it (exec_chain_words). Tail "" (appStrcmp, 0x10b719c8) -> Logf("%f",
+            // GlobalShapeLOD); else appAtof(tail) > 0.0 (.rdata 0x10b385bc; fcomp, test ah 0x41) -> GlobalShapeLOD (URender+0x4c:
+            // FExec at +0x28, field +0x24) = (float)appAtof, then Logf("Global mesh shape LOD distance %f"). HP2 only: no HP1
+            // script sends it. ponytail: LeadingAtof is float, so a positive tail below the float range (1e-50) compares as 0
+            // and is not stored where the double compare would store 0.0f; no shipped trigger (HP2 sends 0.1..1.0).
+            if (hp2 && ParseCommand(command, "MLOD", out string mlodTail))
+            {
+                var inv = System.Globalization.CultureInfo.InvariantCulture;
+                if (mlodTail.Length == 0) return UEMeshLod.ConsoleGlobalShapeLOD.ToString("F6", inv);
+                float v = UEValue.LeadingAtof(mlodTail);
+                if (v > 0f) UEMeshLod.ConsoleGlobalShapeLOD = v;
+                return "Global mesh shape LOD distance " + ((double)UEMeshLod.ConsoleGlobalShapeLOD).ToString("F6", inv);
+            }
+
             // ── SNAP <n> (Engine.dll.c:50313, UViewport::Exec) ─────────────────
             //
             // Shipped: SnapX = SizeX/2^n, SnapY = SizeY/2^n (viewport +0xd0/+0xd4)
@@ -544,6 +735,101 @@ namespace HP1.UEScript
             return "";
         }
 
+        // The SET branch of StaticExec (above): the output line ("" when GlobalSetProperty ran). `postEditChange` is the
+        // object's vtable +0x40 call, `saveConfig` SaveConfig(Defaults, CPF_Config, NULL). tools/hp2/console_set_judge.py
+        // runs it through runtime_poc --hp2-setcase.
+        internal static string ExecSet(string command, UEInterpreter interp, IEnumerable<UEObject> liveActors,
+            Action<UEObject> postEditChange, Action<UEObject> saveConfig)
+        {
+            ParseCommand(command, "SET", out string setTail);
+            int spos = 0;
+            string classTok = UEExecChain.ParseToken(setTail, ref spos, 0x100, useEscape: true);
+            if (classTok.Length == 0) return UnrecognizedClass;
+            UELib.Core.UClass cls = FindScriptClass(classTok)
+                ?? throw new NotSupportedException("ConsoleCommand: " + command + " — class " + classTok + " not found in the packages "
+                    + "(shipped: Unrecognized class unless a DLL-only class has that name) — STOP, §4");
+            string propTok = UEExecChain.ParseToken(setTail, ref spos, 0x100, useEscape: true);
+            UELib.Core.UProperty prop = propTok.Length == 0 ? null : FindProperty(cls, propTok, out _);
+            if (prop is null) return UnrecognizedProperty + propTok;
+            while (spos < setTail.Length && setTail[spos] == ' ') spos++;
+            GlobalSetProperty(setTail.Substring(spos), cls, prop, liveActors, interp.ClassDefaultsBag(cls), postEditChange, saveConfig);
+            return "";
+        }
+
+        // StaticFindObject(UClass, ANY_PACKAGE, "[Package.]Class") over the loaded script classes.
+        static UELib.Core.UClass FindScriptClass(string classRef)
+        {
+            int dot = classRef.LastIndexOf('.');
+            string pkg = dot > 0 ? classRef.Substring(0, dot) : null;
+            UELib.Core.UClass cls = HP1.Core.UEClassRegistry.Shared?.Find(dot > 0 ? classRef.Substring(dot + 1) : classRef);
+            return cls is not null && pkg is not null && !string.Equals(cls.Package?.PackageName, pkg, StringComparison.OrdinalIgnoreCase)
+                ? null : cls;
+        }
+
+        // FindField<UProperty> (FUN_10147c30): the class's own properties, then each super's, case-insensitive.
+        static UELib.Core.UProperty FindProperty(UELib.Core.UClass cls, string name, out UELib.Core.UClass owner)
+        {
+            for (owner = cls; owner is not null; owner = HP1.Core.UEClassRegistry.Shared.CanonicalSuper(owner))
+                foreach (UELib.Core.UProperty f in owner.EnumerateFields<UELib.Core.UProperty>())
+                    if (string.Equals(f.Name?.ToString(), name, StringComparison.OrdinalIgnoreCase)) return f;
+            return null;
+        }
+
+        // Native actor classes whose PostEditChange (vtable +0x40) is not AActor's: AZoneInfo's (ZoneInfo, LevelInfo,
+        // SkyZoneInfo, WarpZoneInfo), AMover's, AParticleFX's — the vtables of HP1 1.53 and HP2 Engine.dll (every other
+        // exported actor vtable holds ?PostEditChange@AActor@@UAEXXZ). Their bodies are not ported.
+        static readonly string[] OwnPostEditChange = { "ZoneInfo", "Mover", "ParticleFX" };
+
+        // Original: Core.dll ?GlobalSetProperty@UObject@@SAXPBGPAVUClass@@PAVUProperty@@HH@Z [HP1 0x1015bf40] [HP2 0x1015f300]
+        //   bNotify (always 1 from StaticExec): for every GObjObjects entry that IsA(Class): Property->ImportText(Value,
+        //   Object + Offset, 1) (vtable +0x88: element 0 only, PortFlags 1 — no ImportText body tests bit 1, only bit 2) and
+        //   Object->PostEditChange() (vtable +0x40); then ImportText(Value, Class->Defaults + Offset, 1) and
+        //   SaveConfig(Defaults, CPF_Config, NULL). A refused text (ImportText's NULL) leaves the element as it was.
+        //   PostEditChange of an actor is AActor's [HP1 Engine 0x10379aa0]: UObject::PostEditChange -> Modify (GUndo NULL
+        //   in the game: nothing), and the RF flag only under GIsEditor — no effect, so the walk order is unobservable. The
+        //   port's live objects of a class are its actors (the game level's and Entry's); a non-actor class stops.
+        internal static void GlobalSetProperty(string value, UELib.Core.UClass cls, UELib.Core.UProperty prop,
+            IEnumerable<UEObject> liveActors, UEObject defaults, Action<UEObject> postEditChange, Action<UEObject> saveConfig)
+        {
+            var reg = HP1.Core.UEClassRegistry.Shared;
+            if (!reg.IsChildOfClass(cls, reg.Find("Actor")))
+                throw new NotSupportedException("SET " + cls.Name + " " + prop.Name + ": live objects of a non-actor class are not "
+                    + "enumerable in the port (GlobalSetProperty walks GObjObjects) — STOP, §4");
+            string owner = (prop.Outer as UELib.Core.UClass)?.Name ?? prop.Outer?.Name.ToString();
+            foreach (UEObject a in liveActors)
+            {
+                if (a?.Class is null || !reg.IsChildOfClass(a.Class, cls)) continue;
+                foreach (string n in OwnPostEditChange)
+                    if (reg.Find(n) is { } k && reg.IsChildOfClass(a.Class, k))
+                        throw new NotSupportedException("SET " + cls.Name + " " + prop.Name + ": " + a.GetProp(PK.Name)
+                            + " is a " + n + ", whose native PostEditChange is not ported — STOP, §4");
+                ImportElement0(a, owner, prop, value);
+                postEditChange(a);
+            }
+            ImportElement0(defaults, owner, prop, value);
+            saveConfig(defaults);
+        }
+
+        static void ImportElement0(UEObject obj, string owner, UELib.Core.UProperty prop, string value)
+        {
+            string key = UEObject.PropKey(obj.Class, owner, prop.Name.ToString());
+            object slot = obj.GetProp(key);
+            if (prop.ArrayDim > 1)
+            {
+                if (slot is not System.Collections.IList list || list.Count == 0)
+                    throw new InvalidOperationException("SET: static array " + owner + "." + prop.Name + " not preallocated");
+                object cur = list[0];
+                UEObjectConfig.ImportItem(prop, value, 0, 1, ref cur, out bool w);
+                if (w) list[0] = cur;
+                return;
+            }
+            UEObjectConfig.ImportItem(prop, value, 0, 1, ref slot, out bool wrote);
+            if (wrote) obj.SetProp(key, slot);
+        }
+
+        // Core .rdata 0x101c0498 / 0x101c0500 and 0x101c0464 / 0x101c04cc, "%s" filled by the caller.
+        const string UnrecognizedClass = "Unrecognized class ", UnrecognizedProperty = "Unrecognized property ";
+
         static bool _snapNoted;
         static readonly HashSet<string> _unrecognisedNoted = new(StringComparer.OrdinalIgnoreCase);
 
@@ -556,6 +842,18 @@ namespace HP1.UEScript
         // THE MODE PICKS THE KEY PAIR. In shipped it is the same branch as when
         // reading the size (:15133-15144): in fullscreen the applied values go to
         // the Fullscreen* keys, in a window to Windowed*.
+        // The toggle itself, also called without the console word: Alt+Enter (WinDrv calls ToggleFullscreen directly,
+        // WinDrv.dll.c:3335-3343) and the Display Mode menu item (UEPortScriptOverrides) — HP2 included, whose exec chain
+        // does not take the word from a script (no shipped HP2 script sends it).
+        public static void ToggleFullscreen(UEConfig config, IViewportDevice viewport)
+        {
+            if (config is null) throw new InvalidOperationException("ToggleFullscreen before config state is up");
+            IViewportDevice vp = RequireViewport(viewport, "ToggleFullscreen");
+            bool toFull = !vp.Fullscreen;
+            (int x, int y) = UEViewportStartup.SavedSize(config, toFull);
+            if (vp.Resize(x, y, 0, toFull) == ViewportResizeOutcome.Applied) CommitAppliedResize(config, vp);
+        }
+
         internal static void CommitAppliedResize(UEConfig config, IViewportDevice vp)
         {
             string section = config.ResolveSection(UEConfig.ScopeSystem, UEConfig.ViewportRef);
@@ -600,7 +898,7 @@ namespace HP1.UEScript
         // do not occur in campaign commands.
         static string[] Tokens(string s) => (s ?? "").Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
 
-        static bool ParseCommand(string command, string word, out string tail)
+        internal static bool ParseCommand(string command, string word, out string tail)
         {
             tail = null;
             int i = 0;
@@ -638,23 +936,6 @@ namespace HP1.UEScript
             for (int i = 0; i < names.Count; i++)
                 if (string.Equals(names[i], want, StringComparison.OrdinalIgnoreCase)) return i;
             return -1;
-        }
-
-        // Parse `<ClassRef> <Property>` of the `get` form: the property name is the
-        // LAST token, everything before it is the class reference. Section indirection
-        // (`Engine.Engine.AudioDevice` -> `Galaxy.GalaxyAudioSubsystem`) is resolved by
-        // config: in shipped data the same name MusicVolume lives in both
-        // [Audio.GenericAudioSubsystem] and [Galaxy.GalaxyAudioSubsystem], and the
-        // choice is made by that data, not by code.
-        static (string Section, string Property) SplitIniRef(UEConfig config, string tail)
-        {
-            int split = tail.LastIndexOf(' ');
-            if (split <= 0) throw new InvalidDataException("bad ini console command: " + tail);
-            string classRef = tail.Substring(0, split);
-            string property = tail.Substring(split + 1);
-            if (classRef.LastIndexOf('.') <= 0)
-                throw new InvalidDataException("bad ini class reference: " + classRef);
-            return (config.ResolveSection(UEConfig.ScopeSystem, classRef), property);
         }
 
         static int AppAtoi(string text) => UEValue.LeadingAtoi(text);

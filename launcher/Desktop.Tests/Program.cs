@@ -2,9 +2,11 @@
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Headless;
+using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.LogicalTree;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using HPEngine.Launcher;
 
 static partial class T
@@ -22,8 +24,31 @@ static partial class T
 
     static int Main(string[] args)
     {
+        // The language modes of launcher/Launcher.swift, run on GameLanguage.cs (the owner): launcher/test_update.sh compares.
         if (args.Length == 3 && args[0] == "--language-select")
-        { HPEngine.Packaging.GameLanguage.Save(args[1], args[2] == "default" ? null : args[2]); return 0; }
+        {
+            try { HPEngine.Packaging.GameLanguage.Save(args[1], args[2] == "default" ? null : args[2]); Console.WriteLine("OK"); return 0; }
+            catch (InvalidDataException e) { Console.WriteLine("FAIL " + e.Message); return 1; }
+        }
+        if (args.Length == 2 && args[0] == "--language-list")
+        {
+            foreach (var l in HPEngine.Packaging.GameLanguage.Available(args[1])) Console.WriteLine($"{l.Code}|{l.Label}|{l.Folder ?? "-"}");
+            Console.WriteLine("selected=" + (HPEngine.Packaging.GameLanguage.Selected(args[1]) ?? "-"));
+            return 0;
+        }
+        if (args.Length == 3 && args[0] == "--edition-label")
+        {
+            var d = EditionLabel.Describe(args[1], HPEngine.Packaging.GameLanguage.Available(args[2]));
+            Console.WriteLine($"{d.Name}|{d.Tier}|{d.Detail ?? "-"}");
+            return 0;
+        }
+        if (args.Length == 3 && args[0] == "--hp2-frontend") return Hp2FrontEndCases(args[1], args[2]);
+        if ((args.Length == 3 || args.Length == 6) && args[0] == "--hp2-menu") return Hp2Menu(args);
+        if (args.Length == 2 && args[0] == "--mods-conflicts")
+        {
+            foreach (var l in ModsIni.Conflicts(args[1])) Console.WriteLine(l);
+            return 0;
+        }
         if (args.Length == 3 && args[0] == "--language-shot")
         { LanguageShot(args[1], args[2]); return 0; }
         if (args.Length == 2 && args[0] == "--shots") { Shots(args[1]); return 0; }
@@ -41,21 +66,28 @@ static partial class T
             foreach (var l in StartMap.Labels(StartMap.Added(args[1]))) Console.WriteLine(l);
             return 0;
         }
+        if (args.Length == 2 && args[0] == "--game-scope") { foreach (var l in ScopeTable(args[1])) Console.WriteLine(l); return 0; }
+        if (args.Length == 1 && args[0] == "--pad-map") { foreach (var l in PadTable()) Console.WriteLine(l); return 0; }
         if (args.Length == 3 && args[0] == "--engine-error")
         {
             Console.WriteLine(EngineError.Banner(File.ReadAllLines(args[2]), int.Parse(args[1]), "L."));
             return 0;
         }
-        Protocol(); Ini(); Dirs(); Releases(); Removal(); Smoke(); Notice(); Errors(); ModProblems(); StartMaps(); OwnGame(); PadResetRule(); SelfUpdateCases(); SteamCases(); TitleCases(); Languages();
+        // The checks below run the preview build's HP2 tab; Hp2Off checks the release switch off.
+        bool releaseDefault = Hp2Release.Available; Hp2Release.Available = true;
+        Protocol(); Ini(); Dirs(); Releases(); Removal(); Smoke(); Hp2Off(releaseDefault); Notice(); Errors(); ModProblems(); ModConflicts(); StartMaps(); OwnGame(); PadResetRule(); PadCases(); ScopeCases(); SelfUpdateCases(); SteamCases(); TitleCases(); Languages(); Hp2Tab();
         Console.WriteLine("branches: " + string.Join(" ", fired.OrderBy(x => x)));
         if (fails > 0) return 1;
         foreach (var b in new[] { "language:overlay", "language:window", "language:missing", "language:stale", "language:default", "language:edition" })
             if (!fired.Contains(b)) { Console.WriteLine("NOVERDICT: branch did not execute: " + b); return 3; }
-        foreach (var b in new[] { "proto:all-kinds", "proto:malformed", "ini:roundtrip", "ini:missing-section", "dir:3os", "pick:prerelease-build", "smoke:not-installed", "smoke:installed", "smoke:toggle", "smoke:reorder", "rm:keep", "rm:all", "rm:marker-first", "rm:symlink", "notice:cases", "notice:window", "err:pick", "mods:missing", "mods:misplaced", "mods:play-blocked", "map:list", "map:window", "own:rule", "own:window", "pad:reset", "pad:nothing", "title:rules", "title:window", "steam:vdf", "steam:running", "steam:add", "steam:damaged", "steam:denied" })
+        foreach (var b in new[] { "proto:all-kinds", "proto:malformed", "ini:roundtrip", "ini:missing-section", "dir:3os", "pick:prerelease-build", "smoke:not-installed", "smoke:installed", "smoke:toggle", "smoke:reorder", "smoke:pad", "rm:keep", "rm:all", "rm:marker-first", "rm:symlink", "notice:cases", "notice:window", "err:pick", "mods:missing", "mods:misplaced", "mods:play-blocked", "mods:conflict", "mods:order-window", "map:list", "map:window", "own:rule", "own:window", "pad:reset", "pad:nothing", "pad:map", "keys:shortcuts", "scope:rules", "scope:window", "hp2:off", "title:rules", "title:window", "steam:vdf", "steam:running", "steam:add", "steam:damaged", "steam:denied" })
             if (!fired.Contains(b)) { Console.WriteLine("NOVERDICT: branch did not execute: " + b); return 3; }
         foreach (var b in new[] { "upd:signed-good", "upd:refused", "upd:zip", "upd:apply", "upd:rollback", "upd:rollback-backup", "upd:rollback-incomplete", "upd:marker-shown", "upd:log-denied", "upd:helper-cleanup", "upd:helper", "upd:helper-waits", "upd:helper-timeout", "upd:install-error", "upd:pick" })
             if (!fired.Contains(b)) { Console.WriteLine("NOVERDICT: branch did not execute: " + b); return 3; }
         if (!OperatingSystem.IsWindows() && !Environment.IsPrivilegedProcess && !fired.Contains("upd:cleanup-denied")) { Console.WriteLine("NOVERDICT: branch did not execute: upd:cleanup-denied"); return 3; }
+        foreach (var b in new[] { "hp2:tab", "hp2:hp1-unchanged" })
+            if (!fired.Contains(b)) { Console.WriteLine("NOVERDICT: branch did not execute: " + b); return 3; }
+        if (!OperatingSystem.IsWindows() && !fired.Contains("hp2:play-args")) { Console.WriteLine("NOVERDICT: branch did not execute: hp2:play-args"); return 3; }
         if (!OperatingSystem.IsWindows() && !fired.Contains("map:play-args")) { Console.WriteLine("NOVERDICT: branch did not execute: map:play-args"); return 3; }
         Console.WriteLine("all passed");
         return 0;
@@ -159,7 +191,8 @@ static partial class T
             var full = SaveHead(5, "Alpha");
             Check("reader: truncated -> unknown", ModsNotice.ReadSlot(full[..12]) == null && ModsNotice.ReadSlot(Array.Empty<byte>()) == null);
             Check("reader: not a save -> unknown", ModsNotice.ReadSlot(System.Text.Encoding.ASCII.GetBytes("garbage file")) == null);
-            Check("reader: newer version -> unknown", ModsNotice.ReadSlot(SaveHead(6)) == null);
+            Check("reader: v6 (actor slots) reads like v5", ModsNotice.ReadSlot(SaveHead(6, "A")) is { Mods.Count: 1, Legacy: false });
+            Check("reader: newer version -> unknown", ModsNotice.ReadSlot(SaveHead(7)) == null);
             var bad = (byte[])full.Clone(); bad[11] = 0xff; bad[12] = 0xff; bad[13] = 0xff; bad[14] = 0x7f;
             Check("reader: absurd mod count -> unknown", ModsNotice.ReadSlot(bad) == null);
             (int, ModsNotice.SlotMods) S(int n, int v, params string[] m) => (n, ModsNotice.ReadSlot(SaveHead(v, m)));
@@ -260,6 +293,45 @@ static partial class T
         finally { Directory.Delete(tmp, true); }
     }
 
+    // Two enabled mods with a file at the same game path (ModOverlay.Conflicts: the engine's placement, without case; a
+    // flat file goes where its extension's game directory is), and the apply-order numbers of the list.
+    static void ModConflicts()
+    {
+        var tmp = Path.Combine(Path.GetTempPath(), "hp1-conflict-test-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var g = Path.Combine(tmp, "game");
+            foreach (var f in new[] { "System/Default.ini", "System/Shared.u", "Textures/A.utx", "HPEngineData/x",
+                "Mods/A/Textures/A.utx", "Mods/A/System/Shared.u", "Mods/B/textures/a.utx", "Mods/B/Shared.u", "Mods/B/readme.txt",
+                "Mods/C/Textures/A.UTX", "Mods/C/Textures/Own.utx", "Mods/D/Textures/A.utx", "Mods/E/System/E.u", "Mods/E/E.u" })
+            { Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(g, f))); File.WriteAllText(Path.Combine(g, f), "x"); }
+            File.WriteAllText(Path.Combine(g, "System/Default.ini"), "[Core.System]\nPaths=../System/*.u\nPaths=../Textures/*.utx\n");
+            File.WriteAllText(Path.Combine(g, ".hp1-installed"), "edition=US 1.53: exact\n");
+            void On(params string[] m) => File.WriteAllText(ModsIni.IniPath(g), "[Mods]\n" + string.Concat(m.Select(x => $"Enabled={x}\n")));
+            On("A", "B", "C");
+            Seq("conflicts: per pair in order, paths without case, a flat file at its game directory", new[] {
+                "B and A both have System/Shared.u and 1 more file: the game uses B's (later in the order)",
+                "C and B both have Textures/A.UTX: the game uses C's (later in the order)" }, ModsIni.Conflicts(g));
+            On("C", "A");
+            Seq("conflicts: the other order names the other winner", new[] { "A and C both have Textures/A.utx: the game uses A's (later in the order)" }, ModsIni.Conflicts(g));
+            On("A"); Seq("conflicts: one mod alone replaces game files, no line", Array.Empty<string>(), ModsIni.Conflicts(g));
+            On("E", "D"); Seq("conflicts: one mod's flat and laid-out copy of a file is not a conflict", Array.Empty<string>(), ModsIni.Conflicts(g));
+            On("A", "Ghost"); Seq("conflicts: mods that cannot be placed: none, no exception", Array.Empty<string>(), ModsIni.Conflicts(g));
+            fired.Add("mods:conflict");
+            On("A", "B", "C");
+            var w = new MainWindow(g, tmp, "0.1.0-beta", false); w.Show(); Dispatcher.UIThread.RunJobs();
+            Check("window: conflict lines in the Mods notice", Find<TextBlock>(w, "ModsNoticeText").Text.Contains("C and B both have Textures/A.UTX"), Find<TextBlock>(w, "ModsNoticeText").Text);
+            string Order() => string.Join("|", new[] { "A", "B", "C", "D" }.Select(n => n + "=" + (Find<TextBlock>(w, "ModOrder_" + n)?.Text ?? "-")));
+            Eq("window: enabled mods numbered in apply order, a disabled one not", "A=1|B=2|C=3|D=-", Order());
+            Eq("window: the order hint", ModsIni.OrderHint, Find<TextBlock>(w, "ModsHint").Text);
+            Find<Button>(w, "Up_C").RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Dispatcher.UIThread.RunJobs();
+            Eq("window: numbers follow a move", "A=1|B=3|C=2|D=-", Order());
+            Check("window: the conflict lines follow a move", Find<TextBlock>(w, "ModsNoticeText").Text.Contains("B and C both have textures/a.utx"), Find<TextBlock>(w, "ModsNoticeText").Text);
+            w.Close(); fired.Add("mods:order-window");
+        }
+        finally { Directory.Delete(tmp, true); }
+    }
+
     // "Start map": the maps the enabled mods add (ModOverlay.AddedMaps, the engine's placement), the window's choice and
     // the engine arguments of Play (a stand-in engine that writes its arguments down; not on Windows: a shell script).
     static void StartMaps()
@@ -311,6 +383,38 @@ static partial class T
             Find<ToggleSwitch>(w, "Mod_Xmas").IsChecked = false; Dispatcher.UIThread.RunJobs();
             Eq("window: the chosen map's mod off, back to Game", "Game (normal start)|Early_Potions #0", Items());
             fired.Add("map:window");
+            // A long list (author 2026-11-16): 30 maps scroll in a drop-down that fits the window; End reaches the last map and
+            // scrolls it into view, Home the first; the gamepad's Down (sent as the Down key) moves the choice and keeps it in view.
+            for (int k = 1; k <= 30; k++) { var f = Path.Combine(g, "Mods", "Long", "Maps", $"L{k:00}.unr"); Directory.CreateDirectory(Path.GetDirectoryName(f)); File.WriteAllText(f, "x"); }
+            var kept = File.ReadAllText(ModsIni.IniPath(g)); List("Long");
+            var lw = new MainWindow(g, tmp, "0.1.0-beta", false); lw.Show(); Dispatcher.UIThread.RunJobs();
+            var lc = Find<ComboBox>(lw, "StartMap");
+            void Tick() { Dispatcher.UIThread.RunJobs(); AvaloniaHeadlessPlatform.ForceRenderTimerTick(); Dispatcher.UIThread.RunJobs(); }
+            Control Focused() => TopLevel.GetTopLevel(lc.ContainerFromIndex(0) as Control ?? lc)?.FocusManager?.GetFocusedElement() as Control;
+            int At() => Focused() is { } f ? lc.IndexFromContainer(f) : -1;
+            void LKey(Avalonia.Input.Key k) { var f = Focused(); f?.RaiseEvent(new KeyEventArgs { RoutedEvent = InputElement.KeyDownEvent, Key = k, Source = f }); Tick(); }
+            bool InView(int index)
+            {
+                var item = lc.ContainerFromIndex(index) as Control; var sv = item?.FindAncestorOfType<ScrollViewer>();
+                if (sv == null || item == null || !item.IsEffectivelyVisible) return false;
+                var top = item.TranslatePoint(new Point(0, 0), sv); var bottom = item.TranslatePoint(new Point(0, item.Bounds.Height), sv);
+                return top is { } t && bottom is { } b && t.Y >= -0.5 && b.Y <= sv.Viewport.Height + 0.5;
+            }
+            lc.Focus(); lc.IsDropDownOpen = true; Tick();
+            var lsv = (lc.ContainerFromIndex(0) as Control)?.FindAncestorOfType<ScrollViewer>();   // in the drop-down's own popup
+            Check("long list: the drop-down scrolls (its content taller than its viewport, at most the window)", lsv != null && lsv.Extent.Height > lsv.Viewport.Height + 1 && lsv.Viewport.Height <= lw.Height,
+                $"extent {lsv?.Extent} viewport {lsv?.Viewport}");
+            Check("long list: the scroll bar is always shown", lsv != null && !lsv.AllowAutoHide);
+            Check("long list: opens with the choice focused", At() == 0, $"at {At()}");
+            LKey(Avalonia.Input.Key.End);
+            Check("long list: End reaches the last map, in view", At() == 30 && InView(30), $"at {At()}");
+            LKey(Avalonia.Input.Key.Home);
+            Check("long list: Home back to Game, in view", At() == 0 && InView(0), $"at {At()}");
+            for (int k = 0; k < 15; k++) { lw.Pad(PadMap.Down); Tick(); }
+            Check("long list: the pad's d-pad x15 keeps the focused map in view", At() == 15 && InView(15), $"at {At()}");
+            lw.Pad(PadMap.A); Tick();
+            Check("long list: A picks the focused map", !lc.IsDropDownOpen && lc.SelectedItem as string == "L15", $"{lc.SelectedItem} open={lc.IsDropDownOpen}");
+            lw.Close(); File.WriteAllText(ModsIni.IniPath(g), kept); fired.Add("map:long-list");
             if (!OperatingSystem.IsWindows())
             {
                 var exe = Path.Combine(tmp, "HPEngine", "HPEngine"); Directory.CreateDirectory(Path.GetDirectoryName(exe));
@@ -364,6 +468,83 @@ static partial class T
             fired.Add("own:window");
         }
         finally { Directory.Delete(tmp, true); }
+    }
+
+    // The gamepad's one answer (PadMap): the whole table as launcher/Launcher.swift --pad-map prints it (test_update.sh
+    // compares the two byte for byte): every button x popup x tab, the stick around half way, the presses between two polls.
+    static IEnumerable<string> PadTable()
+    {
+        for (int b = 0; b <= 15; b++) foreach (var popup in new[] { false, true }) foreach (var hp2 in new[] { false, true })
+            yield return $"button {b} popup={(popup ? 1 : 0)} hp2={(hp2 ? 1 : 0)} {PadMap.For(b, popup, hp2)}";
+        foreach (var (x, y) in new[] { (0, 0), (16000, 0), (16001, 0), (-16000, 0), (-16001, 0), (0, 16001), (0, -16001), (0, 16000), (32767, 32767), (-32768, -32768), (-32768, 16001) })
+            yield return $"stick {x} {y} {PadMap.Stick(x / 32767.0, y / 32767.0)}";
+        foreach (var (now, last) in new[] { (0u, 0u), (1u, 0u), (1u, 1u), (0b1011u, 0b0001u), (1u << 14 | 1u << 9, 1u << 14), (1u << 15, 0u), (0x7FFFu, 0u) })
+            yield return $"pressed {now} {last} {string.Join(",", PadMap.Pressed(now, last))}";
+    }
+    // Per game (GameScope): the table launcher/Launcher.swift --game-scope prints (test_update.sh compares).
+    static IEnumerable<string> ScopeTable(string game)
+    {
+        foreach (var tab in new[] { false, true }) foreach (var h1 in new[] { null, "e1" }) foreach (var h2 in new[] { null, "e2" }) foreach (var l in new[] { null, "eL" })
+            yield return $"error hp2Tab={(tab ? 1 : 0)} hp1={h1 ?? "-"} hp2={h2 ?? "-"} launcher={l ?? "-"} -> {GameScope.Error(tab, h1, h2, l) ?? "-"}";
+        foreach (var hp2 in new[] { false, true })
+            yield return $"game hp2={(hp2 ? 1 : 0)} data={GameScope.DataDir(game, hp2)} logs={GameScope.LogsDir(game, hp2)} console={GameScope.ConsoleLog("/d/HPEngine.log", hp2)}";
+        foreach (var on in new[] { false, true }) foreach (var folder in new[] { false, true })
+            yield return $"hp2tab available={(on ? 1 : 0)} folder={(folder ? 1 : 0)} caption={Hp2Release.Caption(on, folder) ?? "-"} tip={Hp2Release.Tip(on) ?? "-"}";
+    }
+    // The release switch off (Hp2Release, release 0.4.0): the HP2 tab disabled, "Coming soon", its tooltip; no click, Ctrl+2
+    // or pad RB selects it; a saved HP2 folder is ignored. The plain build (no -p:HPEngineHp2) is the release.
+    static void Hp2Off(bool releaseDefault)
+    {
+        Check("hp2 off: the default build is the release (HP2 off)", !releaseDefault);   // after Smoke: the headless platform is set up
+        var tmp = Path.Combine(Path.GetTempPath(), "hp1-hp2off-" + Guid.NewGuid().ToString("N"));
+        Hp2Release.Available = false;
+        try
+        {
+            var game = Path.Combine(tmp, "game"); Directory.CreateDirectory(Path.Combine(game, "HPEngineData"));
+            File.WriteAllText(Path.Combine(game, ".hp1-installed"), "data=x\nedition=US 1.53: exact\n");
+            var h2 = Path.Combine(tmp, "hp2"); Directory.CreateDirectory(Path.Combine(h2, "System"));
+            File.WriteAllText(Path.Combine(h2, "System", "Engine.dll"), "x"); File.WriteAllText(Path.Combine(h2, "System", "Startup.int"), "[IDDIALOG_FrontEndPageMainMenu]\n");
+            File.WriteAllText(Path.Combine(tmp, "hp2-root.txt"), h2);   // a saved HP2 folder: ignored while off
+            var w = new MainWindow(game, tmp, "0.4.0", false); w.Show(); Dispatcher.UIThread.RunJobs();
+            var tab = Find<Button>(w, "TabHp2");
+            Check("hp2 off: the tab disabled, \"Coming soon\", its tooltip", !tab.IsEnabled && ((StackPanel)tab.Content).Children.OfType<TextBlock>().Any(t => t.IsVisible && t.Text == "· Coming soon")
+                && (ToolTip.GetTip(tab) as string) == "Harry Potter 2 is coming soon. Wait for updates.");
+            tab.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Dispatcher.UIThread.RunJobs();
+            w.Pad(PadMap.RB); Dispatcher.UIThread.RunJobs();
+            w.RaiseEvent(new Avalonia.Input.KeyEventArgs { RoutedEvent = Avalonia.Input.InputElement.KeyDownEvent, Key = Avalonia.Input.Key.D2, KeyModifiers = Avalonia.Input.KeyModifiers.Control }); Dispatcher.UIThread.RunJobs();
+            Check("hp2 off: click, pad RB and Ctrl+2 leave HP1 selected", Find<StackPanel>(w, "ReadyPanel").IsVisible && !Find<StackPanel>(w, "Hp2Panel").IsVisible);
+            w.Close(); fired.Add("hp2:off");
+        }
+        finally { Hp2Release.Available = true; Directory.Delete(tmp, true); }
+    }
+
+    static void ScopeCases()
+    {
+        Check("scope: HP2's error not on the HP1 tab, HP1's not on HP2", GameScope.Error(false, null, "e2", null) == null && GameScope.Error(true, "e1", null, null) == null);
+        Check("scope: each tab its own game's error", GameScope.Error(false, "e1", "e2", null) == "e1" && GameScope.Error(true, "e1", "e2", null) == "e2");
+        Check("scope: the launcher's own error on both tabs", GameScope.Error(false, "e1", "e2", "eL") == "eL" && GameScope.Error(true, null, null, "eL") == "eL");
+        var g = Path.Combine(Path.GetTempPath(), "scope", "game");
+        Eq("scope: HP1 logs in the install's HPEngineData", Path.Combine(g, "HPEngineData", "logs"), GameScope.LogsDir(g, false));
+        Eq("scope: HP2 logs beside the HP2 saves (the engine's Hp2DataDir)", Path.Combine(Path.GetDirectoryName(Hp2FrontEnd.SaveDir(g)), "HPEngineData", "logs"), GameScope.LogsDir(g, true));
+        Eq("scope: HP2's console log apart", "/d/HPEngine-HP2.log", GameScope.ConsoleLog("/d/HPEngine.log", true));
+        fired.Add("scope:rules");
+    }
+
+    static void PadCases()
+    {
+        var t = PadTable().ToList();
+        Check("pad map: A activates, also in a popup", t.Contains("button 0 popup=0 hp2=0 Activate") && t.Contains("button 0 popup=1 hp2=1 Activate"));
+        Check("pad map: B is Back on the page, Escape in a popup", t.Contains("button 1 popup=0 hp2=1 Back") && t.Contains("button 1 popup=1 hp2=0 Escape"));
+        Check("pad map: RB to HP2 only from HP1, LB to HP1 only from HP2", t.Contains("button 10 popup=0 hp2=0 Hp2") && t.Contains("button 10 popup=0 hp2=1 None")
+            && t.Contains("button 9 popup=0 hp2=1 Hp1") && t.Contains("button 9 popup=0 hp2=0 None") && t.Contains("button 10 popup=1 hp2=0 None"));
+        Check("pad map: Start the Menu, Y Play on HP1 only", t.Contains("button 6 popup=0 hp2=0 Menu") && t.Contains("button 6 popup=1 hp2=0 None")
+            && t.Contains("button 3 popup=0 hp2=0 Play") && t.Contains("button 3 popup=0 hp2=1 None"));
+        Check("pad map: d-pad moves focus, keys in a popup", t.Contains("button 11 popup=0 hp2=0 Previous") && t.Contains("button 13 popup=0 hp2=0 Previous")
+            && t.Contains("button 12 popup=0 hp2=0 Next") && t.Contains("button 14 popup=1 hp2=0 KeyDown") && t.Contains("button 11 popup=1 hp2=0 KeyUp"));
+        Check("pad map: X, Back/Guide, stick clicks do nothing", t.Contains("button 2 popup=0 hp2=0 None") && t.Contains("button 4 popup=0 hp2=0 None") && t.Contains("button 7 popup=0 hp2=0 None"));
+        Check("pad map: the stick past 16000 only", t.Contains("stick 16000 0 0") && t.Contains($"stick 16001 0 {1u << 14}") && t.Contains($"stick 0 -16001 {1u << 11}") && t.Contains($"stick -32768 16001 {1u << 12 | 1u << 13}"));
+        Check("pad map: a held button acts once", t.Contains("pressed 1 1 ") && t.Contains("pressed 11 1 1,3") && t.Contains("pressed 32768 0 "));
+        fired.Add("pad:map");
     }
 
     // "Reset Gamepad Bindings" (PadReset, the PAD RESET RULE): only the Joy* lines of [Engine.Input] and the saved flag go.
@@ -448,7 +629,11 @@ static partial class T
             var game = Path.Combine(tmp, "game"); Directory.CreateDirectory(tmp);
             var w = new MainWindow(game, tmp, "0.1.0-beta", false); w.Show(); Dispatcher.UIThread.RunJobs();
             Check("not installed: setup visible", Find<StackPanel>(w, "SetupPanel").IsVisible && !Find<StackPanel>(w, "ReadyPanel").IsVisible);
-            Check("not installed: Install shown and disabled, no Play", Find<Button>(w, "InstallButton") is { IsVisible: true, IsEnabled: false } && !Find<Button>(w, "PlayButton").IsVisible);
+            Check("not installed: Choose files is the gold primary, no Install or Play yet", Find<Button>(w, "ChooseButton") is { IsVisible: true } c && c.Classes.Contains("gold")
+                && !Find<Button>(w, "InstallButton").IsVisible && !Find<Button>(w, "PlayButton").IsVisible);
+            w.Add(Path.Combine(tmp, "Setup.exe"));
+            Check("files chosen: Install is the gold primary, Choose files steps back", Find<Button>(w, "InstallButton") is { IsVisible: true, IsEnabled: true } i && i.Classes.Contains("gold")
+                && !Find<Button>(w, "ChooseButton").Classes.Contains("gold"));
             Check("not installed: status", Find<TextBlock>(w, "Status").Text.Contains("Not installed"));
             w.Close(); fired.Add("smoke:not-installed");
 
@@ -463,6 +648,8 @@ static partial class T
             Check("installed: edition from marker", Find<TextBlock>(w, "EditionText").Text == "US 1.53" && Find<TextBlock>(w, "EditionChip").Text == "verified");
             string Rows() => string.Join("|", Find<StackPanel>(w, "ModsList").GetLogicalDescendants().OfType<ToggleSwitch>().Select(c => c.Name[4..] + (c.IsChecked == true ? "+" : "-")));
             Eq("mods list reflects Mods.ini", "Beta+|Alpha+|Gamma-", Rows());
+            // the bundled Cormorant Garamond where a renderer loads it (the Skia screenshots print it), else the system serif
+            Check("title serif: bundled or the system serif", Find<TextBlock>(w, "Title").FontFamily.Name is "Cormorant Garamond" or "Georgia", Find<TextBlock>(w, "Title").FontFamily.ToString());
             fired.Add("smoke:installed");
             Find<ToggleSwitch>(w, "Mod_Gamma").IsChecked = true; Dispatcher.UIThread.RunJobs();
             Seq("toggle on: Gamma last, written", new[] { "Beta", "Alpha", "Gamma" }, ModsIni.ReadEnabled(File.ReadAllText(ini)));
@@ -484,43 +671,195 @@ static partial class T
             w.Handle("REPORT https://github.com/artemnikonov/hpengine/issues/new?title=x", odd);
             Check("REPORT line shows the Report button in the warning banner", Find<Button>(w, "ReportButton").IsVisible && odd.Count == 1);
             fired.Add("smoke:report");
+            // Gamepad (proposal §6): focus starts on the primary, A presses it, RB/LB switch the game, B leaves a sub-page
+            Check("pad: focus starts on Play", w.FocusManager?.GetFocusedElement() == Find<Button>(w, "PlayButton"));
+            w.Pad(PadMap.A); Dispatcher.UIThread.RunJobs();
+            Check("pad: A presses the focused Play (the engine is absent here)", Find<TextBlock>(w, "ErrorText").Text?.StartsWith("HPEngine was not found") == true, Find<TextBlock>(w, "ErrorText").Text);
+            w.Pad(PadMap.RB); Dispatcher.UIThread.RunJobs();
+            Check("pad: RB selects Harry Potter 2", Find<StackPanel>(w, "Hp2Panel").IsVisible && Find<Button>(w, "TabHp2").Classes.Contains("on"));
+            Check("scope: HP1's error is not carried to the HP2 tab", !Find<TextBlock>(w, "ErrorText").IsEffectivelyVisible, Find<TextBlock>(w, "ErrorText").Text);
+            w.Pad(PadMap.LB); Dispatcher.UIThread.RunJobs();
+            Check("scope: back on HP1 its error is there", Find<TextBlock>(w, "ErrorText").IsEffectivelyVisible && Find<TextBlock>(w, "ErrorText").Text?.StartsWith("HPEngine was not found") == true);
+            fired.Add("scope:window");
+            Check("pad: LB back to Harry Potter 1", Find<StackPanel>(w, "ReadyPanel").IsVisible && !Find<StackPanel>(w, "Hp2Panel").IsVisible);
+            Find<Button>(w, "ModsRow").RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Dispatcher.UIThread.RunJobs();
+            Check("mods row opens the Mods page", Find<StackPanel>(w, "ModsPage").IsVisible && !Find<StackPanel>(w, "ReadyPanel").IsVisible);
+            w.Pad(PadMap.Down); Dispatcher.UIThread.RunJobs();
+            w.Pad(PadMap.B); Dispatcher.UIThread.RunJobs();
+            Check("pad: B leaves the Mods page", !Find<StackPanel>(w, "ModsPage").IsVisible && Find<StackPanel>(w, "ReadyPanel").IsVisible);
+            Eq("mods row summary", "2 of 3 on", Find<TextBlock>(w, "ModsSummary").Text);
+            fired.Add("smoke:pad");
+            Find<Button>(w, "ModsRow").RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Dispatcher.UIThread.RunJobs();
+            Check("pad: on the Mods page focus starts on Back", w.FocusManager?.GetFocusedElement() == Find<Button>(w, "ModsBack"));
+            // keyboard shortcuts (as Launcher.swift: Cmd there): Escape = Back, Ctrl+2 / Ctrl+1 = the game
+            void Press(Avalonia.Input.Key k, Avalonia.Input.KeyModifiers m = Avalonia.Input.KeyModifiers.None) { w.RaiseEvent(new Avalonia.Input.KeyEventArgs { RoutedEvent = Avalonia.Input.InputElement.KeyDownEvent, Key = k, KeyModifiers = m }); Dispatcher.UIThread.RunJobs(); }
+            Press(Avalonia.Input.Key.Escape);
+            Check("keys: Escape leaves the Mods page", !Find<StackPanel>(w, "ModsPage").IsVisible && Find<StackPanel>(w, "ReadyPanel").IsVisible);
+            Press(Avalonia.Input.Key.OemComma, Avalonia.Input.KeyModifiers.Control);
+            Check("keys: Ctrl+, opens the Menu, its button shown pressed while open", Find<Button>(w, "MenuButton").Classes.Contains("held"));
+            Find<Button>(w, "MenuButton").Flyout.Hide(); Dispatcher.UIThread.RunJobs();
+            Check("menu closed: its button no longer pressed", !Find<Button>(w, "MenuButton").Classes.Contains("held"));
+            Press(Avalonia.Input.Key.D2, Avalonia.Input.KeyModifiers.Control);
+            Check("keys: Ctrl+2 selects Harry Potter 2", Find<StackPanel>(w, "Hp2Panel").IsVisible);
+            Press(Avalonia.Input.Key.D1, Avalonia.Input.KeyModifiers.Control);
+            Check("keys: Ctrl+1 back to Harry Potter 1", Find<StackPanel>(w, "ReadyPanel").IsVisible && !Find<StackPanel>(w, "Hp2Panel").IsVisible);
+            fired.Add("keys:shortcuts");
             w.Close();
         }
         finally { Directory.Delete(tmp, true); }
     }
 
-    // Screenshots (Skia, headless; no window opens): sh launcher/test_desktop.sh shots <dir>
+    // The open popup: a drop-down's (in its template) or the Menu flyout's (not in the window's visual tree; its protected Popup).
+    static Avalonia.Controls.Primitives.Popup OpenPopup(MainWindow w) =>
+        w.GetVisualDescendants().OfType<Avalonia.Controls.Primitives.Popup>().FirstOrDefault(p => p.IsOpen)
+        ?? (typeof(Avalonia.Controls.Primitives.PopupFlyoutBase).GetProperty("Popup", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+            ?.GetValue(Find<Button>(w, "MenuButton").Flyout) is Avalonia.Controls.Primitives.Popup { IsOpen: true } m ? m : null);
+
+    static void Put(string root, string rel, string text) { var p = Path.Combine(root, rel); Directory.CreateDirectory(Path.GetDirectoryName(p)); File.WriteAllText(p, text); }
+
+    // Screenshots of every state of the window (Skia, headless; no window opens): dotnet run --project launcher/Desktop.Tests -- --shots <dir>
     static void Shots(string dir)
     {
         AppBuilder.Configure<App>().UseSkia().UseHeadless(new AvaloniaHeadlessPlatformOptions { UseHeadlessDrawing = false }).SetupWithoutStarting();
         Directory.CreateDirectory(dir);
         var tmp = Path.Combine(Path.GetTempPath(), "hp1-shots-" + Guid.NewGuid().ToString("N"));
+        void Frame() { Dispatcher.UIThread.RunJobs(); AvaloniaHeadlessPlatform.ForceRenderTimerTick(); Dispatcher.UIThread.RunJobs(); }
+        void Save(MainWindow w, string name, bool close = true)
+        {
+            Frame();
+            using var f = w.CaptureRenderedFrame();
+            // An open popup (the Menu) lives in its own top level: drawn over the window frame where it sits.
+            var popup = OpenPopup(w)?.Host as TopLevel;
+            if (popup == null) f.Save(Path.Combine(dir, name));
+            else
+            {
+                using var pf = popup.CaptureRenderedFrame();
+                var at = popup.PointToScreen(new Point(0, 0)) - w.PointToScreen(new Point(0, 0));
+                using var rt = new Avalonia.Media.Imaging.RenderTargetBitmap(f.PixelSize);
+                using (var dc = rt.CreateDrawingContext())
+                {
+                    dc.DrawImage(f, new Rect(0, 0, f.Size.Width, f.Size.Height));
+                    dc.DrawImage(pf, new Rect(at.X, at.Y, pf.Size.Width, pf.Size.Height));
+                }
+                rt.Save(Path.Combine(dir, name));
+            }
+            Console.WriteLine(name);
+            if (close) w.Close();
+        }
+        MainWindow Show(MainWindow w) { w.Show(); Frame(); return w; }
+        void Click(MainWindow w, string n) { Find<Button>(w, n).RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Frame(); }
         try
         {
-            void Snap(MainWindow w, string name)
+            Directory.CreateDirectory(tmp);
+            Hp2Release.Available = false;   // the HP1 shots as released (HP2 tab "Coming soon"); the HP2 shots as a preview build
+            var empty = Path.Combine(tmp, "empty");
+            var first = Show(new MainWindow(empty, tmp, "0.4.0", false));
+            Console.WriteLine("title font: " + Find<TextBlock>(first, "Title").FontFamily.Name);
+            Save(first, "desktop_hp1_empty.png");
+            var w = Show(new MainWindow(empty, tmp, "0.4.0", false));
+            w.Add(Path.Combine(tmp, "Setup.exe")); w.Add(Path.Combine(tmp, "Setup-1.bin"));
+            Save(w, "desktop_hp1_files_chosen.png");
+            if (!OperatingSystem.IsWindows())
             {
-                w.Show(); Dispatcher.UIThread.RunJobs(); AvaloniaHeadlessPlatform.ForceRenderTimerTick(); Dispatcher.UIThread.RunJobs();
-                var f = w.CaptureRenderedFrame(); f.Save(Path.Combine(dir, name)); Console.WriteLine($"{name} {f.PixelSize.Width}x{f.PixelSize.Height}"); w.Close();
+                // installing: a stand-in HP1Setup that reports the steps and waits (killed when the window closes)
+                var setup = Path.Combine(tmp, "HPEngine", "HP1Setup"); Directory.CreateDirectory(Path.GetDirectoryName(setup));
+                File.WriteAllText(setup, "#!/bin/sh\necho STEP find; echo STEP unpack; echo STEP check; echo STEP copy; echo PROGRESS 64; exec sleep 30\n");
+                File.SetUnixFileMode(setup, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                w = Show(new MainWindow(empty, tmp, "0.4.0", false));
+                w.Add(Path.Combine(tmp, "Setup.exe"));
+                Click(w, "InstallButton");
+                for (int i = 0; i < 250 && Find<ProgressBar>(w, "ProgressBar").Value < 0.6; i++) { Thread.Sleep(20); Dispatcher.UIThread.RunJobs(); }
+                Save(w, "desktop_hp1_installing.png");
+                File.Delete(setup);
             }
-            var empty = Path.Combine(tmp, "empty"); Directory.CreateDirectory(tmp);
-            ShieldIcon.Draw(256).Save(Path.Combine(dir, "avalonia_icon.png"));   // the window icon (ShieldIcon.cs)
-            Snap(new MainWindow(empty, tmp, "0.1.0-beta", false), "avalonia_empty.png");
             var game = Path.Combine(tmp, "game"); Directory.CreateDirectory(Path.Combine(game, "HPEngineData"));
-            File.WriteAllText(Path.Combine(game, ".hp1-installed"), "data=x\nedition=US 1.53: exact\n");
-            foreach (var m in new[] { "Alpha", "Beta", "Gamma" }) Directory.CreateDirectory(Path.Combine(game, "Mods", m));
+            File.WriteAllText(Path.Combine(game, ".hp1-installed"), "data=x\nedition=UK 1.1: supported\n");
+            foreach (var m in new[] { "Alpha", "Beta", "Gamma", "Delta", "Epsilon" }) Directory.CreateDirectory(Path.Combine(game, "Mods", m));
             File.WriteAllText(Path.Combine(game, "HPEngineData", "Mods.ini"), "[Mods]\nEnabled=Beta\nEnabled=Alpha\n");
-            Snap(new MainWindow(game, tmp, "0.1.0-beta", false), "avalonia_installed.png");
-            var w = new MainWindow(game, tmp, "0.1.0-beta", false);
-            w.Handle("WARNING unverified Unknown edition: System/HP.exe SHA-1 0123456789abcdef. Please report the hashes at the issues page so this release can be added.", new List<string>());
-            w.Handle("REPORT https://github.com/artemnikonov/hpengine/issues/new?title=x", new List<string>());
-            Snap(w, "avalonia_warning.png");
-            Directory.CreateDirectory(Path.Combine(game, "Save"));
-            File.WriteAllBytes(Path.Combine(game, "Save", "save0.hp1sav"), SaveHead(5));
-            File.WriteAllBytes(Path.Combine(game, "Save", "save2.hp1sav"), SaveHead(5, "Alpha"));
-            Snap(new MainWindow(game, tmp, "0.1.0-beta", false), "avalonia_mods_notice.png");
-            foreach (var f in new[] { "Maps/Lev_Tut1.unr", "Mods/Alpha/Maps/acniabwc.unr", "Mods/Beta/Maps/Early_Potions.unr" })
+            w = Show(new MainWindow(game, tmp, "0.4.0", false));
+            w.OfferUpdate(new Release("0.4.1", "https://example.invalid/release"));
+            Save(w, "desktop_hp1_ready_update.png");
+            // a mod that adds a map (Start map next to Play), a failed setup (error banner), then the Menu open
+            foreach (var f in new[] { "Maps/Lev_Tut1.unr", "Mods/Alpha/Maps/acniabwc.unr" })
             { Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(game, f))); File.WriteAllText(Path.Combine(game, f), "x"); }
-            Snap(new MainWindow(game, tmp, "0.1.0-beta", false), "avalonia_start_map.png");   // the "Start map" choice next to Play
+            w = Show(new MainWindow(game, tmp, "0.4.0", false));
+            w.Handle("ERROR crashed The game stopped unexpectedly. Missing package \"HP_Menu\".", new List<string>());
+            Save(w, "desktop_hp1_error_start_map.png");
+            Put(game, "System/Default.ini", "[Core.System]\nPaths=../System/*.u\nPaths=../Maps/*.unr\n"); Put(game, "Maps/Startup.unr", "x"); Put(game, "Mods/Beta/Textures/Beta.utx", "x");   // map paths and game files in both enabled mods: Alpha's map becomes a start map
+            w = Show(new MainWindow(game, tmp, "0.4.0", false));
+            Find<ComboBox>(w, "StartMap").IsDropDownOpen = true; Settle();
+            HoverItem(w, c => c is ComboBoxItem { Content: string t } && t != StartMap.Game);
+            Save(w, "polish_desktop_startmap_open.png");
+            // a long list: 30 maps, scrolled to the middle by the pad's d-pad (the focused map kept in view, the scroll bar shown)
+            for (int k = 1; k <= 30; k++) Put(game, $"Mods/Alpha/Maps/Map{k:00}.unr", "x");
+            w = Show(new MainWindow(game, tmp, "0.4.0", false));
+            Find<ComboBox>(w, "StartMap").Focus(); Find<ComboBox>(w, "StartMap").IsDropDownOpen = true; Settle();
+            for (int k = 0; k < 15; k++) { w.Pad(PadMap.Down); Frame(); }
+            Settle();
+            Save(w, "polish_desktop_startmap_scrolled.png");
+            for (int k = 1; k <= 30; k++) File.Delete(Path.Combine(game, "Mods", "Alpha", "Maps", $"Map{k:00}.unr"));
+            w = Show(new MainWindow(game, tmp, "0.4.0", false));
+            Find<Button>(w, "MenuButton").Flyout.ShowAt(Find<Button>(w, "MenuButton")); Frame();
+            Save(w, "desktop_hp1_menu.png");
+            Directory.CreateDirectory(Path.Combine(game, "Save"));
+            File.WriteAllBytes(Path.Combine(game, "Save", "save2.hp1sav"), SaveHead(5, "Alpha"));
+            w = Show(new MainWindow(game, tmp, "0.4.0", false));
+            Click(w, "ModsRow");
+            Save(w, "desktop_hp1_mods.png");
+            Hp2Release.Available = true;
+            // HP2: no folder; then a folder with two used slots (synthetic thumbnails: plain gradients, no game image)
+            w = Show(new MainWindow(game, tmp, "0.4.0", false));
+            Click(w, "TabHp2");
+            Save(w, "desktop_hp2_no_folder.png");
+            var h2 = Path.Combine(tmp, "hp2"); Directory.CreateDirectory(Path.Combine(h2, "System"));
+            File.WriteAllText(Path.Combine(h2, "System", "Engine.dll"), "x");
+            File.WriteAllText(Path.Combine(h2, "System", "Startup.int"), "[IDDIALOG_FrontEndPageMainMenu]\nIDC_Title=Main Menu\nIDC_NewGame=New Game\nIDC_LoadGame=Load Game\nIDC_Options=Options\n"
+                + "[IDDIALOG_FrontEndPageLoadGame]\nIDC_Title=Load Game\nIDC_Instructions=Choose a saved game to continue.\nIDC_SlotEmpty=Empty\nIDC_SlotUsed=Saved game\n");
+            File.WriteAllText(Path.Combine(tmp, "hp2-root.txt"), h2);
+            var sd = Hp2FrontEnd.SaveDir(game);
+            foreach (var n in new[] { 1, 2 })
+            {
+                Directory.CreateDirectory(Path.Combine(sd, "Slot" + n)); File.WriteAllText(Path.Combine(sd, "Slot" + n, "save0.hp1sav"), "0123456789");
+                using var bmp = new Avalonia.Media.Imaging.RenderTargetBitmap(new PixelSize(128, 96));
+                using (var dc = bmp.CreateDrawingContext())
+                    dc.FillRectangle(new Avalonia.Media.LinearGradientBrush { GradientStops = { new(Avalonia.Media.Color.Parse("#8A6F55"), 0), new(Avalonia.Media.Color.Parse("#2C3B26"), 0.6), new(Avalonia.Media.Color.Parse("#14050A"), 1) } }, new Rect(0, 0, 128, 96));
+                bmp.Save(Path.Combine(sd, "Slot" + n, "Save0.bmp"));
+            }
+            w = Show(new MainWindow(game, tmp, "0.4.0", false));
+            Click(w, "TabHp2");
+            Save(w, "desktop_hp2_main.png", false);
+            Click(w, "Hp2LoadGame");
+            w.Pad(PadMap.Right); Frame();
+            Save(w, "desktop_hp2_load_pad.png");
+            // Interaction states (headless pointer on the real controls): hover, press, keyboard focus, and each list open at
+            // its control with an item under the pointer. Each shot waits out the 150-200 ms transitions and entrances.
+            Hp2Release.Available = false;
+            void Settle() { for (int i = 0; i < 20; i++) { Thread.Sleep(15); Frame(); } }
+            Point At(Control c, TopLevel top) => c.TranslatePoint(new Point(c.Bounds.Width / 2, c.Bounds.Height / 2), top) ?? default;
+            TopLevel PopupTop(MainWindow win) => OpenPopup(win)?.Host as TopLevel ?? win;   // the Menu flyout: an overlay inside the window
+            void HoverItem(MainWindow win, Func<Control, bool> pick)
+            {
+                var top = PopupTop(win); var item = top.GetVisualDescendants().OfType<Control>().First(pick);
+                top.MouseMove(At(item, top)); Settle();
+            }
+            Put(game, "System/0/Default.ini", "[Engine.Engine]\nLanguage=eng\n"); Put(game, "System/7/Default.ini", "[Engine.Engine]\nLanguage=fin\n");
+            Put(game, "System/8/Default.ini", "[Engine.Engine]\nLanguage=swe\n");
+            w = Show(new MainWindow(game, tmp, "0.4.0", false));
+            w.MouseMove(At(Find<Button>(w, "PlayButton"), w)); Settle();
+            Save(w, "polish_desktop_hover.png", false);
+            w.MouseDown(At(Find<Button>(w, "PlayButton"), w), MouseButton.Left); Settle();
+            Save(w, "polish_desktop_pressed.png", false);
+            w.MouseUp(new Point(5, 550), MouseButton.Left); w.MouseMove(new Point(5, 550));
+            Find<Button>(w, "ModsRow").Focus(NavigationMethod.Tab); Settle();
+            Save(w, "polish_desktop_focus.png", false);
+            Find<Button>(w, "MenuButton").Flyout.ShowAt(Find<Button>(w, "MenuButton")); Settle();
+            HoverItem(w, c => c is MenuItem { Name: "OpenLogs" });
+            Save(w, "polish_desktop_menu_open.png", false);
+            Find<Button>(w, "MenuButton").Flyout.Hide(); Settle();
+            Find<ComboBox>(w, "GameLanguage").IsDropDownOpen = true; Settle();
+            HoverItem(w, c => c is ComboBoxItem { Content: string t } && t != Find<ComboBox>(w, "GameLanguage").SelectedItem as string);
+            Save(w, "polish_desktop_language_open.png", false);
+            w.Close();
         }
         finally { Directory.Delete(tmp, true); }
     }

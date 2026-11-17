@@ -8,6 +8,9 @@
 // (src/surreal-patches/0001-game-detection.patch). The data set of the exe-only rows (EU, IT, disc #18) is
 // not on hand: such a root identifies as Unknown (Tier Unverified: installed and run with a warning) unless its DLLs/.u
 // match a known set.
+// HP2 (Chamber of Secrets, build HPCos_021009_1205-1): one Engine.dll build in every known release (EN InstallShield,
+// RU EA Hit-Parade, a modified Inno re-release; the maintainer's release notes); the editions differ only in System/hgame.u.
+// The game a root holds (Game) is decided by that Engine.dll hash alone; every other root is HP1 as before.
 // A parallel RU branch may keep its own table;
 // this file is the one owner for the editions it lists.
 using System;
@@ -23,7 +26,11 @@ namespace HP1.UEScript
 
         // A native + script set (DLLs and .u of one build). UK11 = the "Fix" EN zip (R3): an earlier build than US 1.53
         // (DLL stamps 2001-10-19..22) with eng/0407/040c/0809 tables; that it is the UK 1.1 retail data is an assumption.
-        public enum DataSet { Unknown, US153, UK11, RU_EA, CITY_PL, MODDED_EN }
+        public enum DataSet { Unknown, US153, UK11, RU_EA, CITY_PL, MODDED_EN, HP2_EN, HP2_RU_EA, HP2_MODIFIED }
+
+        // Which game's scripts and DLLs a root holds. HP2: its Engine.dll is the HP2 build (HP2Engines); any other root
+        // is HP1, recognised or not (an unrecognised HP1 release runs with a warning, as before HP2 was known).
+        public enum Game { HP1, HP2 }
 
         // Which DLL bodies Core ports for a root: the Render.dll build (the only DLL whose ported behaviour differs
         // between US153 and UK11). Unknown runs the US bodies.
@@ -32,8 +39,10 @@ namespace HP1.UEScript
         public readonly record struct ExeInfo(bool NoCD, string Note);
 
         public sealed record Info(Id Edition, DataSet Data, string ExeName, string ExeSha1, ExeInfo? Exe,
-                                  string EngineSha1, string RenderSha1, string HPBaseSha1)
+                                  string EngineSha1, string RenderSha1, string HPBaseSha1, string HGameSha1 = null)
         {
+            public Game Game => EngineSha1 is not null && Array.IndexOf(HP2Engines, EngineSha1) >= 0 ? Game.HP2 : Game.HP1;
+
             // Which DLL bodies Core ports for this root: by Render.dll alone (a mixed root keeps its Render build).
             public RenderSet Render => RenderSha1 is not null && Renders.TryGetValue(RenderSha1, out RenderSet r) ? r : RenderSet.Unknown;
 
@@ -58,9 +67,11 @@ namespace HP1.UEScript
                 : Issues + "/new?title=" + Uri.EscapeDataString("Unrecognised release: " + (ExeSha1 ?? "no exe")[..Math.Min(12, (ExeSha1 ?? "no exe").Length)])
                 + "&body=" + Uri.EscapeDataString("Release of the game (language, CD/download, patch): \n\n" + Hashes.Replace(", ", "\n"));
 
-            string Hashes => $"System/{ExeName ?? "HP.exe"} {ExeSha1 ?? "(not found)"}, "
+            // The files Identify hashed for this game: HP2 has Game.exe and hgame.u where HP1 has HP.exe and HPBase.u.
+            string Hashes => $"System/{ExeName ?? (Game == Game.HP2 ? HP2Exe : "HP.exe")} {ExeSha1 ?? "(not found)"}, "
                 + $"System/Engine.dll {EngineSha1 ?? "(not found)"}, System/Render.dll {RenderSha1 ?? "(not found)"}, "
-                + $"System/HPBase.u {HPBaseSha1 ?? "(not found)"} — {Issues}";
+                + (Game == Game.HP2 ? $"System/hgame.u {HGameSha1 ?? "(not found)"}" : $"System/HPBase.u {HPBaseSha1 ?? "(not found)"}")
+                + $" — {Issues}";
         }
 
         // The game scripts or data differ from the release HPEngine is verified against (a patch, a mod such as the
@@ -76,8 +87,10 @@ namespace HP1.UEScript
         public static Support TierOf(DataSet data) => data switch
         {
             DataSet.US153 => Support.Exact,
-            DataSet.UK11 or DataSet.RU_EA => Support.Supported,
-            DataSet.Unknown => Support.Unverified,
+            // HP2_EN: the release the HP2 port is built against (en_root; the launcher's HP2 tab). Supported = runs, not
+            // proven exact; UEGameProfile.HP2.NotPorted says how far it runs.
+            DataSet.UK11 or DataSet.RU_EA or DataSet.HP2_EN => Support.Supported,
+            DataSet.Unknown or DataSet.HP2_RU_EA => Support.Unverified,
             _ => Support.Modified,
         };
 
@@ -96,7 +109,6 @@ namespace HP1.UEScript
             ["9aad58812940d27c7cd96d2920c726cc2d2fdde9"] = new(true, "community No-CD, EN (early EN build archive, US no-CD, modded EN build v4)"),
             ["7d5664c62634596fecf09013aa1aaf902a50cb27"] = new(true, "No-CD of the RU EA Hit-Parade release and of an EN image (modded EN build v3)"),
             ["5d7ff458f6a9c3f6ff70725ecb3dada3b320998e"] = new(false, "RU EA Hit-Parade retail, SafeDisc (Flipendo)"),
-            ["7e675aa863f55049f3cf530dfea0b241b112d03a"] = new(true, "UK, post-patched, archive.org cracked exe (SurrealEngine upstream table)"),
             ["aac3b600dfc3ee689a2323021d3cf9f5c862cce9"] = new(false, "EU EN/FR/DE retail (Flipendo issue #11; SafeDisc or No-CD not known)"),
             ["526232593aa0a5ebb57beed89ddecc9b992ab04f"] = new(false, "ES/IT/PT CD, Italian install (Flipendo issue #15)"),
             ["061afa5b6a71a717fe0b4d52e00bdf34adac4847"] = new(false, "ES/IT/PT CD, Italian exe with a community widescreen patch (Flipendo issue #15)"),
@@ -114,6 +126,28 @@ namespace HP1.UEScript
             ("318353ee6c160093a8c756d61c6742a2f16fe4df", "8364fe75196806385aba117ce5cca3a0af186be5", "ca1107bcbf313e722d277bbc92411aad6cc2cb61", DataSet.CITY_PL),
             ("318353ee6c160093a8c756d61c6742a2f16fe4df", "8364fe75196806385aba117ce5cca3a0af186be5", "377a9c32b1589bc321fe3cfaa1fb121c0f4d55d8", DataSet.MODDED_EN),
         };
+
+        // HP2's game executable (every known HP2 release names it so; VERSIONS.md). Hashed only for an HP2 Engine.dll.
+        const string HP2Exe = "Game.exe";
+
+        // HP2 Engine.dll (sha1 identical in EN, RU EA and the modified re-release: release notes "Identical across releases").
+        static readonly string[] HP2Engines = { "f7b7b69e91b2d5525fe9601e6a5b278af624ed7f" };
+
+        // (HP2 Engine.dll, System/hgame.u) -> data set. EN and RU EA differ only in a 20-byte SKU string of hgame.u; the
+        // modified re-release's hgame.u also has 28 bytes of patched bytecode (release notes, "Protection"), so it is Modified.
+        static readonly (string Engine, string HGame, DataSet Set)[] HP2Sets =
+        {
+            ("f7b7b69e91b2d5525fe9601e6a5b278af624ed7f", "f96ef903731c8efdbed2a21cadba0be30a612b39", DataSet.HP2_EN),
+            ("f7b7b69e91b2d5525fe9601e6a5b278af624ed7f", "5bb9b8d169b3735c11a10da55800cd95c5105800", DataSet.HP2_RU_EA),
+            ("f7b7b69e91b2d5525fe9601e6a5b278af624ed7f", "c2f2894be9ddbae972210877b92384d59bd6d643", DataSet.HP2_MODIFIED),
+        };
+
+        public static DataSet HP2DataOf(string engineSha1, string hgameSha1)
+        {
+            foreach (var s in HP2Sets)
+                if (s.Engine == engineSha1 && s.HGame == hgameSha1) return s.Set;
+            return DataSet.Unknown;
+        }
 
         static readonly Dictionary<string, RenderSet> Renders = new()
         {
@@ -166,11 +200,17 @@ namespace HP1.UEScript
             string key = Path.GetFullPath(installRoot.TrimEnd('/', '\\'));
             lock (IdentifyRuns) IdentifyRuns[key] = IdentifyRuns.GetValueOrDefault(key) + 1;
             string sys = UEInstallPath.Dir(Path.Combine(installRoot, "System"));
+            string engine = Sha1Of(sys, "Engine.dll"), render = Sha1Of(sys, "Render.dll"), hpbase = Sha1Of(sys, "HPBase.u");
+            if (engine is not null && Array.IndexOf(HP2Engines, engine) >= 0)
+            {
+                // HP2 has no HPBase.u; hgame.u is hashed only for an HP2 Engine.dll (HP1 roots hash what they did before).
+                string hgame = Sha1Of(sys, "hgame.u"), gameExe = Sha1Of(sys, HP2Exe);
+                return new Info(Id.Unknown, HP2DataOf(engine, hgame), gameExe is null ? null : HP2Exe, gameExe, null, engine, render, hpbase, hgame);
+            }
             string exeName = null, exeSha = null;
             if (sys is not null)
                 foreach (string n in ExeNames)
                     if (UEInstallPath.File(Path.Combine(sys, n)) is { } p) { exeName = Path.GetFileName(p); exeSha = Sha1(p); break; }
-            string engine = Sha1Of(sys, "Engine.dll"), render = Sha1Of(sys, "Render.dll"), hpbase = Sha1Of(sys, "HPBase.u");
             ExeInfo? exe = exeSha is not null && Exes.TryGetValue(exeSha, out ExeInfo e) ? e : null;
             DataSet data = DataOf(engine, render, hpbase);
             return new Info(Classify(data, exe), data, exeName, exeSha, exe, engine, render, hpbase);

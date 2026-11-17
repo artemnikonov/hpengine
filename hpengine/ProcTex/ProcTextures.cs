@@ -217,6 +217,20 @@ namespace HPEngine.ProcTex
         {
             if (string.IsNullOrEmpty(uePath) || !_wetDefs.TryGetValue(uePath, out var r)) return null;
             if (_wetLive.TryGetValue(uePath, out var e)) { e.UsedFrame = frame; return e; }
+            // No SourceTexture reference, or a source larger than the wet texture (WaterTexture.PostLoad clears it as
+            // UWetTexture::PostLoad does: 0x105099cd xor edi / jl 0x10509a80 stores +0x12f8 = 0): the original's
+            // UWetTexture::ConstantTimeTick exits at once on +0x12f8 == 0 (Fire 0x10509c27-0x10509c2f je 0x10509cc7) and
+            // PostLoad copies no source palette (0x10509a8c-0x10509a8e je), so the texture shows its own stored mip and
+            // palette: not a carrier, the caller draws the plain texture (SdlRenderer.TextureFor -> LoadTexture).
+            if (r.SourceMissing == "None") return null;
+            // Smaller than 8 on an axis: ConstantTimeTick also exits (Fire 0x10509c35-0x10509c48 jl 0x10509cc7), so the
+            // original shows the stored mip; its palette is the source's when +0x12f8 != OldSourceTex +0x12fc (PostLoad
+            // 0x10509a90-0x10509a9b), else its own. The record carries no stored mip (WaterTexture would show zeros): loud.
+            if (r.W < 8 || r.H < 8)
+            {
+                Stop(uePath, $"[Wet] STOP: '{uePath}' {r.W}x{r.H} is smaller than 8 — the original shows the stored mip (no water); the port has no stored mip for it");
+                return null;
+            }
             if (r.SourceMip0 == null || r.SourceMip0.Length == 0)
             {
                 Stop(uePath, $"[Wet] STOP: '{uePath}' — source '{r.SourceMissing}' is missing from the shipped data; no water (not used in the campaign)");
@@ -238,11 +252,7 @@ namespace HPEngine.ProcTex
             byte[] drops = r.Drops ?? Array.Empty<byte>();
             Array.Copy(drops, water.Drops, Math.Min(drops.Length, water.Drops.Length));
             water.PostLoad();
-            if (water.SourceMip0 == null)
-            {
-                Stop(uePath, $"[Wet] STOP: '{uePath}' {r.W}x{r.H} — source '{r.SourcePath}' {r.SourceW}x{r.SourceH} is larger; shipped clears SourceTexture (UWetTexture::PostLoad), no water");
-                return null;
-            }
+            if (water.SourceMip0 == null) return null;        // source larger: cleared, the stored texture (see above)
             if (!_ring.Seeded)                                     // water
                 Stop("ring", "[ProcTex] STOP: the procedural-texture RNG ring is not seeded (HPEngineProgram seeds FractalRandom.Shared) — sparks/drops would run on a zero ring");
             var pal = new byte[256 * 4];

@@ -37,8 +37,15 @@ namespace HP1.UEScript
         // [0] — spatially dynamic effect, [1] — effect
         // with a changing shadow map (TorchWaver/FireWaver/WateryShimmer).
         // Either nonzero takes a static light out of category 0.
-        static readonly byte[] EffectDynamic   = { 0, 0, 0, 0, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0 };
+        static readonly byte[] EffectDynamic = { 0, 0, 0, 0, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0 };
         static readonly byte[] EffectShadowVar = { 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        // An effect >= 20: the categoriser reads the two dwords at 0x10b38114/0x10b38118 + 12·effect with no bound
+        // (0x10b0982d..0x10b0984b) — past the 20-entry table lie the .rdata strings that follow it. Read from the 1.53 Render.dll
+        // image: both dwords are zero for effects 82-97, 138-141, 148, 158, 164 and 192-194, so a bStatic steady light with
+        // one of those stays category 0; any other effect 20-255 is not static. (Its record flag 0x84 comes from
+        // ComputeFromActor's CLAMPED index: entry 0, 0 — EffectIsDynamic.)
+        static bool OutsideTableBothZero(int effect)
+            => effect is >= 82 and <= 97 or >= 138 and <= 141 or 148 or 158 or 164 or >= 192 and <= 194;
 
         public struct LightIn
         {
@@ -65,16 +72,32 @@ namespace HP1.UEScript
                 Export = a.ExportIndex,
                 L = new SurfLightmap.Light
                 {
-                    Name = a.Name, Pos = a.Location, DrawScale = a.DrawScale,
+                    Name = a.Name,
+                    Pos = a.Location,
+                    DrawScale = a.DrawScale,
                     // Spot / LightSource 1 direction: AActor::GetViewRotation (LightState.ViewRotation).
-                    Pitch = L.ViewRotation.Pitch, Yaw = L.ViewRotation.Yaw, Roll = L.ViewRotation.Roll,
-                    Type = (byte)L.Type, Effect = (byte)L.Effect, Brightness = (byte)L.Brightness,
-                    Hue = (byte)L.Hue, Saturation = (byte)L.Saturation, Radius = (byte)L.Radius,
-                    RadiusInner = (byte)L.RadiusInner, Cone = (byte)L.Cone,
-                    DarkLight = L.Dark, Source = L.Source, BrightnessScale = L.Scale,
-                    Period = (byte)L.Period, Phase = (byte)L.Phase,
+                    Pitch = L.ViewRotation.Pitch,
+                    Yaw = L.ViewRotation.Yaw,
+                    Roll = L.ViewRotation.Roll,
+                    Type = (byte)L.Type,
+                    Effect = (byte)L.Effect,
+                    Brightness = (byte)L.Brightness,
+                    Hue = (byte)L.Hue,
+                    Saturation = (byte)L.Saturation,
+                    Radius = (byte)L.Radius,
+                    RadiusInner = (byte)L.RadiusInner,
+                    Cone = (byte)L.Cone,
+                    DarkLight = L.Dark,
+                    Source = L.Source,
+                    BrightnessScale = L.Scale,
+                    Palette = L.Palette,
+                    Period = (byte)L.Period,
+                    Phase = (byte)L.Phase,
                 },
-                Static = L.Static, NoDelete = L.NoDelete, DynamicLight = L.DynamicLight, SpecialLit = L.SpecialLit,
+                Static = L.Static,
+                NoDelete = L.NoDelete,
+                DynamicLight = L.DynamicLight,
+                SpecialLit = L.SpecialLit,
                 Scale = L.Scale,
             };
         }
@@ -95,7 +118,7 @@ namespace HP1.UEScript
             if (effect == 0xf) return 3;
             bool staticOrNoDelete = !l.DynamicLight && (l.Static || l.NoDelete);
             if (!staticOrNoDelete) return noDynamicLights ? -1 : 2;
-            bool dyn = effect < EffectDynamic.Length && EffectDynamic[effect] != 0;
+            bool dyn = effect < EffectDynamic.Length ? EffectDynamic[effect] != 0 : !OutsideTableBothZero(effect);
             bool shadowVar = effect < EffectShadowVar.Length && EffectShadowVar[effect] != 0;
             if (l.Static && l.L.Type == 1 && !dyn && !shadowVar) return 0;
             return noDynamicLights ? 0 : 1;

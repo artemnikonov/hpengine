@@ -54,10 +54,37 @@ namespace HP1.UEScript
         // The body sets no control word: PC64 in game logic, PC24 inside the render window
         // (UEWorldFrameProducer.FastMathWindow: HUD/console script `>>`, `<<`, GetAxes, Vector(Rotator)), where every
         // fmul/fadd rounds the register to 24 bits (X87Ext.Round24 of the exact double) before the fstp dword.
+        // Original: Core.dll ?TransformVectorBy@FVector@@QBE?AV1@ABVFCoords@@@Z [HP1 0x1011c6f0]
         public Vector3 TransformVector(Vector3 v) => UEWorldFrameProducer.FastMathWindow ? TransformVector24(v) : new(
-            (float)(((double)v.x * X.x + (double)v.y * X.y) + (double)v.z * X.z),
-            (float)(((double)v.x * Y.x + (double)v.y * Y.y) + (double)v.z * Y.z),
-            (float)(((double)v.x * Z.x + (double)v.y * Z.y) + (double)v.z * Z.z));
+            VectorRow64(v, X), VectorRow64(v, Y), VectorRow64(v, Z));
+
+        // f32 of the PC64 register row (v.x·A.x + v.y·A.y) + v.z·A.z. A double chain is not that register: under
+        // cancellation its 53-bit sums leave the float one bit off (a brush hit's near-zero world normal component; the
+        // LineCheck tail 0x10429eed..0x10429f41 is this row inline).
+        static float VectorRow64(Vector3 v, Vector3 a)
+            => Decides((double)v.x * a.x, (double)v.y * a.y, (double)v.z * a.z, out float f) ? f
+                : Dot87(v.x, a.x, v.y, a.y, v.z, a.z).ToFloat();
+
+        // TransformPointBy row: the differences v − Origin stay in the register (0x1011c63a..0x1011c64d), then the row.
+        static float PointRow64(Vector3 v, Vector3 o, Vector3 a)
+        {
+            double dx = (double)v.x - o.x, dy = (double)v.y - o.y, dz = (double)v.z - o.z;
+            if (Decides(dx * a.x, dy * a.y, dz * a.z, out float f)) return f;
+            static HP1.Core.X87Ext F(float s) => HP1.Core.X87Ext.From(s);
+            static HP1.Core.X87Ext R(HP1.Core.X87Ext s) => HP1.Core.X87Ext.Round64(s);
+            return R(R(R(R(F(v.x) - F(o.x)) * F(a.x)) + R(R(F(v.y) - F(o.y)) * F(a.y))) + R(R(F(v.z) - F(o.z)) * F(a.z)))
+                .ToFloat();
+        }
+
+        // The double chain (p0 + p1) + p2 decides the stored float when its error (< 1e-15 of the summed magnitudes,
+        // product roundings included; the register's is far below) cannot reach a float rounding boundary: rounding is
+        // monotone. A zero (its sign) or non-finite value is left to the exact register chain.
+        static bool Decides(double p0, double p1, double p2, out float f)
+        {
+            double d = (p0 + p1) + p2, e = (Math.Abs(p0) + Math.Abs(p1) + Math.Abs(p2)) * 1e-15;
+            f = (float)(d - e);
+            return f == (float)(d + e) && f != 0f;
+        }
 
         static float Dot24(double x, double y, double z, Vector3 a)
         {
@@ -80,15 +107,13 @@ namespace HP1.UEScript
         // a store to float), then the TransformVectorBy sum.
         // Like TransformVectorBy the body sets no control word: inside the render window each difference rounds to 24 bits in
         // the register, then the PC24 dot (checked against the real FCoords::operator*= at both FPCWs).
+        // Original: Core.dll ?TransformPointBy@FVector@@QBE?AV1@ABVFCoords@@@Z [HP1 0x1011c620]
         public Vector3 TransformPoint(Vector3 v)
         {
             if (UEWorldFrameProducer.FastMathWindow)
                 return TransformVector24(HP1.Core.X87Ext.Round24((double)v.x - Origin.x),
                     HP1.Core.X87Ext.Round24((double)v.y - Origin.y), HP1.Core.X87Ext.Round24((double)v.z - Origin.z));
-            double dx = (double)v.x - Origin.x, dy = (double)v.y - Origin.y, dz = (double)v.z - Origin.z;
-            return new Vector3((float)((dx * X.x + dy * X.y) + dz * X.z),
-                               (float)((dx * Y.x + dy * Y.y) + dz * Y.z),
-                               (float)((dx * Z.x + dy * Z.y) + dz * Z.z));
+            return new Vector3(PointRow64(v, Origin, X), PointRow64(v, Origin, Y), PointRow64(v, Origin, Z));
         }
 
         // FPlane::TransformPlaneByOrtho, from the machine code (Core.dll
@@ -122,11 +147,32 @@ namespace HP1.UEScript
         public (float X, float Y, float Z, float W) TransformNodePlaneSweep(float nx, float ny, float nz, float w)
         {
             if (UEWorldFrameProducer.FastMathWindow) return NodePlaneByOperatorDot24(nx, ny, nz, w);
+            var (tx, ty, tz, wx) = TransformNodePlaneSweepExt(nx, ny, nz, w);
+            return (tx, ty, tz, wx.ToFloat());
+        }
+
+        // The PC64 sweep form with W' as the register holds it before its fstp dword.
+        public (float X, float Y, float Z, HP1.Core.X87Ext W) TransformNodePlaneSweepExt(float nx, float ny, float nz, float w)
+        {
             float tz = Dot87(Z.z, nz, Z.y, ny, Z.x, nx).ToFloat(), ty = Dot87(Y.z, nz, Y.y, ny, Y.x, nx).ToFloat();
             float tx = Dot87(X.z, nz, X.y, ny, X.x, nx).ToFloat();
             Vector3 o = TransformVector(Origin);
-            return (tx, ty, tz, W87(w, tz, ty, tx, o));
+            return (tx, ty, tz, W87x(w, tz, ty, tx, o));
         }
+
+        // HP2's zero-extent line worker and PointCheck walk subtract W' = W − (o | N') from the side dot while it is still
+        // in the register (no FPlane is built): the side is f32(((N.z·p.z + N.y·p.y) + N.x·p.x) − W') at 64 bits, where
+        // HP1 stores W' as a float first (the FPlane copy constructor). PC64 only: at PC24 the register value is the float.
+        // Original: Engine.dll not exported: the UModel::LineCheck zero-extent worker [HP1 0x104294c0] [HP2 0x10437c60]:
+        //   near side [HP1 0x10429574..0x104295be] [HP2 0x10437cf5..0x10437d22], far side [HP1 0x1042962c..0x1042968c]
+        //   [HP2 0x10437d79..0x10437dab]
+        // Original: Engine.dll ?PointCheck@UModel@@UAEHAAUFCheckResult@@PAVAActor@@VFVector@@2K@Z [HP1 0x104271d0]
+        //   [HP2 0x10435af0]: the zero-extent walk's side [HP1 0x104273c4..0x104273f6] [HP2 0x10435cd8..0x10435cf3]
+        public static bool KeepsPlaneW => UEGameProfile.Current.Game == UEEdition.Game.HP2 && !UEWorldFrameProducer.FastMathWindow;
+
+        // ((a1·b1 + a2·b2) + a3·b3) − W' in the PC64 register (float products exact): HP2's side before its store / compare.
+        public static HP1.Core.X87Ext SideKeepW(float a1, float b1, float a2, float b2, float a3, float b3, HP1.Core.X87Ext w)
+            => HP1.Core.X87Ext.Round64(Dot87(a1, b1, a2, b2, a3, b3) - w);
 
         // (a1·b1 + a2·b2) + a3·b3 in the PC64 register (float products are exact).
         static HP1.Core.X87Ext Dot87(float a1, float b1, float a2, float b2, float a3, float b3)
@@ -136,8 +182,9 @@ namespace HP1.UEScript
         }
 
         // W' = W − operator|(o, t) = W − ((t.z·o.z + t.y·o.y) + t.x·o.x) kept in the register into `fsubr W`, fstp dword.
-        static float W87(float w, float tz, float ty, float tx, Vector3 o)
-            => HP1.Core.X87Ext.Round64(HP1.Core.X87Ext.From(w) - Dot87(tz, o.z, ty, o.y, tx, o.x)).ToFloat();
+        static float W87(float w, float tz, float ty, float tx, Vector3 o) => W87x(w, tz, ty, tx, o).ToFloat();
+        static HP1.Core.X87Ext W87x(float w, float tz, float ty, float tx, Vector3 o)
+            => HP1.Core.X87Ext.Round64(HP1.Core.X87Ext.From(w) - Dot87(tz, o.z, ty, o.y, tx, o.x));
 
         // The render window (PC24) form of the sweep worker (0x1042a4bc) and of both planes of the zero-extent LineCheck worker
         // (0x104294fc / 0x104295a8): FVector::operator| (Core 0x10119190) is (b.z·a.z + b.y·a.y) + b.x·a.x in the register,
@@ -162,9 +209,16 @@ namespace HP1.UEScript
                 Vector3 o = TransformVector(Origin);
                 return (cx, cy, cz, w - ((cz * o.z + cy * o.y) + cx * o.x));
             }
+            var (tx, ty, tz, wx) = TransformNodePlanePointExt(nx, ny, nz, w);
+            return (tx, ty, tz, wx.ToFloat());
+        }
+
+        // The PC64 point form with W' as the register holds it before its fstp dword.
+        public (float X, float Y, float Z, HP1.Core.X87Ext W) TransformNodePlanePointExt(float nx, float ny, float nz, float w)
+        {
             float tz = Dot87(Z.x, nx, Z.z, nz, Z.y, ny).ToFloat(), ty = Dot87(Y.x, nx, Y.z, nz, Y.y, ny).ToFloat();
             float tx = Dot87(X.x, nx, X.z, nz, X.y, ny).ToFloat();
-            return (tx, ty, tz, W87(w, tz, ty, tx, TransformVector(Origin)));
+            return (tx, ty, tz, W87x(w, tz, ty, tx, TransformVector(Origin)));
         }
 
         // Zero-extent worker node transform (FUN_104294c0, Engine.dll.c:325974-326004; disasm 0x104294fc..0x10429592 near
@@ -175,10 +229,9 @@ namespace HP1.UEScript
         public (float X, float Y, float Z, float W) TransformNodePlaneLine(float nx, float ny, float nz, float w)
             => TransformNodePlaneSweep(nx, ny, nz, w);
 
-        // The zero-extent LineCheck tail for a brush hit (0x10429ec7): the raw
-        // model-space normal transforms covariantly — dots with the axes, the
-        // same mapping TransformPlaneByOrtho applies to hull planes (proven by
-        // a diff against the original: shipped normal == (n·X, n·Y, n·Z) oriented).
+        // The zero-extent LineCheck tail for a brush hit (0x10429ec7): the raw model-space normal goes through the
+        // TransformVectorBy row inline (0x10429eed..0x10429f41, Core 0x1011c70a's instructions) with ToWorld's axes, in
+        // the caller's window.
         public Vector3 NormalToWorld(Vector3 n) => TransformVector(n);
 
         // FCoords::operator*=(FCoords) (Core.dll.c:44460).

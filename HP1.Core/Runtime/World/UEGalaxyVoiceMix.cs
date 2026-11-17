@@ -58,23 +58,54 @@ namespace HP1.UEScript
         // of the music feeder model (UEGalaxyAudio, D-72) — script-visible song end, so the shipped value, not the
         // frontend's output rate.
         public readonly int OutputRate;
+        // UseDigitalMusic: UBoolProperty at +0x40, CPF_Config (Galaxy.dll.c:1362-1368), False in the shipped ini. Update's
+        // music start runs the module path (glxLoadMusic 0x10616510) only when it is set (0x106092a0 `mov eax, [esi+0x40];
+        // test; je 0x1060945d`); that path is not ported (UEGalaxyAudio.StartSong stops loudly).
+        public readonly bool UseDigitalMusic;
+        // UseCDMusic: UBoolProperty at +0x3c, CPF_Config (Galaxy.dll.c:1354-1360), False in the shipped ini. Update's music
+        // block plays or stops a CD track (MCI, FUN_1060f520 / FUN_10615bc0) only when it is set (0x1060945d-0x1060947d,
+        // 0x1060910c-0x1060911c); off, a CdTrack request only sets +0x70c.
+        public readonly bool UseCDMusic;
 
         public UEGalaxyConfig(bool useSurround, bool reverseStereo, float ambientFactor, float dopplerSpeed, int latency,
-                              int outputRate)
+                              int outputRate, bool useDigitalMusic, bool useCdMusic = false)
         {
+            UseCDMusic = useCdMusic;
             UseSurround = useSurround; ReverseStereo = reverseStereo;
             AmbientFactor = ambientFactor; DopplerSpeed = dopplerSpeed;
             Latency = latency;
             OutputRate = outputRate;
+            UseDigitalMusic = useDigitalMusic;
         }
 
         static readonly int[] OutputRates = { 8000, 11025, 16000, 22050, 32000, 44100, 48000 };
+        static readonly string[] OutputRateNames = { "8000Hz", "11025Hz", "16000Hz", "22050Hz", "32000Hz", "44100Hz", "48000Hz" };
+
+        // Original: Core.dll ?ImportText@UByteProperty@@UBEPBGPBGPAEH@Z [HP1 0x101034EF] (ported: UEObjectConfig.ImportByte)
+        // Original: Galaxy.dll ?Init@UGalaxyAudioSubsystem@@UAEHXZ [HP1 0x1060629E-0x106062D2]
+        // OutputRate is a UByteProperty at +0x68 over the enum OutputRates (Galaxy.dll.c:1276-1322, 1409-1415). The value
+        // is matched as an FName among the enum names (case-insensitive); a number is NOT accepted (the digit test runs
+        // past the token). A failed import or a missing key leaves the class default: byte 0, because
+        // InitClassDefaultObject zeroes the properties past the superclass (UENativeClassDefaults, chain 3; Galaxy's
+        // first own property is +0x2c) and neither UGalaxyAudioSubsystem() (0x106011a9) nor any load path writes +0x68
+        // (its only writers: the copy constructors 0x10604800/0x10604a45 and the editor's PostEditChange 0x10605e11).
+        // So an unknown spelling plays at 8000 Hz. Init indexes a 7-entry stack table with the byte without a bound
+        // (0x106062d2 `mov esi, [ebp + 4*eax - 0x44]`): a byte above 6 (only reachable as `"x"7`, a quoted token followed
+        // by digits) reads past the table: undefined, STOP.
+        internal static int ImportOutputRate(string raw, string ini)
+        {
+            byte index = 0;
+            if (raw is not null && UEObjectConfig.ImportByte(OutputRateNames, raw, out byte b)) index = b;
+            if (index >= OutputRates.Length)
+                throw new InvalidDataException($"{ini}: [Galaxy.GalaxyAudioSubsystem] OutputRate={raw} imports byte {index}: Init reads past its 7-entry rate table (0x106062d2), undefined — STOP");
+            return OutputRates[index];
+        }
 
         public static UEGalaxyConfig Load(string systemDir)
         {
             string ini = UELevelRuntime.DefaultIniPath(systemDir);
             string section = null;
-            string surround = null, reverse = null, factor = null, doppler = null, latency = null, rate = null;
+            string surround = null, reverse = null, factor = null, doppler = null, latency = null, rate = null, digital = null, cd = null;
             foreach (string raw in File.ReadAllLines(ini))
             {
                 string line = raw.Trim();
@@ -89,24 +120,23 @@ namespace HP1.UEScript
                 else if (k.Equals("DopplerSpeed", StringComparison.OrdinalIgnoreCase)) doppler = v;
                 else if (k.Equals("Latency", StringComparison.OrdinalIgnoreCase)) latency = v;
                 else if (k.Equals("OutputRate", StringComparison.OrdinalIgnoreCase)) rate = v;
+                else if (k.Equals("UseDigitalMusic", StringComparison.OrdinalIgnoreCase)) digital = v;
+                else if (k.Equals("UseCDMusic", StringComparison.OrdinalIgnoreCase)) cd = v;
             }
-            if (surround is null || reverse is null || factor is null || doppler is null || latency is null || rate is null)
+            if (surround is null || reverse is null || factor is null || doppler is null || latency is null || digital is null || cd is null)
                 throw new InvalidDataException(
-                    $"{ini}: [Galaxy.GalaxyAudioSubsystem] has no UseSurround/ReverseStereo/AmbientFactor/DopplerSpeed/Latency/OutputRate");
-            string hz = rate.Trim();
-            if (!hz.EndsWith("Hz", StringComparison.OrdinalIgnoreCase)
-                || !int.TryParse(hz[..^2], NumberStyles.None, CultureInfo.InvariantCulture, out int outputRate)
-                || Array.IndexOf(OutputRates, outputRate) < 0)
-                throw new InvalidDataException($"{ini}: [Galaxy.GalaxyAudioSubsystem] OutputRate={rate} is not in the Galaxy OutputRates list");
+                    $"{ini}: [Galaxy.GalaxyAudioSubsystem] has no UseSurround/ReverseStereo/AmbientFactor/DopplerSpeed/Latency/UseDigitalMusic/UseCDMusic");
+            int outputRate = ImportOutputRate(rate, ini);
             int lat = int.Parse(latency, CultureInfo.InvariantCulture);
-            // Shipped clamps Latency to [10, 250] in PostEditChange (0x10605e14..0x10605e2f); whether a load path runs
-            // that clamp is not established, so a value outside the range is refused instead of guessed.
-            if (lat < 10 || lat > 250)
-                throw new InvalidDataException($"{ini}: [Galaxy.GalaxyAudioSubsystem] Latency={lat} outside [10, 250] — clamp path not ported");
+            // Latency is not clamped on the load path: [10, 250] is the editor's PostEditChange (0x10605e14-0x10605e2f), and
+            // the only other writers of +0x60 are the copy constructors (0x106047f4, 0x10604a39). Init hands the raw value
+            // to glxStartOutput (0x106062ec/0x106062ff), which clamps its own copy to [5, 495] for the device buffer
+            // write-ahead (0x10610d25-0x10610d50 -> DAT_106460c8, read only by the output cursor code 0x10611c3b/
+            // 0x10615abe, wall clock, not modelled: D-72); the music fade reads +0x60 itself, unclamped.
             return new UEGalaxyConfig(
                 bool.Parse(surround), bool.Parse(reverse),
                 float.Parse(factor, CultureInfo.InvariantCulture),
-                float.Parse(doppler, CultureInfo.InvariantCulture), lat, outputRate);
+                float.Parse(doppler, CultureInfo.InvariantCulture), lat, outputRate, bool.Parse(digital), bool.Parse(cd));
         }
     }
 

@@ -239,10 +239,18 @@ namespace HP1.UEScript
         // register value only when not above), + target R + own R in the register; `fst` stores the float tolerance
         // and `fmul` multiplies the UNROUNDED sum by that float copy; dist2 not above it -> inside the envelope.
         // NaN: `test ah,0x41` reads C0|C3, which an unordered compare sets — a NaN reach is kept, a NaN dist2 is inside.
+        // HP2 [HP2 0x103e9657..0x103e966d]: fld target R; fadd own R; fadd st,st(1) = (target R + own R) + reach, stored
+        // as the float tolerance, and the envelope is that float squared (fld tol; fmul tol).
+        // Original: Engine.dll ?actorReachable@APawn@@QAEHPAVAActor@@H@Z [HP1 0x103DBA80] [HP2 0x103E93C0]
         internal static bool ActorReachMelee(float radius, float melee, float targetRadius, float dist2, out float tolerance)
         {
             HP1.Core.X87Ext reach = X87(radius) * X87(1.5f);
             if ((HP1.Core.X87Ext.Fcom(reach, X87(melee)) & 0x41) == 0) reach = X87(melee);
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2)
+            {
+                tolerance = R64(R64(X87(targetRadius) + X87(radius)) + reach).ToFloat();
+                return (HP1.Core.X87Ext.Fcom(X87(dist2), R64(X87(tolerance) * X87(tolerance))) & 0x41) != 0;
+            }
             HP1.Core.X87Ext sum = R64(R64(reach + X87(targetRadius)) + X87(radius));
             tolerance = sum.ToFloat();
             return (HP1.Core.X87Ext.Fcom(X87(dist2), R64(sum * X87(tolerance))) & 0x41) != 0;
@@ -253,10 +261,15 @@ namespace HP1.UEScript
         // pointReachable range gate 0x103dc1c5..0x103dc1e6: only dx is stored (fstp dword); dy stays in the register;
         // dy² + dx² in the register against 640000f; `test ah,0x41; je fail` (0x103dc1ee..0x103dc1f3): only an ordered
         // "above" fails, NaN is in range.
+        // HP2 [HP2 0x103e9af5..0x103e9b1e] keeps dx in the register too (no fstp dword): dx² + dy² of the unrounded
+        // differences (the sum order commutes).
+        // Original: Engine.dll ?pointReachable@APawn@@QAEHVFVector@@H@Z [HP1 0x103DC190] [HP2 0x103E9AC0]
         internal static bool PointReachInRange(Vector3 dest, Vector3 loc)
         {
             HP1.Core.X87Ext dy = R64(X87(dest.y) - X87(loc.y));
-            HP1.Core.X87Ext dx = X87(R64(X87(dest.x) - X87(loc.x)).ToFloat());
+            HP1.Core.X87Ext dx = UEGameProfile.Current.Game == UEEdition.Game.HP2
+                ? R64(X87(dest.x) - X87(loc.x))
+                : X87(R64(X87(dest.x) - X87(loc.x)).ToFloat());
             return (HP1.Core.X87Ext.Fcom(R64(R64(dy * dy) + R64(dx * dx)), X87(ReachMaxRangeSquared)) & 0x41) != 0;
         }
 

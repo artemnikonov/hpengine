@@ -105,36 +105,38 @@ namespace HP1.UEScript
             frame.Context = frame.Object;
             try
             {
-            while (true)
-            {
-                while (frame.Cursor < frame.Tokens.Count && IsDebugInfoAt(frame, frame.Cursor))
-                    frame.Cursor++;
-                if (frame.Cursor >= frame.Tokens.Count) {
-                    UETrace.Error(
-                        $"[VM] {label}: unexpected EOF before EndFunctionParms in " +
-                        $"{frame.Object?.Class?.Name}.{frame.Func?.Name}");
-                    break;
-                }
-                if (TokenKindAt(frame, frame.Cursor) == TokenKind.EndFunctionParms) {
-                    frame.Cursor++;
-                    break;
-                }
+                while (true)
+                {
+                    while (frame.Cursor < frame.Tokens.Count && IsDebugInfoAt(frame, frame.Cursor))
+                        frame.Cursor++;
+                    if (frame.Cursor >= frame.Tokens.Count)
+                    {
+                        UETrace.Error(
+                            $"[VM] {label}: unexpected EOF before EndFunctionParms in " +
+                            $"{frame.Object?.Class?.Name}.{frame.Func?.Name}");
+                        break;
+                    }
+                    if (TokenKindAt(frame, frame.Cursor) == TokenKind.EndFunctionParms)
+                    {
+                        frame.Cursor++;
+                        break;
+                    }
 
-                bool isOut = idx < paramOutFlags.Length && paramOutFlags[idx];
-                if (isOut)
-                {
-                    var lref = interp.EvalLValue(frame);
-                    args.Add(ReadLValue(frame, lref));
-                    outRefs.Add(lref);
+                    bool isOut = idx < paramOutFlags.Length && paramOutFlags[idx];
+                    if (isOut)
+                    {
+                        var lref = interp.EvalLValue(frame);
+                        args.Add(ReadLValue(frame, lref));
+                        outRefs.Add(lref);
+                    }
+                    else
+                    {
+                        var r = interp.EvalNext(frame);
+                        args.Add(r.Value);
+                        if (anyOut) outRefs.Add(null);
+                    }
+                    idx++;
                 }
-                else
-                {
-                    var r = interp.EvalNext(frame);
-                    args.Add(r.Value);
-                    if (anyOut) outRefs.Add(null);
-                }
-                idx++;
-            }
             }
             finally { frame.Context = savedContext; interp._argDepth--; }
             // Pooled (UEVmPool): the call site hands the array and the out-ref list back after its writeback.
@@ -231,6 +233,8 @@ namespace HP1.UEScript
 
         void Register<T>(UETokenHandler h) where T : Tok.Token
             => _handlers[typeof(T)] = h;
+        // Whether a token type has a handler (coverage check of a game's token types, SelfTest).
+        internal bool HasHandler(System.Type tokenType) => _handlers.ContainsKey(tokenType);
         UETokenHandler[] HandlersFor(List<Tok.Token> toks)
         {
             lock (_handlerCache)
@@ -330,15 +334,19 @@ namespace HP1.UEScript
         {
             var arrRef = EvalLValue(frame);
             var list = ReadLValue(frame, arrRef) as List<object>;
-            if (list == null) {
+            if (list == null)
+            {
                 list = new List<object>();
                 WriteLValue(frame, arrRef, list);
             }
-            if (idx < 0) {
+            if (idx < 0)
+            {
                 UETrace.Warn($"[VM] Accessed array out of bounds ({idx}/{list.Count}) in "
                            + $"{frame.Object?.Class?.Name}.{frame.Func?.Name}");
                 idx = 0;
-            } else {
+            }
+            else
+            {
                 while (list.Count <= idx) list.Add(null);   // zeros: null reads as the type's zero
             }
             outIdx = idx;
@@ -349,7 +357,8 @@ namespace HP1.UEScript
         {
             while (frame.Cursor < frame.Tokens.Count && IsDebugInfoAt(frame, frame.Cursor))
                 frame.Cursor++;
-            if (frame.Cursor >= frame.Tokens.Count) {
+            if (frame.Cursor >= frame.Tokens.Count)
+            {
                 UETrace.Error($"[VM] EvalLValue: unexpected EOF in " +
                                $"{frame.Object?.Class?.Name}.{frame.Func?.Name}");
                 return default;
@@ -358,47 +367,68 @@ namespace HP1.UEScript
             switch (tok)
             {
                 case Tok.LocalVariableToken lv:
-                {
-                    var pr = PropRefAt(frame, tok, lv.Object);
-                    if (pr.PropId >= 0)
                     {
-                        var layout = frame.Variables.Layout;
-                        int slot = layout.SlotForProp(pr.PropId);
-                        return new UELValueRef {
+                        var pr = PropRefAt(frame, tok, lv.Object);
+                        if (pr.PropId >= 0)
+                        {
+                            var layout = frame.Variables.Layout;
+                            int slot = layout.SlotForProp(pr.PropId);
+                            return new UELValueRef
+                            {
+                                Kind = UELValueKind.Local,
+                                Name = layout.KeyAt(slot),
+                                SlotLayout = layout,
+                                Slot = slot,
+                            };
+                        }
+                        return new UELValueRef
+                        {
                             Kind = UELValueKind.Local,
-                            Name = layout.KeyAt(slot),
-                            SlotLayout = layout,
-                            Slot = slot,
+                            Name = pr.Name,
                         };
                     }
-                    return new UELValueRef {
-                        Kind = UELValueKind.Local,
-                        Name = pr.Name,
-                    };
-                }
                 case Tok.InstanceVariableToken iv:
-                {
-                    var pr = PropRefAt(frame, tok, iv.Object);
-                    var ctx = frame.Context;
-                    if (ctx != null && pr.PropId >= 0)
                     {
-                        var layout = ctx.Props.Layout;
-                        int slot = layout.SlotForProp(pr.PropId);
-                        return new UELValueRef {
+                        var pr = PropRefAt(frame, tok, iv.Object);
+                        var ctx = frame.Context;
+                        if (ctx != null && pr.PropId >= 0)
+                        {
+                            var layout = ctx.Props.Layout;
+                            int slot = layout.SlotForProp(pr.PropId);
+                            return new UELValueRef
+                            {
+                                Kind = UELValueKind.Instance,
+                                Name = layout.KeyAt(slot),
+                                Target = ctx,
+                                SlotLayout = layout,
+                                Slot = slot,
+                            };
+                        }
+                        return new UELValueRef
+                        {
                             Kind = UELValueKind.Instance,
-                            Name = layout.KeyAt(slot),
+                            Name = UEObject.PropKey(ctx?.Class, PropDeclClass(iv.Object),
+                                                    iv.Object?.Name?.ToString()),
                             Target = ctx,
-                            SlotLayout = layout,
-                            Slot = slot,
                         };
                     }
-                    return new UELValueRef {
-                        Kind = UELValueKind.Instance,
-                        Name = UEObject.PropKey(ctx?.Class, PropDeclClass(iv.Object),
-                                                iv.Object?.Name?.ToString()),
-                        Target = ctx,
-                    };
-                }
+                case Tok.DefaultVariableToken dv:
+                    {
+                        // `default.X` as an lvalue (HP2: CutScript.GenerateUniqueCue `default.lastCueNum++`, CutScene's
+                        // `default.numScriptsPlaying++/--`): GPropAddr = GetClass()->Defaults + Property->Offset, the class of
+                        // the context object — the same class defaults the read handler takes (ClassDefaultsBag).
+                        // Original: Core.dll ?execDefaultVariable@UObject@@QAEXAAUFFrame@@QAX@Z [HP1 0x10131FE0] [HP2 0x10132B50]
+                        var cls = frame.ClassContext ?? frame.Context?.Class ?? frame.Object?.Class;
+                        string name = dv.Object?.Name?.ToString();
+                        if (cls is null || name is null)
+                            throw new InvalidOperationException($"[VM] default.{name} as an lvalue without a class in {frame.Object?.Class?.Name}.{frame.Func?.Name}");
+                        return new UELValueRef
+                        {
+                            Kind = UELValueKind.Instance,
+                            Name = UEObject.PropKey(cls, PropDeclClass(dv.Object), name),
+                            Target = ClassDefaultsBag(cls),
+                        };
+                    }
                 case Tok.BoolVariableToken:
                     // execBoolVariable (Core.dll.c:45463): the inner token gives the
                     // address, GProperty = the bool property. The child is the real
@@ -428,8 +458,14 @@ namespace HP1.UEScript
                             if (fieldName is null)
                                 return new UELValueRef { Kind = UELValueKind.Instance, Name = fieldName, Target = bag };
                             var layout = bag.Props.Layout;
-                            return new UELValueRef { Kind = UELValueKind.Instance, Name = fieldName, Target = bag,
-                                                     SlotLayout = layout, Slot = layout.SlotForKey(pr.NameKeyId) };
+                            return new UELValueRef
+                            {
+                                Kind = UELValueKind.Instance,
+                                Name = fieldName,
+                                Target = bag,
+                                SlotLayout = layout,
+                                Slot = layout.SlotForKey(pr.NameKeyId)
+                            };
                         }
                         return new UELValueRef { Kind = UELValueKind.StructMember, Name = fieldName, ParentRef = pref };
                     }
@@ -445,7 +481,8 @@ namespace HP1.UEScript
                     {
                         var keyR = EvalNext(frame);
                         var list = DynArrayForElement(frame, ToInt(keyR.Value), out int idx);
-                        return new UELValueRef {
+                        return new UELValueRef
+                        {
                             Kind = UELValueKind.ArrayIndex,
                             ListTarget = list,
                             IntIndex = idx,
@@ -463,7 +500,8 @@ namespace HP1.UEScript
                         int dim = StaticArrayDimAt(frame);
                         var arrR = EvalNext(frame);
                         var list = arrR.Value as System.Collections.IList;
-                        return new UELValueRef {
+                        return new UELValueRef
+                        {
                             Kind = UELValueKind.ArrayIndex,
                             ListTarget = list,
                             IntIndex = StaticArrayIndex(frame, ToInt(keyR.Value), dim, list),
@@ -527,29 +565,35 @@ namespace HP1.UEScript
                 while (frame.Cursor < frame.Tokens.Count
                        && frame.Tokens[frame.Cursor] is Tok.DebugInfoToken)
                     frame.Cursor++;
-                if (frame.Cursor >= frame.Tokens.Count) {
+                if (frame.Cursor >= frame.Tokens.Count)
+                {
                     UETrace.Error(
                         $"[VM] Switch: ran out of tokens looking for a case in " +
                         $"{frame.Object?.Class?.Name}.{frame.Func?.Name}");
                     return;
                 }
                 var tok = frame.Tokens[frame.Cursor++];
-                if (!(tok is Tok.CaseToken ct)) {
+                if (!(tok is Tok.CaseToken ct))
+                {
                     UETrace.Error(
                         $"[VM] Switch: expected CaseToken, got {tok.GetType().Name} " +
                         $"at pos {tok.Position} in {frame.Object?.Class?.Name}.{frame.Func?.Name}");
                     return;
                 }
-                if (ct.CodeOffset == ushort.MaxValue) {
+                if (ct.CodeOffset == ushort.MaxValue)
+                {
                     // Default case (UELib `IsDefault`).
                     return;
                 }
                 var caseVal = EvalNext(frame).Value;
                 if (UEValue.SwitchCaseMatches(condVal, caseVal)) return;  // matched, fall through to body
                 // Mismatch: jump to NextOffset (start of the next case).
-                if (frame.OffsetToIndex.TryGetValue(ct.CodeOffset, out var idx)) {
+                if (frame.OffsetToIndex.TryGetValue(ct.CodeOffset, out var idx))
+                {
                     frame.Cursor = idx;
-                } else {
+                }
+                else
+                {
                     UETrace.Error(
                         $"[VM] Switch: NextOffset 0x{ct.CodeOffset:X} not found in " +
                         $"{frame.Object?.Class?.Name}.{frame.Func?.Name}");

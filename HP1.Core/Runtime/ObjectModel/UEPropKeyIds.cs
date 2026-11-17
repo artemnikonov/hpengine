@@ -46,6 +46,9 @@ namespace HP1.UEScript
         public static readonly int bAlwaysRelevant = UEPropKeys.Id("bAlwaysRelevant");
         public static readonly int bAlwaysTick = UEPropKeys.Id("bAlwaysTick");
         public static readonly int bTicked = UEPropKeys.Id("bTicked");
+        public static readonly int bInSpecialPause = UEPropKeys.Id("bInSpecialPause");
+        public static readonly int bStasis = UEPropKeys.Id("bStasis");
+        public static readonly int bForceStasis = UEPropKeys.Id("bForceStasis");
         public static readonly int bAnimByOwner = UEPropKeys.Id("bAnimByOwner");
         public static readonly int bAnimFinished = UEPropKeys.Id("bAnimFinished");
         public static readonly int bAnimLoop = UEPropKeys.Id("bAnimLoop");
@@ -214,6 +217,7 @@ namespace HP1.UEScript
         public static readonly int LastEmitLocation = UEPropKeys.Id("LastEmitLocation");
         public static readonly int LastUpdateLocation = UEPropKeys.Id("LastUpdateLocation");
         public static readonly int LastUpdateRotation = UEPropKeys.Id("LastUpdateRotation");
+        public static readonly int LatentFloat = UEPropKeys.Id("LatentFloat");
         public static readonly int Level = UEPropKeys.Id("Level");
         public static readonly int LevelAction = UEPropKeys.Id("LevelAction");
         public static readonly int LevelEnterText = UEPropKeys.Id("LevelEnterText");
@@ -274,6 +278,7 @@ namespace HP1.UEScript
         public static readonly int OldDesiredZ = UEPropKeys.Id("OldDesiredZ");
         public static readonly int OldFlashCount = UEPropKeys.Id("OldFlashCount");
         public static readonly int OldLocation = UEPropKeys.Id("OldLocation");
+        public static readonly int ColLocation = UEPropKeys.Id("ColLocation");
         public static readonly int OldPos = UEPropKeys.Id("OldPos");
         public static readonly int OldRot = UEPropKeys.Id("OldRot");
         public static readonly int OptionsPage = UEPropKeys.Id("OptionsPage");

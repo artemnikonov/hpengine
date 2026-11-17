@@ -141,7 +141,12 @@ namespace HP1.UEScript
         //        canvas); the frontend scales the frame's HUD by it instead of re-reading [HPEngine] UIScaleStep after the tick.
         //   31 — DecalInstance.SurfPolyFlags / SurfTexturePolyFlags: the flags of a decal's mover tracker surface, so the
         //        frontend groups it by Core's surface (RenderRules.DecalGroup, 90abdf4b).
-        public const int Version = 31;
+        //   32 — LightState.Palette: the Skin palette entry a LightType 8/9 type function reads this frame (0.4.0 P8 B33);
+        //        Core's lightmaps, fog and actor lighting read it (SurfLightmap.LightBrightness / TypeColour).
+        //   33 — WorldFrame.TextureFrames: AnimNext chain state is Core's (UEWorldFrameProducer.TextureUses, every texture
+        //        use of the frame incl. UCanvas::DrawTile); the frontend no longer steps a chain, it looks the frame up.
+        //        Added at 33 without a bump: DrawnWorld.Lumos (HP2 DrawFrame's Lumos DrawComplexSurface arguments; empty for HP1).
+        public const int Version = 33;
 
         // Contract types. The order is fixed — it is also the print order.
         public static readonly Type[] Types =
@@ -957,7 +962,10 @@ namespace HP1.UEScript
                 ContractFieldStatus.Consumed, "hpengine WorldMesh.Select (level nodes per view), MoverScene.EmitViews (mover polygons per view)") },
             { "WorldFrame.DrawnTextures", new ContractField(ContractFieldKind.Presentation,
                 "UEWorldFrameProducer.DrawnTexturesOf", "Surf->Texture of every drawn surface: DrawFrame calls Texture->Update(Viewport->CurrentTime) for each (Render.dll 0x10b2587d..0x10b25898); no texture — DefaultTexture without Update (0x10b258af..0x10b258c1)", "hpengine Renderer",
-                ContractFieldStatus.Consumed, "hpengine Renderer.AnimateWorld / TickProc (AnimNext and procedural textures advance only when drawn)") },
+                ContractFieldStatus.Consumed, "hpengine Renderer.TickProc (procedural textures advance only when drawn); AnimNext chains: Core TextureUses -> WorldFrame.TextureFrames") },
+            { "WorldFrame.TextureFrames", new ContractField(ContractFieldKind.Presentation,
+                "UEWorldFrameProducer.TextureUses / TextureUse", "UTexture::Update(Viewport->CurrentTime) (Engine 0x10421070) of every texture the frame used — drawn surfaces, mesh slots and the empty-slot texture, DT_Sprite, Textures[0] of drawn emitters, decals, UCanvas::DrawTile — then AnimCur (UETextureAnim, Core's chain state): chain head -> the frame it shows", "hpengine Renderer / sprite, particle, decal and actor builders",
+                ContractFieldStatus.Consumed, "hpengine Renderer.AnimateWorld (world batches), HPEngineProgram.TexFrame (builders' FrameOf)") },
             { "DrawnWorld.Nodes", new ContractField(ContractFieldKind.Presentation,
                 "UEWorldFrameProducer.DrawnOf", "FSavedPoly.iNode of level-model surfaces, OccludeBsp order", "hpengine WorldMesh.Select",
                 ContractFieldStatus.Consumed, "hpengine WorldMesh.Select (index runs of the view)") },
@@ -970,6 +978,9 @@ namespace HP1.UEScript
             { "DrawnWorld.Reflagged", new ContractField(ContractFieldKind.Presentation,
                 "UEWorldFrameProducer.DrawnOf", "drawn polygons whose draw-record PolyFlags OccludeBsp changed: PF_Mirrored|PF_Translucent with RenDev ShinySurfaces == 0 -> PolyFlags & ~PF_Translucent | 0x80000000, pass 1 (Render 0x10b23a8e..0x10b23ab8)", "hpengine WorldMesh.Select, MoverScene.EmitViews, Interp.Drawn",
                 ContractFieldStatus.Consumed, "hpengine WorldMesh.Select / MoverScene.EmitViews (the polygon's reflagged run: blending, opaque pass, no reflection)") },
+            { "DrawnWorld.Lumos", new ContractField(ContractFieldKind.Presentation,
+                "UEWorldFrameProducer.DrawnOf (UELumosSurfaces)", "HP2 DrawFrame's DrawComplexSurface PolyFlags/alpha arguments of the drawn Lumos carrier polygons (surface PolyFlags & 0x800040; Render.dll [HP2 0x10b25da1..0x10b260ca]); empty for HP1", "hpengine WorldMesh.Select, MoverScene.EmitViews",
+                ContractFieldStatus.Unconsumed, "—") },
             { "DrawnWorld.SkyWindows", new ContractField(ContractFieldKind.Presentation,
                 "UEWorldFrameProducer.DrawnOf", "PF_FakeBackdrop nodes whose sky branch spawned the frame's sky child (OccludeBsp returns before FSavedPoly, UEOcclusion.Surface)", "hpengine WorldMesh.Select",
                 ContractFieldStatus.Consumed, "hpengine Renderer.DrawWorld (the window shows the sky view)") },
@@ -1137,6 +1148,9 @@ namespace HP1.UEScript
             { "LightState.Static", new ContractField(ContractFieldKind.Presentation,
                 "WorldFrameProjector.Project", "light bStatic — the fork of the per-actor selection CAP: a non-static is skipped at total>2, a static at static>2 (Render.dll.c:21399-21403 + 21435-21437)", "HP1Lighting",
                 ContractFieldStatus.Consumed, "HP1Lighting.GatherActorLights (selection cap)") },
+            { "LightState.Palette", new ContractField(ContractFieldKind.Presentation,
+                "WorldFrameProjector.ProjectLight", "LightType 8/9 (TexturePaletteOnce/Loop, Render.dll 0x10b06590/0x10b066d0): Palette->Colors(i) of the light's Skin (0x01RRGGBB) at the type function's index — 8: 1 − LifeSpan/Class.Defaults.LifeSpan, 9: (TimeSeconds·35/max(Period,1) + Phase)·256; 0 without Skin or Palette (the function returns)", "Core MoverMode3.FromSnapshot, UEActorLighting.BeginFrame, FogMap.FromSnapshot",
+                ContractFieldStatus.Consumed, "Core MoverMode3.FromSnapshot, UEActorLighting.BeginFrame, FogMap.FromSnapshot") },
             { "LightState.ViewRotation", new ContractField(ContractFieldKind.Presentation,
                 "WorldFrameProjector.ProjectLight", "AActor::GetViewRotation of the light (Engine.dll.c:103977-104001: IsA(APawn) ? ViewRotation +0x33c : Rotation +0x108) — the direction of the spot filler (Render.dll.c:18492) and of LightSource 1 (disasm 0x10b06e8e..0x10b06ea8)", "Core MoverMode3.FromSnapshot",
                 ContractFieldStatus.Consumed, "Core MoverMode3.FromSnapshot") },

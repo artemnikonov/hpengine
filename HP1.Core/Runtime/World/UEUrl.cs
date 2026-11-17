@@ -13,8 +13,15 @@
 //   FURL::LoadURLConfig 123621: every line of the section — AddOption.
 //   Options string for InitGame/Login (247220-247235): "?" + option, consecutively.
 //
-// Network forms (protocol, host, "//", a dot not before a map or save extension) and Absolute/Partial without a map
-// in the text are not needed by the port and give a loud refusal, not a plausible URL.
+//   FURL::FURL(NULL) / the Base-Text ctor start (Engine.dll.c:328446-328530): Protocol, Host, Port, Map, Portal are the
+//     FURL::Default* statics (FURL::StaticInit 95287: GConfig->GetStr("URL", <key>) of the system ini, from
+//     UEngine::Init), so Absolute/Partial text without a map keeps Map = DefaultMap (B17).
+//   TRAVEL_Absolute with a Base and an internal URL (LAB_1042eee9, Engine.dll.c:329218-329350): every Base option that
+//     starts with Name=/Team=/Class=/Skin=/Face=/Voice=/OverrideClass= (appStrnicmp) and whose bare name the new URL has
+//     no option starting with (GetOption(name, "") == "") is appended (Op.AddItem, not AddOption).
+//
+// Network forms (protocol, host, "//", a dot not before a map or save extension) are not needed by the port and give a
+// loud refusal, not a plausible URL.
 using System;
 using System.Collections.Generic;
 
@@ -24,13 +31,39 @@ namespace HP1.UEScript
     {
         public const int Absolute = 0, Partial = 1, Relative = 2;
 
-        public string Map = "";
+        // FURL::DefaultMap / DefaultMapExt (FURL::StaticInit: [URL] Map / MapExt of the system ini; a missing key is "",
+        // GetStr's answer). null until StaticInit ran: a map-less Absolute/Partial URL then refuses loudly.
+        public static string DefaultMap { get; private set; }
+        public static string DefaultMapExt { get; private set; }
+        public static string DefaultSaveExt { get; private set; }
+        public static string DefaultProtocol { get; private set; }
+        public static string DefaultPortal { get; private set; }
+        // FURL::DefaultHost / DefaultPort ([URL] Host, appAtoi([URL] Port)). The port's URLs are all local (network forms
+        // refused), so every URL keeps DefaultPort; Host is DefaultHost, "" after a "//" host form, the base's when Relative.
+        public static string DefaultHost { get; private set; }
+        public static int DefaultPort { get; private set; }
+
+        // Original: Engine.dll.c:95287 FURL::StaticInit (export 0x33b9), the [URL] keys the port reads.
+        public static void StaticInit(UEConfig config)
+        {
+            string Get(string key) => config.TryGetIni(UEConfig.ScopeSystem, "URL", key, out string v) ? v : "";
+            DefaultMap = Get("Map");
+            DefaultMapExt = Get("MapExt");
+            DefaultSaveExt = Get("SaveExt");
+            DefaultProtocol = Get("Protocol");
+            DefaultPortal = Get("Portal");
+            DefaultHost = Get("Host");
+            DefaultPort = UEValue.LeadingAtoi(Get("Port"));
+        }
+
+        public string Map = DefaultMap ?? "";
         public string Portal = "";
+        public string Host = DefaultHost ?? "";
         public readonly List<string> Ops = new();
 
         public UEUrl Copy()
         {
-            var u = new UEUrl { Map = Map, Portal = Portal };
+            var u = new UEUrl { Map = Map, Portal = Portal, Host = Host };
             u.Ops.AddRange(Ops);
             return u;
         }
@@ -126,7 +159,7 @@ namespace HP1.UEScript
             {
                 if (baseUrl is null)
                     throw new InvalidOperationException($"FURL: check(Base) — {(type == Relative ? "Relative" : "Partial")} URL \"{text}\" without a base");
-                if (type == Relative) { u.Map = baseUrl.Map; u.Portal = baseUrl.Portal; }
+                if (type == Relative) { u.Map = baseUrl.Map; u.Portal = baseUrl.Portal; u.Host = baseUrl.Host; }
                 foreach (string op in baseUrl.Ops)
                     if (!IsOneOf(op, "PUSH", "POP", "PEER", "LOAD")) u.Ops.Add(op);
             }
@@ -142,40 +175,84 @@ namespace HP1.UEScript
                 {
                     int next = FirstOf(all, pos);
                     string seg = next < 0 ? all.Substring(pos) : all.Substring(pos, next - pos);
-                    if (seg.IndexOf(' ') >= 0)
-                        throw new NotSupportedException($"FURL \"{text}\": space in an option — shipped makes the URL invalid");
+                    if (seg.IndexOf(' ') >= 0) throw Invalid(text, "a space in an option or portal segment");
                     if (kind == '?') u.AddOption(seg); else u.Portal = seg;
                     if (next < 0) break;
                     kind = all[next];
                     pos = next + 1;
                 }
             }
-            if (s.IndexOf(':') >= 0 || s.StartsWith("/", StringComparison.Ordinal) || NonLocalDot(s))
-                throw new NotSupportedException($"FURL \"{text}\": network form (protocol/host) not ported");
-            // Local map "Map/Portal" (Engine.dll.c 328403+951..1016, FURL::FURL 0x1042e100): the first '/' separates
-            // the portal — it REPLACES the portal from '#'; the second '/' truncates the portal, and a non-empty tail
-            // after it invalidates the URL. A space in the portal does too (body tail).
-            int slash = s.IndexOf('/');
-            if (slash >= 0)
+            // Protocol and host (Engine.dll.c:328822-328960). Not a drive path ("C:..."): a ':' after the second character
+            // with no '.' before it ends the protocol; then "//" starts a host form (Host = ""), a single '/' makes the
+            // URL invalid; a '.' after the first character not followed by MapExt/SaveExt + a non-alphanumeric is a
+            // network host. A drive path skips all of it (Engine.dll.c:329060-329216): Map = the whole text, Portal =
+            // DefaultPortal, a host form with no map left to read.
+            string protocol = DefaultProtocol ?? "";
+            bool hostForm = false, drivePath = !(s.Length < 3 || s[1] != ':');
+            if (!drivePath)
             {
-                string portal = s.Substring(slash + 1);
-                s = s.Substring(0, slash);
-                int slash2 = portal.IndexOf('/');
-                if (slash2 >= 0)
+                int colon = s.IndexOf(':'), dot = s.IndexOf('.');
+                if (colon > 1 && (dot < 0 || dot > colon)) { protocol = s.Substring(0, colon); s = s.Substring(colon + 1); }
+                if (s.StartsWith("/", StringComparison.Ordinal))
                 {
-                    if (slash2 + 1 < portal.Length)
-                        throw new NotSupportedException($"FURL \"{text}\": second '/' with a tail — shipped makes the URL invalid");
-                    portal = portal.Substring(0, slash2);
+                    if (!s.StartsWith("//", StringComparison.Ordinal)) throw Invalid(text, "a single '/' before the map");
+                    hostForm = true;
+                    u.Host = "";
+                    s = s.Substring(2);
                 }
-                if (portal.IndexOf(' ') >= 0)
-                    throw new NotSupportedException($"FURL \"{text}\": space in the portal — shipped makes the URL invalid");
-                u.Portal = portal;
+                if (NonLocalDot(s))
+                    throw new NotSupportedException($"FURL \"{text}\": network form (host) not ported");
             }
-            if (s.Length > 0) u.Map = s;
-            else if (type != Relative)
-                throw new NotSupportedException($"FURL \"{text}\": default map for Absolute/Partial not ported");
+            bool internalUrl = string.Equals(protocol, DefaultProtocol ?? "", StringComparison.OrdinalIgnoreCase);   // FURL::IsInternal
+            if (!internalUrl)
+                throw new NotSupportedException($"FURL \"{text}\": network form (protocol {protocol}) not ported");
+            // Original: Engine.dll.c:329218 (LAB_1042eee9) — before the map is taken from the text.
+            if (type == Absolute && baseUrl is not null)
+                foreach (string op in baseUrl.Ops)
+                {
+                    // The key is appStrncpy(key, op, idx('=') + 1): MaxLen counts the terminator, so the '=' is cut and
+                    // GetOption matches any option that starts with the bare name ("Name" also finds "NameX=1").
+                    if (IsPersistentOption(op) && u.GetOption(op.Substring(0, op.IndexOf('=')), "").Length == 0) u.Ops.Add(op);
+                }
+            bool mapGiven = s.Length > 0;
+            if (drivePath)
+            {
+                u.Map = s;
+                u.Portal = DefaultPortal ?? "";
+                hostForm = true;
+            }
+            else if (mapGiven)
+            {
+                // Local map "Map/Portal" (Engine.dll.c:329354-329420): the first '/' separates the portal — it REPLACES
+                // the portal from '#'; the second '/' truncates the portal, and a non-empty tail after it invalidates
+                // the URL.
+                int slash = s.IndexOf('/');
+                if (slash >= 0)
+                {
+                    string portal = s.Substring(slash + 1);
+                    s = s.Substring(0, slash);
+                    int slash2 = portal.IndexOf('/');
+                    if (slash2 >= 0)
+                    {
+                        if (slash2 + 1 < portal.Length) throw Invalid(text, "a second '/' with a tail");
+                        portal = portal.Substring(0, slash2);
+                    }
+                    u.Portal = portal;
+                }
+                u.Map = s;
+            }
+            else if (type != Relative && DefaultMap is null)
+                throw new InvalidOperationException($"FURL \"{text}\": no map in the text and FURL::StaticInit has not run (DefaultMap)");
+            // Body tail (Engine.dll.c:329420-329450): a space in Protocol, Host or Portal, or neither a host form, nor a
+            // map in the text, nor an option, makes the URL invalid.
+            if (protocol.IndexOf(' ') >= 0 || u.Portal.IndexOf(' ') >= 0) throw Invalid(text, "a space in the protocol or portal");
+            if (!hostForm && !mapGiven && u.Ops.Count == 0) throw Invalid(text, "no map and no option");
             return u;
         }
+
+        // An invalid URL (Valid = 0, every field back to FURL(NULL)): the port's callers do not carry one — loud.
+        static NotSupportedException Invalid(string text, string why) =>
+            new($"FURL \"{text}\": {why} — shipped makes the URL invalid");
 
         static int FirstOf(string s, int from)
         {
@@ -185,18 +262,24 @@ namespace HP1.UEScript
             return Math.Min(q, h);
         }
 
-        // A dot NOT followed by a map (unr) or save (usa) extension with a non-alphanumeric character after it —
-        // marks a host.
+        // A dot NOT followed by DefaultMapExt or DefaultSaveExt with a non-alphanumeric character after it — marks a host.
         static bool NonLocalDot(string s)
         {
             int dot = s.IndexOf('.');
             if (dot <= 0) return false;
-            foreach (string ext in new[] { "unr", "usa" })
+            foreach (string ext in new[] { DefaultMapExt ?? "", DefaultSaveExt ?? "" })
                 if (s.Length >= dot + 1 + ext.Length
                     && string.Compare(s, dot + 1, ext, 0, ext.Length, StringComparison.OrdinalIgnoreCase) == 0
                     && (s.Length == dot + 1 + ext.Length || !char.IsLetterOrDigit(s[dot + 1 + ext.Length])))
                     return false;
             return true;
+        }
+
+        static bool IsPersistentOption(string op)
+        {
+            foreach (string p in new[] { "Name=", "Team=", "Class=", "Skin=", "Face=", "Voice=", "OverrideClass=" })
+                if (op.StartsWith(p, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
         }
 
         static bool IsOneOf(string op, params string[] names)

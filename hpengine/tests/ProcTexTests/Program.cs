@@ -333,7 +333,7 @@ static class Program
     static void IceRefusals()
     {
         bool T(Action a) { try { a(); return false; } catch (ArgumentException) { return true; } }
-        Check("ice-refuse-style5", T(() => Ice(8, 8, 5, 0, 0, 128, 128, 0, 0, 0, false, 0, 0, 0)));
+        Check("ice-refuse-style256", T(() => Ice(8, 8, 256, 0, 0, 128, 128, 0, 0, 0, false, 0, 0, 0)));
         Check("ice-refuse-npot", T(() => Ice(12, 8, 0, 0, 0, 128, 128, 0, 0, 0, false, 0, 0, 0, 0, new byte[96], new byte[96])));
         Check("ice-refuse-glass-size", T(() => Ice(8, 8, 0, 0, 0, 128, 128, 0, 0, 0, false, 0, 0, 0, 0, new byte[64], new byte[32])));
     }
@@ -567,7 +567,13 @@ static class Program
         Check("wet-leaf-ambiguous-stop", pt.WetCarrierByLeaf("Pool") == null && pt.Problems.Any(p => p.Contains("leaf 'Pool'")));
         Check("wet-leaf-no-source-not-indexed", pt.WetCarrierByLeaf("Gone") == null);
         Check("wet-missing-source-stop", pt.Wet("Lev.Water.Gone", 22, 1.0) == null && pt.Problems.Any(p => p.Contains("genfluid.Water") && p.Contains("is missing")));
-        Check("wet-big-source-stop", pt.Wet("Lev.Water.Big", 22, 1.0) == null && pt.Problems.Any(p => p.Contains("is larger")));
+        Check("wet-big-source-static", pt.Wet("Lev.Water.Big", 22, 1.0) == null && !pt.Problems.Any(p => p.Contains("Lev.Water.Big")));
+        var noRef = WetRec("Lev.Water.NoRef", source: false); noRef.SourceMissing = "None";
+        var ptNoRef = new ProcTextures(null, new[] { noRef }, Ring());
+        Check("wet-no-source-ref-static", ptNoRef.IsWetCarrier("Lev.Water.NoRef") && ptNoRef.Wet("Lev.Water.NoRef", 22, 1.0) == null
+            && ptNoRef.Problems.Count == 0, string.Join(" | ", ptNoRef.Problems));
+        var tiny = new ProcTextures(null, new[] { WetRec("Lev.Water.Tiny", w: 4, srcW: 4) }, Ring());
+        Check("wet-tiny-stop", tiny.Wet("Lev.Water.Tiny", 22, 1.0) == null && tiny.Problems.Any(p => p.Contains("smaller than 8")));
         int n = pt.Problems.Count; pt.Wet("Lev.Water.Gone", 23, 1.1);
         Check("wet-stop-reported-once", pt.Problems.Count == n);
     }

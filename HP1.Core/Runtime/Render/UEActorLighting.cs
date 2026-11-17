@@ -2,7 +2,7 @@
 //
 // Rules in UE units / UE world axes:
 //   * per-frame light collection (HP1LightSink.Sync): level ambient FGetHSV(Actors(0)); a source when
-//     LightType≠0 and LightBrightness>0; colour FGetHSV(Hue, Sat, 255)·Brightness/255·LightState.Scale
+//     LightType≠0 and LightBrightness>0; colour TypeColour·clamp(Brightness/255·LightState.Scale) (8/9: the palette)
 //     (URender::GlobalLighting `push 0xff` 0x10b0685d, Render.dll.c:19147; ComputeFromActor :19255,
 //     :19274); bDarkLight — sign −1 (:21374-21379); inner radius RadiusInner/256·R (:19219-19225);
 //   * per-actor selection (HP1Lighting.GatherActorLights; FLightManager::SetupForActor,
@@ -66,6 +66,12 @@ namespace HP1.UEScript
         readonly Dictionary<int, int> _counter = new();
         readonly Dictionary<int, int> _indexByObject = new();
         int _lightFrame, _fadeRate;
+        // The light actors' transient tags SetupForActor leaves (HP1 Render.dll.c:21305-21309, 21334-21338, 21364-21370,
+        // 21390-21450): LightingTag (+0xec) = the candidate's score, ExtraTag (+0xf4) = the call stamp DAT_10b5f730 (one
+        // more per call past the gates, :21284, from 0 at load), SpecialTag (+0xf8) = the pair counter after the call.
+        // The last call that took a light wins; UEActorLights writes them onto the light actors.
+        int _setupStamp;
+        public readonly Dictionary<int, (int Score, int Stamp, int Counter)> TagsTaken = new();
         bool _fadeSeeded;
         double _lastViewportSeconds;
 
@@ -83,6 +89,9 @@ namespace HP1.UEScript
             _pool = new HashSet<int>();
             foreach (int e in lightExports) if (e != 0) _pool.Add(e);
         }
+
+        // GCache.Flush(0, ~0): the actor caches are GCache items (key Index·0x100+0x30), so every actor is cold afterwards.
+        public void FlushCache() => _cache.Clear();
 
         // HP1Lighting.BeginFrame + HP1LightSink.Sync. viewLit — view-level SetupForActor gates (ViewLit). levelBrightness —
         // the light's Level->Brightness (+0x44c): FLightInfo::ComputeFromActor scales every record colour by it
@@ -110,9 +119,12 @@ namespace HP1.UEScript
                 // R <= 0 never passes R·R > d2.
                 if (L.Type == 0) continue;
                 if (!(L.WorldRadius > 0f)) continue;
-                var (r, g, b) = FGetHSV(L.Hue, L.Saturation, 255);
-                float k = levelBrightness * (L.Brightness * (1f / 255f) * L.Scale);
-                r *= k; g *= k; b *= k;
+                // GlobalLighting's brightness and colour (SurfLightmap.LightBrightness / TypeColour: the type function,
+                // the [0,1] clamp — reached only by LightType 8/9, the other factors keep B/255·Scale <= 1).
+                SurfLightmap.Light SL = MoverMode3.FromSnapshot(in a).L;
+                UEVector hsv = SurfLightmap.TypeColour(in SL);
+                float k = levelBrightness * SurfLightmap.LightBrightness(in SL);
+                float r = hsv.x * k, g = hsv.y * k, b = hsv.z * k;
                 if (L.Dark) { r = -r; g = -g; b = -b; }
                 var src = new Source
                 {
@@ -251,6 +263,7 @@ namespace HP1.UEScript
             if (_pool != null && leaf < 0) LeafUnknown++;
             if (unlit || leaf == -1 || _leafPermeating is { Length: 0 } || !_viewLit) { Gated++; return 0; }
             EnsureLeaf(leaf);
+            int stamp = ++_setupStamp;
             bool cold = !_cache.TryGetValue(actorId, out var cached);
             if (cold) _cache[actorId] = cached = new List<(int light, int counter)>();
             _counter.Clear();
@@ -309,6 +322,7 @@ namespace HP1.UEScript
                 else counter = Math.Max(counter - _fadeRate, 0) & ~1;
                 _counter[L.ObjectId] = counter;
                 _keep[c] = attach || counter > 0;
+                TagsTaken[L.ObjectId] = (score, stamp, counter);
             }
             // Next frame's cache: candidates with counter > 1 in score order, up to 16 (:21452-21462).
             cached.Clear();
@@ -513,6 +527,7 @@ namespace HP1.UEScript
         // bytecode) and face LOD collapse (iStack_f8) — the port has no skeletal mesh LOD, the full mesh is drawn.
         public static void PointNormals(UERawSkeletalMesh raw, UEVector[] pts, int np, UEVector[] N)
         {
+            if (raw.vertLinks is not null) { ConnectNormals(raw, pts, np, N); return; }
             Array.Clear(N, 0, np);
             for (int t = 0; t < raw.numTris; t++)
             {
@@ -529,6 +544,47 @@ namespace HP1.UEScript
                 UEVector n = N[i];
                 float k = SurfLightmap.GMathRsqrt(n.z * n.z + n.y * n.y + n.x * n.x + 0.001f);
                 N[i] = new UEVector(k * n.x, k * n.y, k * n.z);
+            }
+        }
+
+        // Original: Render.dll ?DrawMesh@URender@@QAEXPAUFSceneNode@@PAUFDynamicSprite@@PAVAActor@@ABVFCoords@@K@Z [HP1 0x10B0E920]
+        // Point normals of DrawMesh's UMesh branch (a plain UMesh; raw.vertLinks set by UEMeshSource.BuildVertex): each face
+        // normal NORMALISED, ·rsqrt(((x² + y²) + z²) + 0.001) (0x10b0efd4..0x10b0f077), then per point the float sum of the
+        // normals of its Connects triangles (Connects +0x9c: count, offset into VertLinks +0xcc; 0x10b0f49c..0x10b0f4de)
+        // ·rsqrt((x² + z²) + y²) with no epsilon (0x10b0f4e0..0x10b0f518) — not DrawLodMesh's area-weighted sum. Shipped runs
+        // in frame coordinates on the points of accepted faces; (P1 − P0)×(P2 − P0) in the world is the same normal
+        // (PointNormals). Points no face uses keep 0; Connects/VertLinks outside their arrays are loud (garbage in the original).
+        public static void ConnectNormals(UERawSkeletalMesh raw, UEVector[] pts, int np, UEVector[] N)
+        {
+            Array.Clear(N, 0, np);
+            var fn = new UEVector[raw.numTris];
+            var used = new bool[np];
+            for (int t = 0; t < raw.numTris; t++)
+            {
+                int i0 = raw.wedgeVertex[raw.triWedge[t * 3]], i1 = raw.wedgeVertex[raw.triWedge[t * 3 + 1]], i2 = raw.wedgeVertex[raw.triWedge[t * 3 + 2]];
+                used[i0] = used[i1] = used[i2] = true;
+                UEVector p0 = pts[i0], p1 = pts[i1], p2 = pts[i2];
+                float ax = p1.x - p0.x, ay = p1.y - p0.y, az = p1.z - p0.z, bx = p2.x - p0.x, by = p2.y - p0.y, bz = p2.z - p0.z;
+                float nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+                float k = SurfLightmap.GMathRsqrt(((nx * nx + ny * ny) + nz * nz) + 0.001f);
+                fn[t] = new UEVector(k * nx, k * ny, k * nz);
+            }
+            for (int i = 0; i < np; i++)
+            {
+                if (!used[i]) continue;
+                if (i >= raw.connectNumTris.Length)
+                    throw new System.IO.InvalidDataException($"UMesh normals: point {i} of {raw.name} has no Connects entry ({raw.connectNumTris.Length})");
+                float sx = 0f, sy = 0f, sz = 0f;
+                for (int j = 0; j < raw.connectNumTris[i]; j++)
+                {
+                    int at = raw.connectOffset[i] + j;
+                    int t = at >= 0 && at < raw.vertLinks.Length ? raw.vertLinks[at] : -1;
+                    if (t < 0 || t >= fn.Length)
+                        throw new System.IO.InvalidDataException($"UMesh normals: point {i} of {raw.name} links outside VertLinks/Tris (entry {at})");
+                    sx += fn[t].x; sy += fn[t].y; sz += fn[t].z;
+                }
+                float s = SurfLightmap.GMathRsqrt((sx * sx + sz * sz) + sy * sy);
+                N[i] = new UEVector(sx * s, sy * s, sz * s);
             }
         }
 

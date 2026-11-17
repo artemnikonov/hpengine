@@ -36,6 +36,10 @@ namespace HP1.UEScript
         UEGalaxyAudio.SoundInfo? Sound(string path);
         // Song: rate, channels and loop length in frames (null — stream failed to open).
         UEGalaxyAudio.SoundInfo? Song(string path);
+        // The UMusic's FileType name ("MP2", "it", ...); null — the song does not resolve (Song reports why).
+        string SongFileType(string path);
+        // The UMusic's Data bytes (any FileType) for the module block (UseDigitalMusic=True); null — the song does not resolve.
+        byte[] SongData(string path);
         // Galaxy writes into the view actor (Galaxy.dll.c:7284-7311, 0x1060948b, 0x1060626a).
         bool WriteMusicFinished();
         void WriteSongFinishedFlag(bool finished);
@@ -45,7 +49,7 @@ namespace HP1.UEScript
         void NoteAudioChannelsLost();
     }
 
-    public sealed class UEGalaxyAudio
+    public sealed class UEGalaxyAudio : IUEAudioDevice
     {
         // Default.ini:157 EffectsChannels=16.
         public const int EffectsChannels = 16;
@@ -53,7 +57,10 @@ namespace HP1.UEScript
         public readonly struct SoundInfo
         {
             public readonly long Frames; public readonly int SampleRate, Channels;
-            public SoundInfo(long frames, int sampleRate, int channels) { Frames = frames; SampleRate = sampleRate; Channels = channels; }
+            // The stream finishes after one lap even with the loop flag (UEMp2SoundStream.Finishes): the voice is not looping.
+            public readonly bool Finishes;
+            public SoundInfo(long frames, int sampleRate, int channels, bool finishes = false)
+            { Frames = frames; SampleRate = sampleRate; Channels = channels; Finishes = finishes; }
         }
 
         // CHANNEL VOICE — what the frontend plays. Serial is the voice identity: a new voice gets a new number.
@@ -354,9 +361,6 @@ namespace HP1.UEScript
                 UEGalaxyVoice v = UEGalaxyVoiceMix.Update(in listener, cfg, _ch[i].LocUE, _ch[i].VolUE,
                     _ch[i].RadiusUU, _ch[i].Stereo, ambientSlot, hasActor, vel);
                 _ch[i].Priority = v.Priority;
-                if (v.Pan > 0x7fff)
-                    throw new InvalidOperationException(
-                        "Galaxy UseSurround (Pan 0xc000) — the rear channel is not played by the frontend");
                 var src = _ch[i].Src;
                 src.Volume = v.Volume; src.Pan = v.Pan;
                 src.Frequency = UEGalaxyVoiceMix.Frequency(_ch[i].SampleRate, _ch[i].PitchUE, v.Doppler);
@@ -457,7 +461,7 @@ namespace HP1.UEScript
         bool _viewportLost;
 
         Playback NewPlayback(string sound, bool loop, bool music, SoundInfo info)
-            => new Playback(++_serial, sound, loop, music, info);
+            => new Playback(++_serial, sound, loop && !info.Finishes, music, info);
 
         // Synchronous, at call time (Audio->PlaySound/StopSound/ModifySound are synchronous device calls).
         public void Execute(in AudioCommand c)
@@ -832,11 +836,11 @@ namespace HP1.UEScript
             }
             else _world.WriteSongFinishedFlag(!held);
             if (transition == 0) { _fading = false; return; }
-            if (state.SongSection != 0 && state.SongSection != 255)
-                throw new InvalidOperationException(
-                    $"Music section {state.SongSection} is not represented by the decoded track '{song}'");
-            if (string.IsNullOrEmpty(song) && state.CdTrack != 255)
-                throw new InvalidOperationException($"CD music track {state.CdTrack} is not ported");
+            // CD audio (MCI play/stop) runs only with UseCDMusic (0x1060945d-0x1060947d, 0x1060910c-0x1060911c); off (the
+            // shipped ini), a CdTrack request is only the +0x70c state this block keeps (_currentCd).
+            if (state.CdTrack != 255
+                && (_world.Galaxy ?? throw new InvalidOperationException("music: the runtime has no Galaxy configuration")).UseCDMusic)
+                throw new NotSupportedException($"CD music track {state.CdTrack} with UseCDMusic=True: Galaxy's MCI CD audio (FUN_1060f520) is not ported (STOP)");
             if (transition < 1 || transition > 5)
                 throw new InvalidOperationException($"Unknown EMusicTransition value {transition}");
             if (_reqLogged != (transition, song))
@@ -902,19 +906,64 @@ namespace HP1.UEScript
             _currentSong = string.IsNullOrEmpty(song) ? null : song;
             _currentCd = state.CdTrack;
             _currentSection = state.SongSection;
+            // Original: Galaxy.dll not exported: the music start block of ?Update@UGalaxyAudioSubsystem@@UAEXUFPointRegion@@AAVFCoords@@@Z [HP1 0x106091B0-0x1060945D]
+            // Only a FileType 'MP2' music becomes the USound that PlaySound plays (0x106091b6-0x106091df: with bVar26
+            // [ebp+0x14], FName compare with +0x58, `je 0x10609292` otherwise); the module path follows for any song
+            // only with UseDigitalMusic (0x10609292-0x106092a5, `je 0x1060945d`). With it off (the shipped ini) a module
+            // song (a mod's IT/S3M/XM/MOD .umx) gets no USound and no module: silence, no log line, +0x784 keeps its value.
             if (_currentSong != null && soundOn)
             {
-                SoundInfo? info = _world.Song(_currentSong);
-                if (info != null) ResolvedSongRequests++;
-                StartNow(info, _currentSong, !state.DontLoop);
-                _registered.Add(_currentSong);
+                string type = _world.SongFileType(_currentSong);
+                if (type != null && !type.Equals("MP2", StringComparison.OrdinalIgnoreCase))
+                    HP1.Core.UETrace.Info($"[Music]   '{_currentSong}' is a '{type}' module: no MP2 sound and UseDigitalMusic=False, so it is not played (as in the original)");
+                else
+                {
+                    SoundInfo? info = _world.Song(_currentSong);
+                    if (info != null) ResolvedSongRequests++;
+                    StartNow(info, _currentSong, !state.DontLoop);
+                    _registered.Add(_currentSong);
+                }
             }
             else if (_currentSong != null)
                 HP1.Core.UETrace.Info(MusicByte() == 0
                     ? $"[Music]   MusicVolume 0 — '{_currentSong}' is not started, the previous stream is not stopped"
                     : "[Music]   same song — not restarted");
+            // SongSection is read only by the section block below (glxStartMusic FUN_1060fb80 + glxControlMusic(GLX_SETPOSITION,
+            // SongSection) FUN_1060a940, both on the module sequencer), inside the UseDigitalMusic branch: with it off
+            // `je 0x1060945d` at 0x106092a5 jumps past it. So any section starts an MP2 song the same way; the section's
+            // only other use is +0x70d == 255 in the change test (_currentSection).
+            if (_currentSong != null
+                && (_world.Galaxy ?? throw new InvalidOperationException("music start: the runtime has no Galaxy configuration")).UseDigitalMusic)
+                ModuleBlock(soundOn, state.SongSection);
             _resume = null;   // D-51: a stream not taken by this start block is not resumed
             _world.WriteMusicStarted();
+        }
+
+        // Original: Galaxy.dll not exported: the module block of ?Update@UGalaxyAudioSubsystem@@UAEXUFPointRegion@@AAVFCoords@@@Z [HP1 0x10609292-0x1060945D]
+        // With UseDigitalMusic (+0x40) and a song (+0x708): when bVar26 ([ebp+0x14], the song differs and MusicVolume
+        // != 0) "Load music: %s", Data.Load, Data.Num += 0x400 (unwritten), glxLoadMusic(&Mem, GLX_LOADFROMMEMORY) with
+        // its failure logged, Music+0x60 = -1 (the registered mark SetViewport's loop and UnregisterMusic read), Data.Unload;
+        // then SetVolumes, and either glxStopMusic (section 255, FUN_10615cd0) or glxStartMusic + glxControlMusic
+        // (GLX_SETPOSITION, SongSection) with its failure logged. Every module the known data gives fails to load
+        // (UEGalaxyModuleLoader), so glxStartMusic and glxStopMusic find no module (codes 3 / 4, not checked) and nothing
+        // plays. SetVolumes rewrites the sample volume with the value PostEditChange already set (no audible change) and the
+        // module master volume (read only by module voices).
+        readonly UEGalaxyModuleLoader.State _module = new();
+        public int LastModuleLoad { get; private set; } = -1;   // the last glxLoadMusic code (observation)
+        void ModuleBlock(bool soundOn, int section)
+        {
+            if (soundOn)
+            {
+                HP1.Core.UETrace.Info($"[Music] Load music: Music {_currentSong}");
+                byte[] data = _world.SongData(_currentSong)
+                    ?? throw new InvalidOperationException($"music '{_currentSong}': the module block needs the UMusic's Data and the port could not read it");
+                int r = LastModuleLoad = UEGalaxyModuleLoader.LoadMusic(_module, data, _currentSong);
+                if (r != 0) HP1.Core.UETrace.Info($"[Music] glxLoadMusic(&Mem, GLX_LOADFROMMEMORY ) failed: {r}");
+                _registered.Add(_currentSong);
+            }
+            if (_currentSection == 255) return;
+            int c = UEGalaxyModuleLoader.SetPosition(_module, section);
+            if (c != 0) HP1.Core.UETrace.Info($"[Music] glxControlMusic( GLX_SETPOSITION, Viewport->Actor->SongSection ) failed: {c}");
         }
 
         // AUTHOR IMPROVEMENT (D-51), not original: after the viewport returns, the start block gets the PREVIOUS

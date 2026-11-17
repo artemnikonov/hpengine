@@ -345,6 +345,7 @@ namespace HPEngine
                 rc = Worst(rc, SceneMirror(stem + ".mirror.png", mover: false));
                 rc = Worst(rc, SceneMirror(stem + ".mirror-mover.png", mover: true));
                 rc = Worst(rc, SceneWarp(stem + ".warp.png"));
+                rc = Worst(rc, SceneWarpInside(stem + ".warp-inside.png"));
                 rc = Worst(rc, SceneSky(stem + ".sky.png"));
                 rc = Worst(rc, SceneSkyChild(stem + ".sky-child.png"));
                 rc = Worst(rc, SceneActorFx(stem + ".actorfx.png"));
@@ -648,6 +649,36 @@ namespace HPEngine
                 (panel, sx, sy) => NearRect(RMirror, false, sx, sy) || NearRect(RQ, true, sx, sy),
                 new[] { "warp-W", "warp-empty", "clear" }, _ => false, png, null);
             if (r.WarpPasses != 1) { Console.WriteLine($"selftest-gpu REFUSED: warp: portal passes {r.WarpPasses}, expected 1"); return 3; }
+            return rc;
+        }
+
+        // ---- scene 2b': camera inside a warp zone ----
+        //
+        // Core's camera-in-warp child (OccludeBsp 0x10b22802..0x10b22b19): no portal surface; the parent's OccludeBsp returns
+        // without walking, so the master's drawn set is empty, and DrawFrame draws the child first into the same buffer
+        // (Render.dll.c:1011-1014). Quad W exists only in world B (= world A + (0, 5000, 0), as scene 2b): the whole screen is
+        // the child's view, W through it, the clear elsewhere.
+        static int SceneWarpInside(string png)
+        {
+            var s = new Scene(1);
+            s.World(new Batch { Blend = Blend.Opaque, NoSmooth = true, Unlit = true }, 0, RQ, 500, 1, 0, 0, 0, 0, new[] { (2, 2, Tex2x2(T3)) });
+            for (int k = s.V.Count - 4; k < s.V.Count; k++) { Vertex v = s.V[k]; v.Y += 5000; s.V[k] = v; }
+            Renderer r = s.Load(Atlas(LA, LB, LRest), Atlas(new byte[] { 0, 0, 0, 0 }, new byte[] { 0, 0, 0, 0 }, new byte[] { 0, 0, 0, 0 }), null);
+            if (r is null) { Console.Error.WriteLine("GPU: " + SDL_GetError()); return 2; }
+            r.SetViews(new[] { new ViewFrame(-1, ViewFrame.KindWarp, 1, new Affine { M00 = 1, M11 = 1, M22 = 1, M13 = -5000 },
+                default, 0f, false, Array.Empty<ViewSource>(), default) }, _ => -1);
+            r.SetDrawn(new[] { new DrawnWorld(Array.Empty<int>(), Array.Empty<ViewSource>(), Array.Empty<int>()),
+                new DrawnWorld(new[] { 0 }, Array.Empty<ViewSource>(), Array.Empty<int>()) }, null);
+            r.RenderOffscreen(new Camera { Fov = 90f }, out byte[] rgba);
+            Png.Write(png, r.Width, r.Height, rgba);
+            int rc = Compare("warp-inside", r, 1, rgba, (int panel, float sx, float sy, out string region) =>
+                {
+                    if (In(RQ, sx, sy)) { region = "warp-inside-W"; return Rgb(T3[Quarter(RQ, sx, sy)]); }
+                    region = "clear"; return new[] { 0, 0, 0 };
+                },
+                (panel, sx, sy) => NearRect(RQ, true, sx, sy),
+                new[] { "warp-inside-W", "clear" }, _ => false, png, null);
+            if (r.WarpPasses != 1) { Console.WriteLine($"selftest-gpu REFUSED: warp-inside: child passes {r.WarpPasses}, expected 1"); return 3; }
             return rc;
         }
 

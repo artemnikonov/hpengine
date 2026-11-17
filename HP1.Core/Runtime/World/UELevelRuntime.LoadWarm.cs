@@ -61,7 +61,8 @@ namespace HP1.UEScript
                             if (anim is not null && anim.Class.Equals("Animation", StringComparison.OrdinalIgnoreCase))
                                 MeshCatalog.GetAnimation(anim.Name, anim.ObjectPath);
                         });
-                    else if (meshRef.Class.Equals("LodMesh", StringComparison.OrdinalIgnoreCase))
+                    else if (meshRef.Class.Equals("LodMesh", StringComparison.OrdinalIgnoreCase)
+                             || meshRef.Class.Equals("Mesh", StringComparison.OrdinalIgnoreCase))
                         Try(() => MeshCatalog.GetVertexMesh(meshRef.Name, meshRef.ObjectPath));
                 }
                 if (spriteSize is not null)

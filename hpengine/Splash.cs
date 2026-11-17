@@ -14,7 +14,7 @@ namespace HPEngine
     {
         static SDL_Window* _window;
 
-        public static void Show(string bmpPath)
+        public static void Show(string bmpPath, bool hidden = false)
         {
             if (!SDL_Init(SDL_InitFlags.SDL_INIT_VIDEO)) throw new InvalidOperationException("splash: " + SDL_GetError());
             SDL_Surface* image = SDL_LoadBMP(bmpPath);
@@ -31,7 +31,7 @@ namespace HPEngine
                 // cdq/sub/sar: signed division truncating toward zero, as C# int division.
                 SDL_SetWindowPosition(_window, screen.x + (screen.w - w) / 2, screen.y + (screen.h - h) / 2);
                 SDL_SetWindowAlwaysOnTop(_window, true);    // HWND_TOPMOST once ...
-                SDL_ShowWindow(_window);
+                if (!hidden) SDL_ShowWindow(_window);   // hidden: --hidden-game (a check), never on screen
                 SDL_SetWindowAlwaysOnTop(_window, false);   // ... then HWND_NOTOPMOST
                 SDL_Surface* target = SDL_GetWindowSurface(_window);
                 if (target == null || !SDL_BlitSurface(image, null, target, null) || !SDL_UpdateWindowSurface(_window))

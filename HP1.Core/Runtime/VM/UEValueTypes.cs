@@ -4,15 +4,130 @@ using UELib.Core;
 
 namespace HP1.UEScript
 {
-    // Distinguishes UnrealScript 'name' from 'string' at runtime.
+    // Distinguishes UnrealScript 'name' from 'string' at runtime. The text is the spelling of the process's name table
+    // (UENameTable): an FName prints as it was first registered, whatever package the reference came from.
     public class UEName
     {
         public string Value;
 
-        public UEName(string value) { Value = value; }
-        public UEName(UName name) { Value = name?.ToString() ?? "None"; }
+        public UEName(string value) { Value = UENameTable.Spell(value); }
+        public UEName(UName name) { Value = name is null ? "None" : UENameTable.Spell(name.ToString()); }
 
         public override string ToString() => Value;
+    }
+
+    // THE NAME TABLE (FName), one per process as in UE1. FName::FName(Text, FNAME_Add) [HP1 Core 0x1010307b]
+    // [HP2 0x101030d0] finds the entry with appStricmp and keeps the FIRST registered spelling (it replaces the text only
+    // in mode 3, which no game loader passes). A package's names are registered when its linker is created: the
+    // ULinkerLoad constructor adds every name-map entry whose flags meet the linker's context, FName(Entry, FNAME_Add)
+    // [HP1 0x10148e22] [HP2 0x1014a6b2] (any other entry is NAME_None in that package), the context of the game being
+    // GIsClient 0x10000 | GIsServer 0x20000 (ULinker::ULinker, Core.dll.c:15607..15622), and then verifies its imports in
+    // table order — each import's root package gets its linker, and so its names, at that point (Verify inlined in the
+    // constructor: its guard 0x10149489; VerifyImport -> GetPackageLinker). The first linker is Engine.u's
+    // (StaticLoadClass "ini:Engine.Engine.GameEngine", audit/hp2_plan_stage0_1_2026-11-15.md S-6), maps follow as
+    // LoadMap loads them. So a name spelled two ways prints the spelling of the package registered first in the session:
+    // HP2's Entry.unr spells Harry0's Tag 'Harry', Engine.u 'harry' — the live HP2 EN original prints 'harry'.
+    public static class UENameTable
+    {
+        static readonly object _lock = new();
+        static readonly System.Collections.Generic.Dictionary<string, string> _spelling = new(System.StringComparer.Ordinal);
+        static readonly System.Collections.Generic.HashSet<string> _linked = new(System.StringComparer.OrdinalIgnoreCase);
+        sealed class Memo { public readonly string S, V; public Memo(string s, string v) { S = s; V = v; } }
+        static readonly Memo[] _memo = new Memo[4096];     // text reference -> spelling (a spelling never changes)
+
+        // FName(Text, FNAME_Add): the registered spelling of the name, this text registered if the name is new.
+        public static string Spell(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text;
+            int slot = System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(text) & (4096 - 1);
+            Memo m = System.Threading.Volatile.Read(ref _memo[slot]);
+            if (m is not null && ReferenceEquals(m.S, text)) return m.V;
+            string v;
+            lock (_lock) { string k = Fold(text); if (!_spelling.TryGetValue(k, out v)) _spelling[k] = v = text; }
+            System.Threading.Volatile.Write(ref _memo[slot], new Memo(text, v));
+            return v;
+        }
+
+        // appStricmp in the C locale folds A..Z only.
+        static string Fold(string s)
+        {
+            int i = 0;
+            while (i < s.Length && (s[i] < 'A' || s[i] > 'Z')) i++;
+            if (i == s.Length) return s;
+            var c = s.ToCharArray();
+            for (; i < c.Length; i++) if (c[i] >= 'A' && c[i] <= 'Z') c[i] = (char)(c[i] + 0x20);
+            return new string(c);
+        }
+
+        // A new process (appInit with no GConfig yet): an empty table.
+        internal static void Reset()
+        {
+            lock (_lock) { _spelling.Clear(); _linked.Clear(); for (int i = 0; i < _memo.Length; i++) _memo[i] = null; }
+        }
+
+        // UObject::GetPackageLinker created the linker of this package file: its context names in table order, then the
+        // root package of each import in import order (resolved as the game resolves a package name). A package whose
+        // linker was created once adds nothing later (its names stay registered). A file that is not there is skipped
+        // (no linker, no names).
+        public static void Linker(string packageFile)
+        {
+            if (packageFile is null || !System.IO.File.Exists(packageFile)) return;
+            string full = System.IO.Path.GetFullPath(packageFile);
+            lock (_lock) { if (!_linked.Add(full)) return; }
+            string root = System.IO.Path.GetDirectoryName(System.IO.Path.GetDirectoryName(full));
+            var (names, context, imports) = ReadTables(full);
+            for (int i = 0; i < names.Length; i++) if (context[i]) Spell(names[i]);
+            foreach ((int outer, string name) in imports)
+            {
+                // VerifyImport(i): the import's outer chain up to its top-level package
+                int o = outer, guard = 0;
+                string top = name;
+                while (o < 0 && -o - 1 < imports.Count && guard++ < imports.Count) { top = imports[-o - 1].Name; o = imports[-o - 1].Outer; }
+                if (o == 0 && top is not null) Linker(UEInstallPath.PackageFile(root, top));
+            }
+        }
+
+        // The summary's name and import tables: each name and whether its flags meet the game context (else NAME_None in
+        // this package's map), each import as (PackageIndex, ObjectName).
+        static (string[] Names, bool[] Context, System.Collections.Generic.List<(int Outer, string Name)> Imports) ReadTables(string path)
+        {
+            using var f = new System.IO.BinaryReader(System.IO.File.OpenRead(path));
+            if (f.ReadUInt32() != 0x9e2a83c1) throw new System.IO.InvalidDataException("not an Unreal package: " + path);
+            int version = f.ReadUInt16(); f.ReadUInt16(); f.ReadUInt32();
+            int nameCount = f.ReadInt32(), nameOffset = f.ReadInt32();
+            f.ReadInt32(); f.ReadInt32();
+            int importCount = f.ReadInt32(), importOffset = f.ReadInt32();
+            var names = new string[nameCount];
+            var context = new bool[nameCount];
+            f.BaseStream.Position = nameOffset;
+            for (int i = 0; i < nameCount; i++)
+            {
+                string text;
+                if (version < 64) { var b = new System.Collections.Generic.List<byte>(); for (byte c; (c = f.ReadByte()) != 0;) b.Add(c); text = System.Text.Encoding.Latin1.GetString(b.ToArray()); }
+                else { int len = Compact(f); text = System.Text.Encoding.Latin1.GetString(f.ReadBytes(len)).TrimEnd('\0'); }
+                names[i] = text;
+                context[i] = (f.ReadUInt32() & 0x30000) != 0;
+            }
+            var imports = new System.Collections.Generic.List<(int, string)>(importCount);
+            f.BaseStream.Position = importOffset;
+            for (int i = 0; i < importCount; i++)
+            {
+                Compact(f); Compact(f);                       // class package, class name
+                int outer = f.ReadInt32();
+                int n = Compact(f);
+                imports.Add((outer, n >= 0 && n < nameCount ? names[n] : null));
+            }
+            return (names, context, imports);
+        }
+
+        static int Compact(System.IO.BinaryReader f)
+        {
+            byte b = f.ReadByte();
+            int v = b & 0x3f;
+            if ((b & 0x40) != 0)
+                for (int sh = 6; ; sh += 7) { byte c = f.ReadByte(); v |= (c & 0x7f) << sh; if ((c & 0x80) == 0) break; }
+            return (b & 0x80) != 0 ? -v : v;
+        }
     }
 
     // Reference to an original UE render/audio resource. Frontends resolve the

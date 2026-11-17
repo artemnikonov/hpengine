@@ -34,6 +34,7 @@ namespace HP1.UEScript
         // frontend must share ONE key layout, key edges and command execution order.
         // The frontend only supplies UE1 key names.
         public readonly UEInput Input = new();
+        public UELevelRuntime() { Input.Level = this; }
 
         // Mutable game config state: `get ini:` and `set ini:` both work on this ONE
         // object, and consumers (music/sound volume) read values from here, not from
@@ -206,6 +207,8 @@ namespace HP1.UEScript
                 if (value is not null) value.OcclusionWorldFor = OcclusionWorld;
                 // Texture flag word of a HUD tile (UCanvas::DrawTile) — a world reader.
                 if (value is not null) value.TexturePolyFlags = TextureFacts.PolyFlagsOfResource;
+                // Slot textures of a drawn mesh (DrawMesh/DrawLodMesh Update each): the frame's texture uses.
+                if (value is not null) value.MeshSlotTextures = p => MeshSource?.SlotTextures(p);
             }
         }
 
@@ -243,6 +246,11 @@ namespace HP1.UEScript
         //
         // The debt is raised by the first world bring-up of this runtime (ArmFirstWindowFrame) and
         // cleared by any RunEngineFrame.
+        // HP2: no such frame. UGameEngine::Draw returns at once while GIsRunning is 0 [HP2 0x103a8aa0; HP1 the same test,
+        // 0x1039fa5e..0x1039fa76], and Game.exe's EnterMainLoop sets GIsRunning only after InitEngine [HP2 Game.exe
+        // 0x1091ce18]: OpenWindow's Repaint(1) inside Init draws nothing, the first Draw is frame 1's, after its level tick
+        // (SwARc level host; live Game.log: the first mesh warnings and "Creating root window" after "Startup time").
+        // HP1's EnterMainLoop is in the packed HP.exe: STOP (DECISIONS.md "SwARc findings: first boot frame").
         public bool EngineFrameOwedAfterLoad { get; private set; }
         bool _viewportWindowOpened;
         // The world LatestFrame was built from (its zones, movers, lightmap tiles); null for the held loading screen,
@@ -250,7 +258,11 @@ namespace HP1.UEScript
         // or load the browsing tick only holds the screen, the new world's first frame comes after its first tick.
         WorldStatic _latestFrameWorld;
         public WorldStatic LatestFrameWorld { get { HP1.Core.UECoreOwner.Check("UELevelRuntime.LatestFrameWorld"); return _latestFrameWorld; } private set => _latestFrameWorld = value; }
-        void ArmFirstWindowFrame() { EngineFrameOwedAfterLoad = !_viewportWindowOpened; _viewportWindowOpened = true; }
+        void ArmFirstWindowFrame()
+        {
+            if (UEGameProfile.Current.Game != UEEdition.Game.HP2) EngineFrameOwedAfterLoad = !_viewportWindowOpened;
+            _viewportWindowOpened = true;
+        }
 
         // The browsing engine frame: no Draw; what the screen keeps is LoadMap's loading screen.
         public WorldFrame HoldLoadMapScreen(int tick)
@@ -316,8 +328,12 @@ namespace HP1.UEScript
         // a nested Draw and PaintProgress do nothing while it is set (UELevelRuntime.PaintProgress).
         bool _inEngineFrame;
 
+        // Original: Engine.dll ?Draw@UGameEngine@@UAEXPAVUViewport@@HPAEPAH@Z [HP1 0x1039fa40] [HP2 0x103a8aa0]
         public WorldFrame RunEngineFrame(UEInterpreter interp, int frameNumber, string label, float viewportDelta)
         {
+            // HP2: UGameEngine::Draw's own calls are HP1's (a filtered side-by-side read: register and stack allocation,
+            // fields by name) but Audio->Update, which takes only the master frame [HP2 0x103a8e20..0x103a8e47] (HP1:
+            // Update(Actor->Region, Frame->Coords) [HP1 0x1039fdd7..0x1039fe22]): UEWorldFrameProducer.BuildFrame's HP2 branch.
             if (FrameProducer is null) return LatestFrame;
             FrameProducer.Console = ViewportConsole;
             FrameProducer.ViewportDelta = viewportDelta;
@@ -401,6 +417,7 @@ namespace HP1.UEScript
             _particleHookInterp = interp;
             FrameProducer.PosePoints = EvaluatePosePoints;
             FrameProducer.TotalWind = TotalWind;
+            FrameProducer.WindSourceCount = WindSourceCount;
             FrameProducer.ParticleFastLineCheckClear = (end, start) =>
                 Bsp is null
                     ? throw new InvalidOperationException("particle bounce: the level model has no BSP")
@@ -708,14 +725,11 @@ namespace HP1.UEScript
         // 0x200000); the shipped paused path also gives the local player
         // ReadInput+PlayerInput for menu navigation — that half lives HERE, in the pass
         // itself, as in shipped (262703-262712, details at the branch below).
-        // bPlayersOnly is read from LevelInfo by the pass itself. Shipped ULevel::Tick
-        // (Engine.dll.c:262645): bit LevelInfo+0x438 & 4 → TickType = 1, Tick is called on
-        // ALL actors; the cut-off is inside AActor::Tick (TickType == 1 check at
-        // LAB_103b41e5, Engine.dll.c:128546). XLevel+0x111c / flag2&2 (128340-128349) is
-        // not bPlayersOnly (special pause). The port's filter (bAlwaysTick and PlayerPawn
-        // only) is NOT shipped: it stays behind a loud warning until AActor::Tick is
-        // disassembled; the only source of the flag is a console cheat command. ──
-        bool _playersOnlyWarned;
+        // bPlayersOnly is read from LevelInfo by the pass itself: TickType 1 for the pass
+        // (ULevel::Tick 0x103b70ea), Tick on ALL actors, the cut-offs inside AActor::Tick
+        // (TickActorBody: 0x103b41e5, 0x103b4504; AParticleFX::Tick 0x103c3c89).
+        // XLevel+0x111c / flag2&2 (0x103b3899..0x103b38b4) is the special pause
+        // (bCanMoveInSpecialPause / bInSpecialPause), not bPlayersOnly. ──
 
         // TICK PROFILE: TickActor time per actor class and frame build time; enabled by
         // the host (HP1_TICK_PROF=1 in headless). Zero by default — zero cost (one if per actor).
@@ -740,6 +754,17 @@ namespace HP1.UEScript
         // unchanged after tick 0); actors spawned during load (bTicked = 1) do tick.
         public bool LevelTicked { get; private set; }
         static readonly object BoxFalse = false, BoxTrue = true;
+
+        // ULevel+0x111c: the special pause (AActor::Tick's gate, TickActorGates). HP1 has no writer; HP2's
+        // UGameEngine::InputEvent toggles GLevel's on a Delete press with [HGame.baseConsole] bDebugMode=True
+        // (UEInput.InputEvent). Not serialized by the port's save.
+        public bool SpecialPause { get; internal set; }
+
+        // The special-pause gate of AActor::Tick, after the bTicked test: (input: a PlayerPawn with a Player reads its
+        // input first — HP2 only [HP2 0x103c0ea3..0x103c0f0f]; tick: false = AActor::Tick returns 1; inPause: the
+        // bInSpecialPause written when it goes on) [HP1 0x103b3899..0x103b38b4] [HP2 0x103c0e99..0x103c0f26].
+        internal static (bool input, bool tick, bool inPause) SpecialPauseGate(bool hp2, bool pause, bool playerWithPlayer, bool canMove)
+            => !pause ? (false, true, false) : (hp2 && playerWithPlayer, canMove, true);
 
         // AActor::Tick head (0x103b3840..0x103b395e): Owner->Tick first, then the
         // bTicked == ULevel::Ticked guard, then bTicked = Ticked and the body.
@@ -839,7 +864,6 @@ namespace HP1.UEScript
         // same owner as the replica itself.
         readonly Dictionary<UEObject, int> _hashHandle = new Dictionary<UEObject, int>();
         readonly Dictionary<int, UEObject> _hashActor = new Dictionary<int, UEObject>();
-        readonly Dictionary<int, Vector3> _hashColLocation = new Dictionary<int, Vector3>();
         int _nextHashHandle;
 
         // Serialized UPrimitive bounds (FBox + FSphere) per Model export, read
@@ -937,5 +961,8 @@ namespace HP1.UEScript
         // Measurement tap:
         // the query and the port's answer of every SingleLineCheck. Observes only; null in production.
         public static Action<UELevelRuntime, UEObject, UEObject, Vector3, Vector3, Vector3, int, LineCheckHit> SingleLineCheckTap;
+        // Judge seam (audit/hp2_actor_judge.sh): the level about to run the GameInfo event (InitGame: its actors as LoadMap
+        // left them; Login: after BeginPlay, right before SpawnPlayActor's Login), the probe's pevent= point.
+        public static Action<UELevelRuntime, string> EventTap;
     }
 }

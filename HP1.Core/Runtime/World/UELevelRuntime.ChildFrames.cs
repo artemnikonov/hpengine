@@ -77,6 +77,7 @@ namespace HP1.UEScript
             UEObject li = Actors.Count > 0 ? Actors[0] : null;
             w.LevelInfo = li is not null && UEInterpreter.ClassIsA(li.Class, "LevelInfo") ? li : null;
             w.Level = interp?.XLevel;
+            w.Viewer = player;
             w.ShowFlags = UEValue.ToInt(player.GetProp(PK.ShowFlags));
             w.RendMap = UEValue.ToInt(player.GetProp(PK.RendMap));
             w.SpanBased = ReadSpanBased;

@@ -40,8 +40,9 @@ namespace HP1.UEScript
 
         // GLanguage (Core.dll: ?GLanguage@UObject@@0PAGA, 0x101bf174). The initial
         // image of the global in .data is L"int" (read from the binary itself); appInit
-        // then asks GConfig for `[Engine.Engine] Language` and, if the key exists,
-        // calls SetLanguage (Core.dll.c:56313-56321). GetLanguage
+        // reads `[Engine.Engine] Language` from "default.ini" through a second FConfigCacheIni, writes it over GConfig's
+        // key (SetString), reads it back and calls SetLanguage (Core 0x10154e05..0x10154eab, Core.dll.c:56309-56321); the
+        // port's system ini is Default.ini (UELevelRuntime.DefaultIniPath), the same value. GetLanguage
         // (0x101035c1 → &GLanguage) returns this global; it is read by execLocalize,
         // execGetLanguage (Core.dll.c:49839) and UCanvas::WrappedPrint.
         public static string Language { get; private set; } = "int";
@@ -61,13 +62,19 @@ namespace HP1.UEScript
         // thunk, vtable scan). A call AFTER packages are loaded would need LoadLocalized on all
         // objects, which the port does not have: loud STOP.
         //
-        // The five global words. The port keeps them as literals "None/True/False/Yes/No" (ExportText
-        // writes the literal, ImportText compares case-insensitively). Whether GIsStarted is already
-        // set at appInit time (otherwise LocalizeGeneral returns the key and the words stay) is not
-        // established statically: HP.exe is packed. So a language whose Core.<lang> [General] gives
-        // words differing by more than case is a STOP; for RU (TRUE/FALSE) only the case differs.
-        static readonly string[] GlobalWords = { "None", "True", "False", "Yes", "No" };
+        // The global words (D03, live original 2026-11-15, tools/origprobe/run_d03.sh: with Default.ini Language=tst and a
+        // Core.tst [General] True=Sant ..., the running original's GLanguage is "tst" and GTrue/GFalse/GNone/GYes/GNo are
+        // Sant/Falskt/Ingen/Ja/Nej, GIsStarted 1): SetLanguage localizes them from Core.<lang> [General], int as the
+        // fallback, the marker on a miss (Localize with Optional 0). Readers in the shipped binaries (xref scan of
+        // Core.asm, the import tables of every System/*.dll; HP.exe is packed): GTrue / GFalse only — execBoolToString
+        // (Core.dll.c:11350), UBoolProperty::ExportTextItem with PPF_Localized (18761), UBoolProperty::ImportText (33196),
+        // ParseUBOOL (45191), execStringToBool (66286), and Window.dll's imports (no ported body). GNone / GYes / GNo are written and never
+        // read, so the port keeps no state for them. The .data images are "True" / "False" (64 TCHARs each).
+        // Original: Core.dll ?GTrue@@3PAGA [HP1 0x101afef0], ?GFalse@@3PAGA [HP1 0x101aff70]
+        public static string GTrue { get; private set; } = "True";
+        public static string GFalse { get; private set; } = "False";
 
+        // Original: Core.dll ?SetLanguage@UObject@@SAXPBG@Z [HP1 0x10164d60] (thunk 0x10102d06)
         public static void SetLanguage(string lang)
         {
             lang ??= "";
@@ -77,19 +84,37 @@ namespace HP1.UEScript
                     "UObject::SetLanguage('" + lang + "') with GLanguage='" + Language + "' after packages are loaded: "
                     + "shipped calls LanguageChange -> LoadLocalized on all objects (Core 0x10164e7e..0x10164ef4) — "
                     + "the port does not have this (STOP, §8); the only shipped caller is appInit before StaticInit");
-            if (SystemDir != null)
-            {
-                var core = LoadFile("Core." + lang);
-                if (core != null && core.TryGetValue("General", out var general))
-                    foreach (string w in GlobalWords)
-                        if (general.TryGetValue(w, out string v) && !string.Equals(v, w, StringComparison.OrdinalIgnoreCase))
-                            throw new NotSupportedException(
-                                "UObject::SetLanguage('" + lang + "'): Core." + lang + " [General] " + w + "=" + v
-                                + " — the global word differs from '" + w + "' by more than case; the port keeps it as a literal, "
-                                + "and whether shipped appInit (GIsStarted) localizes it is not established (STOP, §8)");
-            }
-            Language = lang;
+            Language = lang;                                    // appStrcpy(GLanguage) first: LocalizeGeneral reads it
+            string t = Localize("General", "True", "Core"), f = Localize("General", "False", "Core");
+            // appStrcpy into a 64-TCHAR array: a longer word would overwrite the next global.
+            if (t.Length > 63 || f.Length > 63)
+                throw new NotSupportedException("SetLanguage('" + lang + "'): Core." + lang + " [General] True/False longer than "
+                    + "63 characters overflows GTrue/GFalse (64 TCHARs) in the original — not emulable");
+            GTrue = t;
+            GFalse = f;
         }
+
+        // UBoolProperty::ImportText's spellings (Core.dll.c:33226-33232): "1" / "True" / GTrue -> true, "0" / "False" /
+        // GFalse -> false, case-insensitive; anything else -> null (no change).
+        public static bool? ImportBoolWord(string token)
+        {
+            if (Eq(token, "1") || Eq(token, "True") || Eq(token, GTrue)) return true;
+            if (Eq(token, "0") || Eq(token, "False") || Eq(token, GFalse)) return false;
+            return null;
+        }
+
+        // execStringToBool (Core.dll.c:66286): "True", GTrue -> true; "False", GFalse -> false (in that order); else
+        // appAtoi != 0.
+        // Original: Core.dll ?execStringToBool@UObject@@QAEXAAUFFrame@@QAX@Z [HP1 0x10135ca0] (thunk 0x101035b7)
+        public static bool StringToBool(string s)
+        {
+            if (Eq(s, "True") || Eq(s, GTrue)) return true;
+            if (Eq(s, "False") || Eq(s, GFalse)) return false;
+            return UEValue.LeadingAtoi(s) != 0;
+        }
+
+        // appStricmp = msvcrt _wcsicmp in the "C" locale: folds 'A'..'Z' only (a localized word may carry ä, ø ...).
+        internal static bool Eq(string a, string b) => UENativesCore.AsciiStricmpEquals(a ?? "", b ?? "");
 
         // file name (lowercase) → section → key → value, all case-insensitive.
         static readonly Dictionary<string, Dictionary<string, Dictionary<string, string>>> _files =
@@ -155,7 +180,12 @@ namespace HP1.UEScript
         {
             if (_files.TryGetValue(name, out var cached)) return cached;
             Dictionary<string, Dictionary<string, string>> parsed = null;
-            if (UEInstallPath.File(Path.Combine(SystemDir, name)) is { } path)   // case-insensitive, like Windows
+            // A package with a directory — HP2's cutscene scripts, "Cutscenes\" + FileName (hgame CutScene.CreateThreads,
+            // CutScriptDisk.load): the file name reaches CreateFileW / CreateFileA unchanged (FFileManagerWindows'
+            // reader, HP2 Game.exe decompile Game_crack.exe.c:11035-11047), relative to System, and in Windows '\'
+            // separates directories (System\CUTSCENES\00001PrivetIntro.int; names case-insensitive).
+            string rel = name.Replace('\\', Path.DirectorySeparatorChar);
+            if (UEInstallPath.File(Path.Combine(SystemDir, rel)) is { } path)   // case-insensitive, like Windows
                 parsed = ParseIni(LoadFileToString(path));
             _files[name] = parsed;   // cache misses (null) too
             return parsed;
@@ -166,6 +196,11 @@ namespace HP1.UEScript
         // with FE FF UTF-16BE (the BOM is not part of the string); otherwise each byte is
         // the character of the same code (ISO-8859-1). The EA Russian localisation (.rus)
         // is UTF-16LE with BOM.
+        // Not the ANSI code page (Windows-1252: 0x92 would be U+2019): the byte path is a plain widening loop,
+        // 0x10153a5f `movzx cx, byte ptr [eax + edx]` / 0x10153a67 `mov word ptr [edx + 2*eax - 2], cx`, with no
+        // MultiByteToWideChar / appFromAnsi call in the body (0x101538a0-0x10153a71), so 0x80-0x9F stay U+0080-U+009F
+        // (checked 2026-11-15 for Flipendo 1.7's Windows-1252 text; SelfTest load_file_to_string_utf16_bom).
+        // Original: Core.dll ?appLoadFileToString@@YAHAAVFString@@PBGPAVFFileManager@@@Z [HP1 0x101538A0]
         internal static string LoadFileToString(string path) => DecodeFileBytes(File.ReadAllBytes(path));
 
         internal static string DecodeFileBytes(byte[] b)

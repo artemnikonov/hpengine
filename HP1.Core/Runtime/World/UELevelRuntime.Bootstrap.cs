@@ -92,8 +92,16 @@ namespace HP1.UEScript
         // (0x10902960) calls LoadFileToBitmap and check(Bitmap) (0x109029e8) — a missing bitmap is FATAL.
         // The unpacked distribution keeps the language files in Help/0 (like System/0/Default.ini); that layout is
         // searched after the installed one. Splash0..4.bmp are never referenced by HP.exe.
+        // HP2 Game.exe runs the same chain with another fallback name: "..\Help\Splash%s.bmp" (0x1090fb9a, Language from
+        // Engine.Engine 0x1090fa9b), then "..\Help" * "Splash.bmp" (0x1090fcd1), then the literal "..\Help\Splash.bmp"
+        // (0x1090fe77); InitSplash (0x10902700) asserts on a failed LoadFileToBitmap (appFailAssert 0x10902788) — FATAL too.
+        // Its earlier EALogo/WBLegal splashes and front end (0x1090c208) run only without -SAVESLOT= and -NOFRONTEND;
+        // the launcher's HP2 tab is that front end and always passes -SAVESLOT= (launcher/Desktop/Logic.cs).
+        // Original: not exported: WinMain splash [HP1 HP.exe 0x1090a7da..0x1090ad1f] [HP2 Game.exe 0x1090fa51..0x1090ffbf] (strings "..\Help\Splash%s.bmp")
         public static string SplashBitmapPath(string root, UEConfig config)
         {
+            bool hp2 = UEEdition.Of(root).Game == UEEdition.Game.HP2;
+            string fallback = hp2 ? "Splash.bmp" : "splashint.bmp";
             string language = config?.Get(UEConfig.ScopeSystem, "Engine.Engine", "Language") ?? "";
             string help = System.IO.Path.Combine(root, "Help");
             var dirs = new List<string> { help };
@@ -101,18 +109,19 @@ namespace HP1.UEScript
             string langDir = System.IO.Path.GetFileName(System.IO.Path.GetDirectoryName(defaultIni));
             if (langDir != "System") dirs.Add(System.IO.Path.Combine(help, langDir));   // unpacked layout: Help/0
             foreach (string dir in dirs)
-                foreach (string name in new[] { "Splash" + language + ".bmp", "splashint.bmp" })
+                foreach (string name in new[] { "Splash" + language + ".bmp", fallback })
                 {
                     // Shipped files are lowercase (Help/0/splashint.bmp): the lookup ignores case, like Windows.
                     if (UEInstallPath.File(System.IO.Path.Combine(dir, name)) is { } path) return path;
                 }
             throw new System.IO.FileNotFoundException(
-                $"InitSplash: check(Bitmap) — neither Help/Splash{language}.bmp nor Help/splashint.bmp exists under '{root}' "
-                + "(fatal in shipped, HP.exe 0x109029e8)");
+                $"InitSplash: check(Bitmap) — neither Help/Splash{language}.bmp nor Help/{fallback} exists under '{root}' "
+                + (hp2 ? "(fatal in shipped, HP2 Game.exe 0x10902788)" : "(fatal in shipped, HP.exe 0x109029e8)"));
         }
 
         // WinMain 0x1090ae1c..0x1090aea5: the splash is shown unless the command line has -LOG or -server
-        // (ParseParam) or contains TestRenDev (appStrfind, case-insensitive substring).
+        // (ParseParam) or contains TestRenDev (appStrfind, case-insensitive substring). HP2 Game.exe: the same three gates
+        // (LOG 0x1090fa72, server 0x1090ff31, TestRenDev 0x1090ff61) — shared.
         public static bool ShowsSplash(string commandLine)
             => !UEViewportStartup.ParseParam(commandLine, "LOG")
             && !UEViewportStartup.ParseParam(commandLine, "server")
@@ -255,10 +264,13 @@ namespace HP1.UEScript
 
         // ── appInit: PROCESS GConfig AND LANGUAGE ───────────────────────────
         //
-        // Shipped appInit (Core.dll.c:56270-56321): raises GConfig from the
-        // System and User ini, then
-        //   GConfig->GetString("Engine.Engine", "Language", buf, 0x100, 0)
-        //   and on a hit UObject::SetLanguage(buf).
+        // Shipped appInit (Core.dll.c:56270-56321, disasm 0x10154e05..0x10154eab): raises GConfig from the
+        // System and User ini and a second FConfigCacheIni from "default.ini", then
+        //   second->GetString("Engine.Engine", "Language", buf)   (a miss leaves buf empty: GetString starts *Value = 0)
+        //   GConfig->SetString("Engine.Engine", "Language", buf)  (the key always exists afterwards)
+        //   GConfig->GetString(...) -> UObject::SetLanguage(buf), so a missing key gives SetLanguage("") — the live
+        //   original without a Default.ini runs with GLanguage "" (tools/origprobe/run_d03.sh, 2026-11-15).
+        // The port's system ini is Default.ini; its saved overlay (the launcher's language choice, NOT ORIGINAL) wins.
         // Only AFTER that are packages loaded: UClass::Serialize (Core.dll.c:4240)
         // calls LoadConfig on every class's defaults, so the config must exist before
         // the first LoadDefaults. Frontends therefore call THIS before loading packages;
@@ -283,9 +295,13 @@ namespace HP1.UEScript
                 if (store is not null) g.BindStore(store);
                 UEConfig.Global = g;
                 UEEdition.NativeOrder = UEEdition.OfSystem(full).Data;
+                UEGameProfile.Current = UEGameProfile.Of(UEEdition.OfSystem(full).Game);
                 UELocalization.SystemDir = systemDir;
-                if (g.TryGetIni(UEConfig.ScopeSystem, "Engine.Engine", "Language", out string lang))
-                    UELocalization.SetLanguage(lang);
+                UELocalization.SetLanguage(g.TryGetIni(UEConfig.ScopeSystem, "Engine.Engine", "Language", out string lang) ? lang : "");
+                // The process's name table starts with the first linker: Engine.u, for the GameEngine class (UENameTable).
+                UENameTable.Reset();
+                UENameTable.Linker(System.IO.Path.Combine(full, "Engine.u"));
+                UEUrl.StaticInit(g);   // UEngine::Init (Engine.dll.c:128147) — before any URL of the game is built
             }
             else if (store is not null) g.BindStore(store);
             return g;
@@ -369,17 +385,26 @@ namespace HP1.UEScript
         // (InitializeLevelClock = TimeSeconds=0, 247341) and the hash is built.
         public UEObject BootstrapPlayWorld(UEInterpreter interp, PlayWorldConfig cfg)
         {
+            // S-10 (audit/hp2_plan_stage0_1_2026-11-15.md 9.5, 11.5): HP2 follows the original's first-boot order.
+            // UGameEngine::Init [HP2 0x103a0fa0] loads the first map before any viewport exists, so LoadMap keeps
+            // bHighDetailMode 1 [HP2 0x103a6b74..0x103a6ba4], its Client block spawns no player, has no Audio and no ResetInput, then
+            // LoadMap screens the actors (ScreenActorsByGameState [HP2 0x103a7618]) and runs DetailChange, and only after
+            // LoadMap returns does UGameEngine::Init spawn the player. HP1 keeps the travel order on every load (9.5).
+            bool hp2FirstBoot = UEGameProfile.Current.Game == UEEdition.Game.HP2 && Viewport is null;
             // Per-level frame state is cleared on LOAD, not only on teardown: a world is not
             // guaranteed to be torn down (a frame producer can survive into a new session), and stale
             // state such as _ambientPlaying would then make Core send only AmbientUpdate and never
             // AmbientStart, so ambient loops would never start.
+            AttachLoadedParticleLists(interp);  // the map's LoadPackage (UEActorGraphLoader.Load)
             FrameProducer?.ResetForNewLevel();
             ArmFirstWindowFrame();             // see UELevelRuntime.EngineFrameOwedAfterLoad
             ArmLoadStutter();                  // see UELevelRuntime.EmulateLoadStutter
             WriteLoadMapComputerName(interp);           // 246880..246917
+            LoadPersistentActors(interp);               // HP2 only, 0x103a62c6..0x103a62f0
             AdoptLoadedUrl(cfg);
+            WriteLoadMapVersions(interp);               // HP1 0x1039d3c1, HP2 0x103a63f4
             BuildLoadMapZoneDist();                     // 247117..247188
-            SpawnGameInfoThenHighDetailMode(interp, cfg, withViewport: true);
+            SpawnGameInfoThenHighDetailMode(interp, cfg, withViewport: !hp2FirstBoot);
             ClearTouching(interp);                      // 247342..247351
             RunInitExecutionPass(interp);               // 247376..247381 — BEFORE InitGame
             SetBegunPlay(interp);                       // 247382
@@ -388,11 +413,132 @@ namespace HP1.UEScript
             AttachTagAndBasePass(interp);               // 247466..247500 + 247873..247884
             ClearStartup(interp);                       // 247503
             SortActorsForPlay();                        // 247517..247590
+            if (hp2FirstBoot)
+            {
+                CreateBrushTrackerUnlessEntry();         // the Client block with no viewport: the tracker only
+                if (!IsEntryLevel) ScreenActorsByGameState(interp);   // 0x103a761d..0x103a764f
+                DetailChange(interp);                    // 0x103a7657..0x103a766c, the map's bHighDetailMode
+                UEObject first = InitClientTail(interp, cfg);   // LoadMap has returned: UGameEngine::Init goes on
+                WarmFirstUseCaches();
+                return first;
+            }
             UEObject player = SpawnPlayActorThenBrushTracker(interp, cfg);
+            // HP2 LoadMap, after the Client block's ResetInput loop and before DetailChange (0x103a761d..0x103a764f, the
+            // first boot's call too): not on the Entry level, GLevel->ScreenActorsByGameState().
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2 && !IsEntryLevel) ScreenActorsByGameState(interp);
             DetailChange(interp);                       // 0x1039e628..0x1039e644
             WarmFirstUseCaches();                       // port: data caches only (UELevelRuntime.LoadWarm.cs)
             return player;
         }
+
+        // Original: Engine.dll ?Init@UGameEngine@@UAEXXZ [HP1 0x103985e0] [HP2 0x103a0fa0]
+        // Its `if (Client)` block after the first map's LoadMap [HP2 0x103a147d..0x103a1599] (HP1 0x10398ac1..0x10398bd8: the same
+        // calls; the port's HP1 boot keeps the travel order, section 9.5 of the HP2 plan): UInput::StaticInitInput (0x103a1488:
+        // the input config properties and the class default's LoadConfig; the port's UEInput holds the bindings from
+        // LoadInputBindingsFromInstall), Client->NewViewport, the console of ini:Engine.Engine.Console and its _Init
+        // (0x103a149e..0x103a14e9), GLevel->SpawnPlayActor(Viewport, ROLE_SimulatedProxy, URL, Error) (0x103a150e; NULL:
+        // appErrorf, 0x103a1535), Viewport->Input->Init(Viewport) (0x103a1544: the viewport, ResetInput, "Input system
+        // initialized for %s"), Viewport->OpenWindow (0x103a1555: the frontend's window, which makes the ini's
+        // GameRenderDevice), GLevel->DetailChange(Viewport->RenDev->HighDetailActors) (0x103a1564), InitAudio (0x103a156c),
+        // Audio->SetViewport(Viewport) (0x103a157b). native_match.py @ (fields by name): ULevel::SpawnPlayActor,
+        // APlayerPawn::SetPlayer, UInput::Init, UInput::ResetInput, UConsole::_Init, ULevel::DetailChange and
+        // UEngine::InitAudio are HP1's bodies.
+        UEObject InitClientTail(UEInterpreter interp, PlayWorldConfig cfg)
+        {
+            CreateLocalViewport(interp, cfg);
+            UEObject player = SpawnPlayActor(interp, cfg);
+            Input.ResetInputFull(interp, ViewportConsole, player);
+            Log($"input_init viewport={Viewport.GetProp(PK.Name)}");
+            DetailChange(interp, HighDetailActors);
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2)
+            {
+                Config.BoundDllPackages.Add("D3DDrv");      // OpenWindow (0x103a1555) made the render device
+                Config.BoundDllPackages.Add("ALAudio");     // InitAudio's class load of ini:Engine.Engine.AudioDevice
+                FrameProducer.InitAudio(Config);                  // 0x103a156c (HP1's Galaxy is made with the producer)
+                FrameProducer.ALAudio?.SetViewport(true);   // 0x103a157b: Audio->SetViewport(Viewport) when Audio exists
+            }
+            return player;
+        }
+
+        bool IsEntryLevel => string.Equals(System.IO.Path.GetFileNameWithoutExtension(LoadedMapPath ?? ""), "Entry",
+            StringComparison.OrdinalIgnoreCase);
+
+        // Original: Engine.dll ?ScreenActorsByGameState@ULevel@@QAEXXZ [HP2 0x103b86d0] (HP1: none)
+        // HP2 LoadMap calls it for every level but Entry (0x103a761d..0x103a764f), then DetailChange. The first Pawn with
+        // bIsPlayer gives CurrState = CurrentGameState.Caps() (0x103b872d..0x103b87e8); "NONE" (appStricmp) screens nothing
+        // (0x103b87ed..0x103b880d); no such pawn logs and returns (0x103b8824). GAMESTATE= on the command line would
+        // replace it when GameStateMasterList.InStr(it) != 0 (0x103b8895..0x103b89b2: != 0, so a token at index 0 is not
+        // taken); the port's boot has no command line (UEGameEngine.Boot takes the map), so Parse finds nothing. A state
+        // missing from GameStateMasterList logs and returns (0x103b89b4..0x103b8a44). Then every actor (0x103b8a49..):
+        // GroupStr = Caps(*Group); per pass a non-empty ExcludeGameStates whose Caps contains CurrState screens it out
+        // (0x103b8b6a..0x103b8b9c -> 0x103b8d3f); else the next "GSTATE" in GroupStr (0x103b8baf) — none: the flag is written
+        // only if a token was seen (0x103b8d61); one: GroupStr = Mid(idx), Token = Left up to ',' (0x103b8bdb..0x103b8c55);
+        // a token of GameStateTokenLen characters found in GameStateMasterList and equal to CurrState (operator==, appStricmp)
+        // puts the actor IN unless ExcludeGameStates (not capitalised) contains CurrState (0x103b8c64..0x103b8cb3); any other
+        // length or a token missing from the list logs the error with GroupStr overwritten by the actor's Name
+        // (0x103b8cb5..0x103b8cfa); GroupStr = Mid(Token.Len()) and the pass repeats (0x103b8cfd..0x103b8d3a).
+        // bInCurrentGameState (+0xc8 bit 1) = the result (0x103b8d69); OnResolveGameState for every actor (0x103b8d7f,
+        // GIsEditor 0). tools/hp2/engine_exec_judge.py ScreenActorsByGameState: the HP2 body against this port.
+        internal void ScreenActorsByGameState(UEInterpreter interp)
+        {
+            UEObject pp = null;
+            string curr = "";
+            foreach (UEObject a in Actors)
+                if (a is not null && !a.Destroyed && UEInterpreter.ClassIsA(a.Class, "Pawn") && UEInterpreter.ToBool(a.GetProp(PK.bIsPlayer)))
+                {
+                    pp = a;
+                    curr = UENativesCore.ShippedCaps(a.GetProp("CurrentGameState") as string ?? "");
+                    break;
+                }
+            if (UENativesCore.AsciiStricmpEquals(curr, "NONE")) return;
+            if (pp is null) { Log("gamestate_log **** Can't find a valid player!!!! PP == NULL "); return; }
+            string master = pp.GetProp("GameStateMasterList") as string ?? "";
+            if (master.IndexOf(curr, StringComparison.Ordinal) < 0)
+            {
+                Log("gamestate_log **** Caution: The player pawn has an Invalid CurrentGameState for this package Load.");
+                return;
+            }
+            int tokenLen = UEInterpreter.ToInt(pp.GetProp("GameStateTokenLen"));
+            // Actors(j) read live by index (0x103b8a5a..0x103b8a65, Num re-read at 0x103b8d97): an OnResolveGameState that spawns
+            // is screened too; a destroyed actor is the original's NULL slot.
+            for (int j = 0; j < Actors.Count; j++)
+            {
+                UEObject a = Actors[j];
+                if (a is null || a.Destroyed) continue;
+                string group = UENativesCore.ShippedCaps(NameText(a.GetProp("Group")));
+                string exclude = a.GetProp("ExcludeGameStates") as string ?? "";
+                bool seen = false, inState = false, write = false;
+                while (true)
+                {
+                    if (exclude.Length != 0 && UENativesCore.ShippedCaps(exclude).IndexOf(curr, StringComparison.Ordinal) >= 0)
+                    { inState = false; write = true; break; }
+                    int idx = group.IndexOf("GSTATE", StringComparison.Ordinal);
+                    if (idx < 0) { write = seen; break; }
+                    seen = true;
+                    group = UENativesCore.ShippedMid(group, idx, int.MaxValue);
+                    int comma = group.IndexOf(',', StringComparison.Ordinal);
+                    string token = UENativesCore.ShippedMid(group, 0, comma < 0 ? group.Length : comma);
+                    if (token.Length == tokenLen && master.IndexOf(token, StringComparison.Ordinal) >= 0)
+                    {
+                        if (UENativesCore.AsciiStricmpEquals(token, curr) && exclude.IndexOf(curr, StringComparison.Ordinal) < 0)
+                        { inState = true; write = true; break; }
+                    }
+                    else
+                    {
+                        group = NameText(a.GetProp(PK.Name));
+                        Log($"gamestate_log *** GameState ERROR Actor: {group} has an invalid GameState Token: {token}!!!");
+                    }
+                    group = UENativesCore.ShippedMid(group, token.Length, int.MaxValue);
+                }
+                if (write) a.Props["bInCurrentGameState"] = inState;
+                UFunction fn = interp.FindEventFunction(a, "OnResolveGameState")
+                    ?? throw new InvalidOperationException($"{a.Class?.Name} has no OnResolveGameState (FindFunctionChecked)");
+                interp.Invoke(a, fn);
+            }
+            Log($"screen_actors_by_game_state state={curr} player={pp.GetProp(PK.Name)}");
+        }
+
+        static string NameText(object v) => v is UEName n ? n.Value : v?.ToString() ?? "None";
 
         // InitGameInfo, then bHighDetailMode — LoadMap order per disassembly:
         // SpawnActor(GameInfo) at 0x1039da73 (`call [edx+0xa0]`, result into
@@ -417,8 +563,13 @@ namespace HP1.UEScript
             UEObject player = SpawnPlayActor(interp, cfg); // ClientInit (51436..51700)
             CreateBrushTrackerUnlessEntry();               // 0x1039e589..0x1039e5ab
             // Audio->SetViewport(Audio->GetViewport()) (0x1039e5b1-0x1039e5c6): non-music channels started by the startup
-            // events and Login are stopped.
-            FrameProducer?.Audio.SetViewportSame();
+            // events and Login are stopped. HP2 LoadMap [HP2 0x103a75a7..0x103a75bc]: the same call (Engine+0x5c; vtable
+            // +0x8c GetViewport, the stored +0x2c, and +0x60 SetViewport of UALAudioSubsystem), when there is an Audio.
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2)
+            {
+                if (FrameProducer?.ALAudio is { } al) al.SetViewport(al.HasViewport);
+            }
+            else FrameProducer?.Audio.SetViewportSame();
             Input.ResetInputFull(interp, ViewportConsole, player);   // 247644..247651: Viewport->Input->ResetInput()
             return player;
         }
@@ -450,6 +601,18 @@ namespace HP1.UEScript
             UEObject level = interp.GetLevelInfo();
             if (level is null) return;
             level.Props["ComputerName"] = AppComputerName();
+        }
+
+        // LoadMap, after the level's URL is copied: Info->EngineVersion = FString::Printf("%i", 0x1b1) and
+        // Info->MinNetVersion = FString::Printf("%i", 0x190), the same constants in both games (HP1 0x1039d3c1..0x1039d4e4,
+        // Info+0x474/+0x480; HP2 0x103a63f4..0x103a64b5, Info+0x4d0/+0x4dc).
+        // Original: Engine.dll ?LoadMap@UGameEngine@@UAEPAVULevel@@ABVFURL@@PAVUPendingLevel@@PBV?$TMap@VFString@@V1@@@AAVFString@@@Z [HP1 0x1039c3d0] [HP2 0x103a5430]
+        void WriteLoadMapVersions(UEInterpreter interp)
+        {
+            UEObject level = interp.GetLevelInfo();
+            if (level is null) return;
+            level.Props["EngineVersion"] = "433";
+            level.Props["MinNetVersion"] = "400";
         }
 
         // ── ULevel.ZoneDist[64][64] (+0x11c) — LoadMap 247117..247188, disasm
@@ -541,8 +704,10 @@ namespace HP1.UEScript
         // (Engine.dll.c:38221-38243; LoadMap 247650-247660).
         internal void BootstrapLevelWithoutPlayer(UEInterpreter interp, PlayWorldConfig cfg)
         {
+            AttachLoadedParticleLists(interp);
             FrameProducer?.ResetForNewLevel();
             WriteLoadMapComputerName(interp);
+            WriteLoadMapVersions(interp);
             BuildLoadMapZoneDist();
             SpawnGameInfoThenHighDetailMode(interp, cfg, withViewport: false);
             ClearTouching(interp);
@@ -696,10 +861,12 @@ namespace HP1.UEScript
         // ULevel::DetailChange (Engine.dll.c:89736-89760, vtable +0xd8), called by LoadMap
         // with the current bHighDetailMode (0x1039e628..0x1039e644): writes the bit and fires
         // the Game.DetailChange event (which destroys bHighDetail && !bGameRelevant actors
-        // and does LinkToSkybox for zones).
-        void DetailChange(UEInterpreter interp)
+        // and does LinkToSkybox for zones). `newDetail`: UGameEngine::Init's call with the device's HighDetailActors
+        // (InitClientTail); the bit is written before the Game test [HP1 0x103ae6bf..0x103ae6d8, 0x103ae73a].
+        void DetailChange(UEInterpreter interp, bool? newDetail = null)
         {
             UEObject level = interp.GetLevelInfo();
+            if (level is not null && newDetail is bool detail) level.Props["bHighDetailMode"] = detail;
             if (level?.GetProp(PK.Game) is not UEObject game) return;
             int before = 0;
             foreach (UEObject a in Actors) if (a is not null && !a.Destroyed) before++;
@@ -722,6 +889,7 @@ namespace HP1.UEScript
                 ?? throw new InvalidOperationException("GameInfo.InitGame missing");
             var args = new object[] { cfg.Options ?? "", "" };
             Log($"init_game options={cfg.Options}");
+            EventTap?.Invoke(this, "InitGame");
             interp.Invoke(game, fn, args);
             if (args[1] is string err && err.Length > 0)
                 throw new InvalidOperationException($"GameInfo.InitGame failed: {err}");
@@ -798,7 +966,11 @@ namespace HP1.UEScript
                 ?? throw new System.IO.InvalidDataException("Engine.Viewport class missing (no export, no import witness)");
             Viewport = new UEObject { Class = viewportClass, Interp = interp };
             Viewport.LoadDefaults();
-            Viewport.Props["Name"] = new UEName("Viewport0");
+            // UWindowsClient's viewport: Transient.WindowsClient0.WindowsViewport0 (HP2 SwARc level host: Player of the
+            // possessed pawn; HP1 live HP.log "Input system initialized for WindowsViewport0"). The class stays
+            // Engine.Viewport: WinDrv.WindowsViewport has no script class.
+            Viewport.OuterPath = "Transient.WindowsClient0";
+            Viewport.Props["Name"] = new UEName("WindowsViewport0");
 
             UClass consoleClass = string.IsNullOrEmpty(cfg.ConsoleClass) ? null
                 : UEClassRegistry.Shared.Find(cfg.ConsoleClass.Substring(cfg.ConsoleClass.LastIndexOf('.') + 1));
@@ -850,6 +1022,10 @@ namespace HP1.UEScript
             //
             // THE BYTECODE IS CALLED, NOT A HAND COPY: the language branching, all FIVE fields and
             // SaveConfig stay shipped.
+            // HP2 boots its startup map like the original, so its console's own call stands: HPConsole.SetupLanguage logs
+            // "LanguageCode=" after "Creating root window" (live HP2 Game.log, the first frame) and writes Root.Fonts, which
+            // exists only from then on.
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2) return;
             UFunction setupLanguage = interp.FindEventFunction(ViewportConsole, "SetupLanguage")
                 ?? throw new System.IO.InvalidDataException(
                     $"CreateLocalViewport: console {consoleClass.Name} has no SetupLanguage — "
@@ -926,6 +1102,7 @@ namespace HP1.UEScript
             var args = new object[] { portal, cfg.Options ?? "", "", spawnClass };
             Log($"client_init login game={game.GetProp(PK.Name)} spawnClass={spawnClass.Name}"
                 + (portal.Length != 0 ? $" portal={portal}" : ""));
+            EventTap?.Invoke(this, "Login");
             object result = interp.Invoke(game, login, args);
             string error = args[2] as string ?? "";
             if (result is not UEObject pawn)
@@ -1195,7 +1372,9 @@ namespace HP1.UEScript
         //     ExportText(i, buf, actor, Class->Defaults, 0) — UProperty::ExportText
         //     (Core.dll.c:26856) writes the element only if it is NOT Identical to the
         //     class default;
-        //   * a property whose class derives from Actor is written by NAME (151525-151545);
+        //   * a property whose class derives from Actor is written by NAME (151525-151545); the disassembly then falls
+        //     through to the "%s\r\n" of the ExportText buffer (0x103a03db), a line "Class'Path'" with no '=' that the
+        //     accept parse skips;
         //   * a struct — UStructProperty::ExportTextItem (Core.dll.c:21735):
         //     only fields that differ from the default struct's field.
         // Comparison is the type's Identical (Core.dll.c: Int 4817, Float 39655,
@@ -1228,7 +1407,7 @@ namespace HP1.UEScript
                         if (IsActorReferenceProperty(p))
                             rec.Props[key] = new TravelActorRef((v as UEObject)?.GetProp(PK.Name)?.ToString());
                         else if (p is UELib.Core.UStructProperty sp)
-                            rec.Props[key] = StructDelta(sp.Struct, v, d, key);
+                            rec.Props[key] = StructDelta(TravelStruct(sp, key), v, d, key);
                         else rec.Props[key] = TravelText(p, v);
                     }
                 }
@@ -1237,7 +1416,8 @@ namespace HP1.UEScript
 
         // Travel goes as TEXT: ExportText -> ExportTextItem (float — "%.7g", 0x101c2ad4) -> on accept
         // ImportText (float — appAtof, name — ReadToken). Here the same round trip for float (up to 1 ulp) and
-        // name (truncated at the first char outside [A-Za-z0-9_-]); for other types text does not change the value.
+        // name (truncated at the first char outside [A-Za-z0-9_-]); an object or class value is imported on accept, in the
+        // new world (AcceptObject); for other types text does not change the value.
         static object TravelText(UELib.Core.UProperty p, object v)
         {
             if (p.Type is not (UELib.Types.PropertyType.FloatProperty or UELib.Types.PropertyType.NameProperty)) return v;
@@ -1249,27 +1429,61 @@ namespace HP1.UEScript
         static object ElementAt(object list, int i)
             => list is System.Collections.IList l && i < l.Count ? l[i] : null;
 
-        // Per-field struct delta — exactly the fields ExportTextItem writes.
-        // Nested structs and object fields do not occur in shipped travel data
-        // and fail loudly.
+        // Per-field struct delta — exactly the fields UStructProperty::ExportTextItem writes. Keys are the field name,
+        // or "Name[i]" for an element of a static-array field; a nested struct field holds its own delta.
         public sealed class TravelStructDelta
         {
             public readonly Dictionary<string, object> Fields = new(UEPropNameComparer.Instance);
         }
 
-        static TravelStructDelta StructDelta(UELib.Core.UStruct st, object v, object d, string where)
+        // A struct value's field: a bag's property, or a component of a VM value struct (Vector/Rotator/Plane).
+        static object Member(object s, string f) => s is UEObject bag ? bag.GetProp(f) : UEValue.GetStructMember(s, f);
+
+        static UELib.Core.UStruct TravelStruct(UELib.Core.UStructProperty sp, string where)
         {
-            if (v is not null && v is not UEObject)
-                throw new NotSupportedException($"travel: struct {where} ({v.GetType().Name}) — export of a non-bag struct is not ported");
+            var (st, mark) = HP1.UEScript.Render.ShippedLayout.ResolveStruct(sp.Struct);
+            return st ?? throw new InvalidOperationException($"travel: struct of {where} not resolved ({mark})");
+        }
+
+        // Original: UStructProperty::ExportTextItem (Core 0x10101BAE, Core.dll.c:21729), PortFlags 2: the struct's
+        // fields (its own Children, then the super struct's), for every Port() field and every element i,
+        // UProperty::ExportText(i, buf, Data, Delta, 2) (Core 0x10101EFB: "" and 0 when Identical) — so a field element
+        // is written only when it differs from the default struct's. On accept, UStructProperty::ImportText
+        // (0x10101B63) writes each listed field into the receiving actor's struct, the others keep its defaults.
+        internal static TravelStructDelta StructDelta(UELib.Core.UStruct st, object v, object d, string where)
+        {
             var delta = new TravelStructDelta();
             for (UELib.Core.UStruct s = st; s is not null; s = s.Super as UELib.Core.UStruct)
                 foreach (UELib.Core.UProperty f in s.EnumerateFields<UELib.Core.UProperty>())
                 {
                     if (!Port(f)) continue;
-                    if (f is UELib.Core.UStructProperty || f is UELib.Core.UObjectProperty || f.ArrayDim > 1)
-                        throw new NotSupportedException($"travel: field {where}.{f.Name} ({f.GetType().Name}) — export not ported");
-                    object fv = (v as UEObject)?.GetProp(f.Name), fd = (d as UEObject)?.GetProp(f.Name);
-                    if (!TravelIdentical(f, fv, fd)) delta.Fields[f.Name] = TravelText(f, fv);
+                    int dim = Math.Max(1, f.ArrayDim);
+                    object fv = Member(v, f.Name), fd = Member(d, f.Name);
+                    for (int i = 0; i < dim; i++)
+                    {
+                        object ev = dim > 1 ? ElementAt(fv, i) : fv, ed = dim > 1 ? ElementAt(fd, i) : fd;
+                        if (TravelIdentical(f, ev, ed)) continue;
+                        string key = dim > 1 ? $"{f.Name}[{i}]" : f.Name.ToString();
+                        if (f is UELib.Core.UStructProperty nsp)
+                        {
+                            TravelStructDelta nested = StructDelta(TravelStruct(nsp, $"{where}.{key}"), ev, ed, $"{where}.{key}");
+                            // An empty nested text "" fails the nested ImportText (not '(' -> NULL), which aborts the
+                            // outer struct's ImportText at this field: the abort is not ported.
+                            if (nested.Fields.Count == 0)
+                                throw new NotSupportedException($"travel: field {where}.{key} differs only in non-Port fields — the original's ImportText abort is not ported (STOP)");
+                            delta.Fields[key] = nested;
+                        }
+                        else if (f is UELib.Core.UObjectProperty)
+                        {
+                            // UObjectProperty::ExportTextItem: "None" for NULL, "Class'Pkg.Name'" for a class — the accept
+                            // imports it (AcceptObject). Another object's text is its GetPathName, not modelled: loud.
+                            if (ev is not (null or UClass))
+                                throw new NotSupportedException($"travel: object field {where}.{key} holds {ev.GetType().Name} — "
+                                    + "the GetPathName text of a non-class object is not modelled (STOP)");
+                            delta.Fields[key] = ev;
+                        }
+                        else delta.Fields[key] = TravelText(f, ev);
+                    }
                 }
             return delta;
         }
@@ -1277,7 +1491,7 @@ namespace HP1.UEScript
         // UProperty::Port (Core.dll.c:26415, export 0x1eab): ElementSize·ArrayDim != 0, AND (Category != None OR not
         // Transient|Native, 0x3000), AND name != Names[0x62] — `Class` (hardcoded name 98: shipped Core.dll FNameEntry
         // table in order, checked against NAME_Package = 0x17c/4 and NAME_Core = 0x40/4 in UnLinker).
-        static bool Port(UELib.Core.UProperty f)
+        internal static bool Port(UELib.Core.UProperty f)
         {
             bool hasCategory = f.CategoryName is { } cat && !string.Equals(cat.ToString(), "None", StringComparison.OrdinalIgnoreCase);
             bool transientOrNative = f.PropertyFlags.HasFlag(UELib.Flags.PropertyFlag.Transient)
@@ -1286,15 +1500,19 @@ namespace HP1.UEScript
             return !string.Equals(f.Name?.ToString(), "Class", StringComparison.OrdinalIgnoreCase);
         }
 
-        // UStructProperty::Identical (Core.dll.c:5684): ALL property fields of the struct, without the Port filter.
-        static bool StructIdentical(UELib.Core.UStruct st, object a, object b, string where)
+        // Original: UStructProperty::Identical (Core 0x101012EE, Core.dll.c:5671): every property field of the struct
+        // (its own, then the super struct's), without the Port filter, every element i < ArrayDim compared by the
+        // field's own Identical; the first difference answers 0. An object field compares pointers
+        // (UObjectProperty::Identical 0x10102B6C).
+        internal static bool StructIdentical(UELib.Core.UStruct st, object a, object b)
         {
             for (UELib.Core.UStruct s = st; s is not null; s = s.Super as UELib.Core.UStruct)
                 foreach (UELib.Core.UProperty f in s.EnumerateFields<UELib.Core.UProperty>())
                 {
-                    if (f is UELib.Core.UObjectProperty || f.ArrayDim > 1)
-                        throw new NotSupportedException($"travel: Identical of field {where}.{f.Name} ({f.GetType().Name}) not ported");
-                    if (!TravelIdentical(f, (a as UEObject)?.GetProp(f.Name), (b as UEObject)?.GetProp(f.Name))) return false;
+                    int dim = Math.Max(1, f.ArrayDim);
+                    object fa = Member(a, f.Name), fb = Member(b, f.Name);
+                    for (int i = 0; i < dim; i++)
+                        if (!TravelIdentical(f, dim > 1 ? ElementAt(fa, i) : fa, dim > 1 ? ElementAt(fb, i) : fb)) return false;
                 }
             return true;
         }
@@ -1304,7 +1522,13 @@ namespace HP1.UEScript
             switch (p)
             {
                 case UELib.Core.UBoolProperty: return UEInterpreter.ToBool(a) == UEInterpreter.ToBool(b);
-                case UELib.Core.UFloatProperty: return UEInterpreter.AsFloat(a) == UEInterpreter.AsFloat(b);
+                case UELib.Core.UFloatProperty:
+                    {
+                        // Original: UFloatProperty::Identical (Core 0x1016E0E0): fcomp; fnstsw; test ah,0x40 — only C3 is
+                        // tested, and an unordered compare sets C3: a NaN on either side is Identical.
+                        float x = UEInterpreter.AsFloat(a), y = UEInterpreter.AsFloat(b);
+                        return x == y || float.IsNaN(x) || float.IsNaN(y);
+                    }
                 case UELib.Core.UIntProperty: return UEInterpreter.ToInt(a) == UEInterpreter.ToInt(b);
                 case UELib.Core.UByteProperty: return (UEInterpreter.ToInt(a) & 0xff) == (UEInterpreter.ToInt(b) & 0xff);
                 case UELib.Core.UObjectProperty: return ReferenceEquals(a, b) || (a is null && b is null);
@@ -1313,7 +1537,7 @@ namespace HP1.UEScript
                 case UELib.Core.UNameProperty:
                     return string.Equals(a?.ToString() ?? "None", b?.ToString() ?? "None", StringComparison.OrdinalIgnoreCase);
                 case UELib.Core.UStructProperty sp:
-                    return StructIdentical(sp.Struct, a, b, p.Name);
+                    return StructIdentical(TravelStruct(sp, p.Name), a, b);
                 default:
                     throw new NotSupportedException($"travel: Identical for {p.Name} ({p.GetType().Name}) not ported");
             }
@@ -1362,6 +1586,13 @@ namespace HP1.UEScript
                 }
                 targets.Add((rec, target));
             }
+            // Scan over the set of ACCEPTED actors (52008-52024): appStricmp of the line's value with each Name.
+            UEObject ResolveRef(TravelActorRef aref)
+            {
+                foreach ((TravelActor other, UEObject candidate) in targets)
+                    if (string.Equals(other.Name, aref.Name, StringComparison.OrdinalIgnoreCase)) return candidate;
+                return null;
+            }
             foreach ((TravelActor rec, UEObject actor) in targets)
             {
                 int unresolved = 0;
@@ -1376,24 +1607,28 @@ namespace HP1.UEScript
                         int idx = int.Parse(kv.Key.Substring(br + 1, kv.Key.Length - br - 2), System.Globalization.CultureInfo.InvariantCulture);
                         if (actor.GetProp(arrName) is not System.Collections.IList arr || idx >= arr.Count)
                             throw new InvalidOperationException($"travel_accept: {actor.GetProp(PK.Name)}.{arrName} — no static array for {kv.Key}");
-                        if (kv.Value is TravelStructDelta ed) ApplyStructDelta(arr[idx], ed, kv.Key);
-                        else if (kv.Value is TravelActorRef)
-                            throw new NotSupportedException($"travel_accept: actor reference in array element {kv.Key} is not ported");
-                        else arr[idx] = kv.Value;
+                        UELib.Core.UProperty ap = TravelPropertyOf(actor.Class, arrName);
+                        if (kv.Value is TravelStructDelta ed) arr[idx] = ApplyStructDelta(arr[idx], ed, StructOf(ap, kv.Key), kv.Key, out _);
+                        else if (kv.Value is TravelActorRef eref)
+                        {
+                            // Original: the actor branch writes Data + ElementSize·Index + Offset (Engine 0x103a8dbb..,
+                            // Index from the "[i]" of the line); a miss writes nothing.
+                            UEObject hit = ResolveRef(eref);
+                            if (hit is null) unresolved++;
+                            else arr[idx] = hit;
+                        }
+                        else arr[idx] = AcceptObject(ap, kv.Value, 0, out _);
                         continue;
                     }
+                    UELib.Core.UProperty tp = TravelPropertyOf(actor.Class, kv.Key);
                     if (kv.Value is TravelStructDelta sd)
                     {
-                        ApplyStructDelta(actor.GetProp(kv.Key), sd, kv.Key);
+                        actor.Props[kv.Key] = ApplyStructDelta(actor.GetProp(kv.Key), sd, StructOf(tp, kv.Key), kv.Key, out _);
                         continue;
                     }
                     if (kv.Value is TravelActorRef aref)
                     {
-                        // Scan over the set of ACCEPTED actors (52008-52024).
-                        UEObject resolved = null;
-                        foreach ((TravelActor other, UEObject candidate) in targets)
-                            if (string.Equals(other.Name, aref.Name, StringComparison.OrdinalIgnoreCase))
-                            { resolved = candidate; break; }
+                        UEObject resolved = ResolveRef(aref);
                         // Miss — the property is NOT written at all (shipped jumps to
                         // LAB_103a8e16 without a write), so the actor keeps the value
                         // from its defaults.
@@ -1406,7 +1641,7 @@ namespace HP1.UEScript
                             + $"was={aref.Name} now={resolved.GetProp(PK.Name)}");
                         continue;
                     }
-                    actor.Props[kv.Key] = kv.Value;
+                    actor.Props[kv.Key] = AcceptObject(tp, kv.Value, 0, out _);
                 }
                 Log($"travel_accept actor={actor.GetProp(PK.Name)}:{actor.Class?.Name} "
                     + $"from={rec.Name} props={rec.Props.Count}"
@@ -1420,12 +1655,78 @@ namespace HP1.UEScript
 
         // Struct ImportText writes ONLY the listed fields; the rest keep the
         // receiving actor's values.
-        static void ApplyStructDelta(object target, TravelStructDelta delta, string where)
+        // Original: Core.dll ?ImportText@UStructProperty@@UBEPBGPBGPAEH@Z [HP1 0x10171260] [HP2 0x101746d0]
+        // UStructProperty::ImportText into the receiving struct `st`: each listed field (an element "Name[i]" of a
+        // static-array field, a nested struct's own delta) is written in the exported order, the rest keep the receiver's
+        // values; a field whose import fails (AcceptObject) is written and ends the import (`failed`: the outer struct's
+        // ends too). Returns the struct (a VM value struct is a copy).
+        internal static object ApplyStructDelta(object target, TravelStructDelta delta, UELib.Core.UStruct st, string where, out bool failed)
         {
-            if (target is not UEObject bag)
+            failed = false;
+            if (target is null)
                 throw new InvalidOperationException($"travel_accept: {where} — the receiving actor has no struct");
-            foreach (var f in delta.Fields) bag.Props[f.Key] = f.Value;
+            foreach (var f in delta.Fields)
+            {
+                int br = f.Key.IndexOf('[');
+                string name = br > 0 ? f.Key.Substring(0, br) : f.Key;
+                UELib.Core.UProperty fp = FieldOf(st, name);
+                if (br > 0)
+                {
+                    int idx = int.Parse(f.Key.Substring(br + 1, f.Key.Length - br - 2), System.Globalization.CultureInfo.InvariantCulture);
+                    if (Member(target, name) is not System.Collections.IList arr || idx >= arr.Count)
+                        throw new InvalidOperationException($"travel_accept: {where}.{name} — no static array for {f.Key}");
+                    arr[idx] = f.Value is TravelStructDelta ne
+                        ? ApplyStructDelta(arr[idx], ne, StructOf(fp, $"{where}.{f.Key}"), $"{where}.{f.Key}", out failed)
+                        : AcceptObject(fp, f.Value, 2, out failed);
+                    if (failed) return target;
+                    continue;
+                }
+                object v = f.Value is TravelStructDelta nd
+                    ? ApplyStructDelta(Member(target, f.Key), nd, StructOf(fp, $"{where}.{f.Key}"), $"{where}.{f.Key}", out failed)
+                    : AcceptObject(fp, f.Value, 2, out failed);
+                if (target is UEObject bag) bag.Props[f.Key] = v;
+                else target = UEValue.SetStructMember(target, f.Key, v);
+                if (failed) return target;
+            }
+            return target;
         }
+
+        // Original: Engine.dll ?SpawnPlayActor@ULevel@@UAEPAVAPlayerPawn@@PAVUPlayer@@W4ENetRole@@ABVFURL@@AAVFString@@@Z [HP1 0x103a8270] [HP2 0x103b1d00]
+        // The accept's Prop->ImportText(value, element, 0) (HP1 0x103a8e0d) of what ExportTravel printed: an object or class
+        // value travels as UObjectProperty::ExportTextItem's text ("None", "Class'Pkg.Name'") and UObjectProperty /
+        // UClassProperty::ImportText finds it again (StaticFindObject ANY_PACKAGE) in the NEW world: a class whose map
+        // package went with the old level is not found — NULL is written and the import fails. The record keeps the class
+        // (its text follows from it); other values and other object kinds come back as they are.
+        static object AcceptObject(UELib.Core.UProperty p, object v, int portFlags, out bool failed)
+        {
+            failed = false;
+            if (p is not UELib.Core.UObjectProperty op || v is not (null or UClass)) return v;
+            object back = null;
+            failed = UEObjectConfig.ImportItem(op, UEObjectConfig.ExportTextItem(op, v, portFlags), 0, portFlags, ref back, out _) < 0;
+            return back;
+        }
+
+        // The accept's property lookup: the receiving class's CPF_Travel properties (own, then the super class's), appStricmp
+        // on the name; a struct's fields (own, then the super struct's) by name. null: not found (the value is written as is).
+        static UELib.Core.UProperty TravelPropertyOf(UClass cls, string name)
+        {
+            for (UClass c = cls; c is not null; c = UEClassRegistry.Shared.CanonicalSuper(c))
+                foreach (UELib.Core.UProperty p in c.EnumerateFields<UELib.Core.UProperty>())
+                    if (p.PropertyFlags.HasFlag(UELib.Flags.PropertyFlag.Travel) && string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase))
+                        return p;
+            return null;
+        }
+
+        static UELib.Core.UProperty FieldOf(UELib.Core.UStruct st, string name)
+        {
+            for (UELib.Core.UStruct s = st; s is not null; s = s.Super as UELib.Core.UStruct)
+                foreach (UELib.Core.UProperty f in s.EnumerateFields<UELib.Core.UProperty>())
+                    if (string.Equals(f.Name, name, StringComparison.OrdinalIgnoreCase)) return f;
+            return null;
+        }
+
+        static UELib.Core.UStruct StructOf(UELib.Core.UProperty p, string where)
+            => p is UELib.Core.UStructProperty sp ? TravelStruct(sp, where) : null;
 
         // A travel URL is `Map.unr?options`. The map name is split off here;
         // the frontend turns it into a file path (it owns the file system).

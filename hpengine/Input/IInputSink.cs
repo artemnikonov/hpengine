@@ -26,6 +26,8 @@ namespace HPEngine.Input
         void CharInput(int ch);
         // WM_SETFOCUS / WM_KILLFOCUS: UInput::ResetInput (Core UEInput.ResetInputFull).
         void Focus(bool focused);
+        // WM_ACTIVATE / WM_SIZE: Audio->SetViewport(NULL / viewport) (Core UEGalaxyAudio.SetViewport).
+        void AudioViewport(bool present);
         // Alt+Enter: UWindowsViewport::ToggleFullscreen (WinDrv.dll.c:3335-3343), Core UEConsoleCommand.
         void ToggleFullscreen();
     }

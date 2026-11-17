@@ -52,7 +52,7 @@ namespace HPEngine.Packaging
         static bool Code(string value) => value is { Length: >= 2 and <= 4 } && value.All(c => c is >= 'a' and <= 'z');
 
         // appLoadFileToString: UTF-16 with a BOM, otherwise ISO-8859-1 (UELocalization.DecodeFileBytes).
-        static string Load(string path)
+        internal static string Load(string path)
         {
             byte[] b = File.ReadAllBytes(path);
             if (b.Length > 1 && (b.Length & 1) == 0 && b[0] == 0xff && b[1] == 0xfe) return Encoding.Unicode.GetString(b, 2, b.Length - 2);

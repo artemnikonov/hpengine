@@ -86,12 +86,16 @@ namespace HP1.UEScript
         // UGameEngine::SetProgress (Engine.dll.c:16180-16265, export 0x149c): on Viewports(0)->Actor —
         // ProgressMessage[0] = Str1, ProgressColor[0].RGB = 255, ProgressMessage[1] = Str2, ProgressColor[1].RGB = 255,
         // ProgressTimeOut = Seconds + Actor.Level.TimeSeconds (offsets by audit/prop_offsets.py: +0x6f4/+0x700,
-        // +0x754/+0x758, +0x774). Seconds == -1 calls ShowUpgradeMenu first (not reached here).
+        // +0x754/+0x758, +0x774). Seconds == -1 (fcomp 0x10399391, ZF only) first runs the ShowUpgradeMenu event:
+        // FindFunctionChecked(Actor, NAME ShowUpgradeMenu [0x105e9da4], 0) then ProcessEvent(fn, NULL, NULL)
+        // (0x103993a9..0x103993c3), and continues with the same writes (ProgressTimeOut = -1 + TimeSeconds).
+        // Original: Engine.dll ?SetProgress@UGameEngine@@UAEXPBG0M@Z [HP1 0x10399350]
         void SetProgress(UEInterpreter interp, string str1, string str2, float seconds)
         {
             if (Viewport?.GetProp(PK.Actor) is not UEObject player) return;
             if (seconds == -1f)
-                throw new NotSupportedException("SetProgress(-1): ShowUpgradeMenu branch not ported");
+                interp.Invoke(player, interp.FindEventFunction(player, "ShowUpgradeMenu")
+                    ?? throw new InvalidOperationException("SetProgress(-1): FindFunctionChecked ShowUpgradeMenu failed (fatal in the original)"));
             if (player.GetProp("ProgressMessage") is not System.Collections.IList msg || msg.Count < 2
                 || player.GetProp("ProgressColor") is not System.Collections.IList col || col.Count < 2
                 || col[0] is not UEObject c0 || col[1] is not UEObject c1)
@@ -216,6 +220,7 @@ namespace HP1.UEScript
         // the interpreter currently sees.
         internal void ApplyLoadMapLevelEnterText(string urlMap)
         {
+            _loadUrlMap = urlMap;   // URL.Map of this LoadMap: HP2's LoadPersistentActors takes it too
             UEObject level = Actors.Count > 0 ? Actors[0] : null;
             if (level is null || !UEInterpreter.ClassIsA(level.Class, "LevelInfo"))
                 throw new InvalidOperationException("LoadMap LevelEnterText: the world's Actors[0] is not a LevelInfo");

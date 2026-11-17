@@ -21,19 +21,27 @@
 // OMITTED (D06 — only particles read the wind):
 //  * FLUCTUATION (WindFluctuation != 0): shipped adds lattice noise
 //    FUN_104315d0 (32-unit cell, permutation table 0x105f7c18 that the first
-//    call shuffles with 256 appRand). Table indices are a signed remainder:
-//    for a negative cell coordinate the code reads memory BEFORE the table (process
-//    BSS, Engine statics) — impossible to reproduce without a live process image
+//    call shuffles with 256 appRand). Table indices are a signed remainder
+//    (`and ecx, 0x800000ff; jns; dec; or ecx, 0xffffff00; inc`, 0x104316ee..0x10431706):
+//    for a negative cell coordinate the code reads up to 255 bytes BEFORE the table,
+//    Engine's BSS at 0x105f7b19..0x105f7c17: the FURL::Default* FStrings (exported
+//    data, 0x105f7b68 DefaultSaveExt .. 0x105f7be8 DefaultProtocol, 0x105f7bf4
+//    DefaultPort) — the image holds zeros there, the live process the heap
+//    pointers of the Default.ini strings the allocator returned at start-up — and
+//    the LineCheck flag DAT_105f7b54. No value of the original exists to port
 //    (same nature as gesture frame 426). Measured: of 200 random points within
 //    ±6000 units only 46 stay entirely inside the table. The noise structure was fitted
 //    to the oracle (16 of 46 bit-exact, the rest is x87 addition order) and is NOT
 //    closed. The port prints STOP once and omits the noise term — like the
 //    MultiLineCheck tie, the world does not stop.
-//  * Shipped's wind list is global and filled by the AWind CONSTRUCTOR
-//    (Engine.dll.c:49003-49037), so it also holds class default objects
-//    (WindSpeed 256, radius 32² = 1024 units around the origin, Level = NULL
-//    — within that radius shipped would dereference a null pointer). The port
-//    walks the level's live actors in Actors order; class defaults do not take part.
+//  * Shipped's wind list (Engine 0x105f7d20 data, 0x105f7d24 count) is global: the AWind constructor appends
+//    (Engine.dll.c:49003-49037) and AWind::Destroy [HP1 0x10430c40] removes (Engine.dll.c:158473-158522). The C++ constructor runs only
+//    through UClass::ClassConstructor (+0x4e8), whose one caller is UObject::StaticConstructObject (Core 0x101620bb):
+//    level load and Spawn. Class default objects never pass it (InitClassDefaultObject [Core 0x1015bea0] only copies
+//    the vtable and InitProperties; UClass::Register calls the StaticConstructor at +0x4ec, AWind has none), so the
+//    list is exactly the live AWind objects. LoadMap collects the old level after the new one is set up
+//    (Engine.dll.c:247126, before its first tick). The port walks the level's live actors in Actors order
+//    (IsWindSource); no shipped script destroys a Wind (when AWind::Destroy runs for a destroyed one is not checked).
 //
 // Checked against the real GetWind under unicorn.
 using System;
@@ -201,13 +209,24 @@ namespace HP1.UEScript
             return v;
         }
 
+        static bool IsWindSource(UEObject w) => w is not null && !w.Destroyed && UEInterpreter.ClassIsA(w.Class, "Wind");
+
+        // The length of GetTotalWind's list (its loop count, 0x104321a5..0x104321e7).
+        public int WindSourceCount()
+        {
+            int n = 0;
+            foreach (UEObject w in Actors) if (IsWindSource(w)) n++;
+            return n;
+        }
+
+        // Original: Engine.dll ?GetTotalWind@AWind@@SA?AVFVector@@PAVULevel@@ABV2@@Z [HP1 0x10432180]
         // AWind::GetTotalWind: sum over all winds (shipped does not read the ULevel argument).
         public Vector3 TotalWind(Vector3 point)
         {
             float x = 0f, y = 0f, z = 0f;
             foreach (UEObject w in Actors)
             {
-                if (w is null || w.Destroyed || !UEInterpreter.ClassIsA(w.Class, "Wind")) continue;
+                if (!IsWindSource(w)) continue;
                 Vector3 v = WindAt(UEInterpreter.AsVector3(w.GetProp(PK.Location)), UEInterpreter.AsRotator(w.GetProp(PK.Rotation)),
                     UEInterpreter.AsFloat(w.GetProp(PK.WindSpeed)), (byte)UEInterpreter.ToInt(w.GetProp(PK.WindRadius)),
                     (byte)UEInterpreter.ToInt(w.GetProp(PK.WindRadiusInner)), (byte)UEInterpreter.ToInt(w.GetProp(PK.WindFluctuation)),

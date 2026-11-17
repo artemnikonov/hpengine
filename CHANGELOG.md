@@ -1,5 +1,78 @@
 # Changelog
 
+## 0.4.0-beta — 2026-11-17
+
+Updating from 0.3.0:
+
+- A 0.3.0 launcher updates itself (macOS, Windows, Linux). Your game, saves, settings and mods stay where they are.
+- Saves of 0.3.0 load in 0.4.0. Saves made by 0.4.0 use a newer save format and do not load in 0.3.0 (keep a copy of
+  the `Save` folder if you want to go back).
+
+New:
+
+- Redesigned launchers. macOS and Windows/Linux now have the same features: the window in the selected game's colours,
+  one main button per screen, rarely used actions in **Menu** (**This game**: open the saved games or logs folder,
+  install again, reset settings, reset gamepad bindings, and **Remove game** last, in red; **Launcher**: check for
+  updates, Add to Steam on Linux, About), the Mods card opening a Mods page, the **Language** row only when your game
+  files have more than one language (now on macOS too), and the **Start map** list for mods that add maps. The Menu,
+  Language and Start map lists open at their button and scroll inside the window.
+- The launchers work with a gamepad (both launchers, the same layout): A selects, B goes back, LB/RB switch the game,
+  Start opens the Menu, Y plays, the d-pad or stick moves between buttons; the button hints show only while a pad is
+  connected.
+- The launchers keep errors and logs per game: an error is shown on its game's tab, and **Open logs folder** opens that
+  game's logs.
+- The launcher has a Harry Potter 2 tab, shown as "Coming soon" and not selectable yet.
+- Launchers: enabled mods show their apply order (a higher number wins a file both mods have), and two enabled mods
+  with the same file are named on the Mods page.
+- Space now also turns the first page of a story, so one-page stories can be skipped too, still only once the page has
+  been shown for 2 seconds (not original).
+- The log's "[Overrides] WARNING: ... differs" lines compare what a function does (its code with references resolved,
+  flags, parameters), not its file bytes: a mod package recompiled without touching a function no longer reports it
+  (the Unofficial Widescreen Patch: 2 lines instead of 14; Movement & Camera: none instead of 2).
+
+Fixed:
+
+- Two-sided faces of characters (Harry under the Invisibility Cloak in Lev4_Sneak) get the original's small depth
+  offset. Wider than 800 pixels the offset stays at its 800-wide size, so Harry's robe does not show through his neck
+  at high resolutions (not original: the original's offset grows with the screen width, and at 4K/5K the robe came
+  through his neck in the first level's Dumbledore cutscene). At 800 wide and below the picture is the original's.
+- Russian edition: menu and book text (drawn with the bundled Liberation Sans in place of MS Sans Serif) is now smooth
+  (antialiased) and drawn at the interface scale instead of jagged, pixel-doubled glyphs whose thin strokes could
+  vanish (not original: the original draws small aliased pixel text). Line breaks and text layout are unchanged.
+- A mod that asks for a native font other than MS Sans Serif (for example 25 Years HD) no longer stops the game: every
+  face is drawn with the same bundled Liberation Sans (not original: on Windows the original takes whatever substitute
+  font Windows picks).
+- macOS: the game started from the launcher gets the keyboard and mouse focus on its first launch.
+- Lighting on moving doors and platforms is computed from the surface as it is drawn, as the original does (checked
+  against the running original on 69 movers); a light-colour rounding order is corrected (it changes the lightmaps of
+  Lev2_Fire2); lights that take their colour from a palette (LightType 8/9, not used by the shipped maps) are lit as in the
+  original instead of being refused.
+- Particles near wind (the torches in the dungeons and in Fluffy's room, Fluffy's flute effect) and the cauldron and
+  lock effects drawn after them start their spin as in the original.
+- Russian edition: the wand under the Invisibility Cloak (Lev4_Sneak) draws its faces in the original's order.
+- Collision of moving brushes, the collision boxes of animated characters, several BSP surface tests and the reference
+  pose of five meshes are now computed with the original's exact floating-point order.
+- A mod's tracker song (an `.umx` module such as IT) is silent as in the original with the game's default
+  `UseDigitalMusic=False`, without an error line; with `UseDigitalMusic=True` it fails to load and is logged as in the
+  original, whose tracker player cannot load any known module either (a module the original could load still stops
+  with a clear message).
+- Music requested at a song section other than 0 (a mod's `ClientSetMusic` with a section) plays like section 0, as in
+  the original, instead of stopping the game; an `OutputRate` in `Default.ini` that the original does not recognise
+  (e.g. `OutputRate=22050`) now means 8000 Hz as in the original instead of an error; an mp2 sound whose frames change
+  sample rate mid-stream decodes as in the original (a change of channel count still stops with a clear message).
+- A script texture import (`CreateTextureFromBMP`) of an 8-bit `.pcx` file works as in the original instead of
+  stopping the game, and textures named `<name>_A00`, `_A01`, ... are linked into an animation chain as the original
+  does (24-bit images still stop with a clear message).
+- More of the original engine is available to mods: config arrays and per-object config files, object/class/struct
+  values in property text and console commands, console `SET <class> <property> <value>`, fonts with stored
+  properties, the original's localized True/False words in other languages.
+
+Known issues:
+
+- Loading a save made with a mod (for example Restored) while that mod is switched off restarts the level, and Harry
+  can die at once, with a death reload that never completes. Switch the mod back on to load such a save. A fix is
+  planned for 0.4.1.
+
 ## 0.3.0-beta — 2026-11-15
 
 New:

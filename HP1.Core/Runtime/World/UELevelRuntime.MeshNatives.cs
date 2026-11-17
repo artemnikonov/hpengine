@@ -87,14 +87,12 @@ namespace HP1.UEScript
                 UEInterpreter.AsFloat(self.GetProp(PK.CollisionHeight)));
         }
 
-        // UMesh::GetCollisionBoundingBox with bool = 0 (Engine.dll.c:33476-33600): Min/Max = (Bound − Origin) ·
-        // (DrawScale·Scale) on X/Y, ((Bound − Origin)·DrawScale)·Scale.z on Z; extent = Max − Min.
+        // UMesh::GetCollisionBoundingBox with bool = 0 (CylinderExtent.MeshLocalBox); extent = Max − Min, one fsub each
+        // [HP1 0x1040aa96..0x1040aac9].
         public static Vector3 MeshLocalRenderExtent(Hp1MeshHashFields f, float drawScale)
         {
-            float sx = drawScale * f.Scale.x, sy = drawScale * f.Scale.y;
-            Vector3 mn = new Vector3((f.BoundMin.x - f.Origin.x) * sx, (f.BoundMin.y - f.Origin.y) * sy, (f.BoundMin.z - f.Origin.z) * drawScale * f.Scale.z);
-            Vector3 mx = new Vector3((f.BoundMax.x - f.Origin.x) * sx, (f.BoundMax.y - f.Origin.y) * sy, (f.BoundMax.z - f.Origin.z) * drawScale * f.Scale.z);
-            return mx - mn;
+            (Vector3 mn, Vector3 mx) = CylinderExtent.MeshLocalBox(f.BoundMin, f.BoundMax, f.Scale, f.Origin, drawScale);
+            return new Vector3(mx.x - mn.x, mx.y - mn.y, mx.z - mn.z);
         }
 
         // Primitive box with bool = 0: UBox (0x103049da) ±R, ±(W ≠ 0 ? W : R), ±H; UOrientedCylinder (0x103047eb)

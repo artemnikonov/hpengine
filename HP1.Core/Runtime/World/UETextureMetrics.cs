@@ -69,7 +69,7 @@ namespace HP1.UEScript
             if (_open.TryGetValue(pkgPath, out var pkg)) return pkg;
             try
             {
-                pkg = UnrealLoader.LoadPackage(pkgPath, FileAccess.Read);
+                pkg = HP1.UEScript.UEPackageOpen.Load(pkgPath, FileAccess.Read);
                 pkg.InitializePackage(UnrealPackage.InitFlags.All);
             }
             catch (Exception e)

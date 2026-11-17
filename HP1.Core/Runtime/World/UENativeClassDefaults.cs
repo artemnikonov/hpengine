@@ -104,6 +104,71 @@ namespace HP1.UEScript
 
         public static IReadOnlyList<Entry> All => Table;
 
+        // ── WHAT A DLL-ONLY CLASS DECLARES ──────────────────────────────────
+        //
+        // UObject::StaticExec GET asks FindField<UProperty>(Class, name) BEFORE any value (Core.dll.c:3389-3419): a
+        // property the class chain does not declare answers "Unrecognized property <name>", whatever the ini holds
+        // (LoadConfig reads declared properties only). A DLL-only class's own properties are the ones its
+        // StaticConstructor creates; a row lists them, with its super class (FindField walks own, then super). A super
+        // class without a row is a script class: its fields come from the package (UEClassRegistry).
+        public readonly struct DllClass
+        {
+            public DllClass(UEEdition.Game game, string cls, string super, string[] properties, string source)
+            {
+                Game = game; Class = cls; Super = super; Properties = properties; Source = source;
+            }
+            public readonly UEEdition.Game Game;
+            public readonly string Class, Super, Source;
+            public readonly string[] Properties;
+        }
+
+        static readonly DllClass[] DllClasses =
+        {
+            new(UEEdition.Game.HP2, "ALAudio.ALAudioSubsystem", "Engine.AudioSubsystem",
+                new[] { "UseEAX", "CompatibilityMode", "UsePrecache", "ReverseStereo", "Channels", "MusicVolume", "SoundVolume",
+                        "DopplerFactor", "RollOff" },
+                "Original: ALAudio.dll ?StaticConstructor@UALAudioSubsystem@@QAEXXZ [HP2 0x10002800]: up to its only ret "
+                + "(0x10002aeb) nine FName(name, 1) + new(GetClass()) UBool/UInt/UFloatProperty + UProperty::UProperty(0, offset, "
+                + "\"ALAudio\", 0x4000): UseEAX bool +0xc0, CompatibilityMode bool +0xc4, UsePrecache bool +0xbc, ReverseStereo "
+                + "bool +0xb8, Channels int +0xb4, MusicVolume float +0xa8, SoundVolume float +0xac, DopplerFactor float +0xa4, "
+                + "RollOff float +0xb0 (UTF-16 names at 0x1000e0f4..0x1000e23c). Super: the class registration [HP2 ALAudio "
+                + "0x100025d0] UClass::UClass(.., 0xf0, 4, Engine ?PrivateStaticClass@UAudioSubsystem (import 0x10009220), .., "
+                + "\"ALAudioSubsystem\", .., \"System\", 0x4084004, 0x10001cf0, 0x10002800)"),
+            new(UEEdition.Game.HP2, "Engine.AudioSubsystem", "Core.Subsystem", Array.Empty<string>(),
+                "Engine.dll's class registration [HP2 0x10389200..0x10389290] UClass::UClass(.., 0x2c, 5, Core "
+                + "?PrivateStaticClass@USubsystem (import 0x105ffe3c), .., \"AudioSubsystem\", \"Engine\", \"System\", 0x4084004, "
+                + "?InternalConstructor@UObject, ?StaticConstructor@UObject (import 0x105ffb3c)); UObject::StaticConstructor "
+                + "[HP2 Core 0x10101041 -> 0x1015c4b0] is a bare ret: no properties"),
+        };
+
+        // Whether FindField on `cls` (an ini section name, Package.Class) misses `property`: true only for a tabled DLL-only
+        // class whose whole chain is known; false otherwise (not tabled, or the property is declared).
+        public static bool Undeclared(string cls, string property)
+        {
+            bool tabled = false;
+            for (string c = cls; c is not null;)
+            {
+                DllClass row = Array.Find(DllClasses, r => r.Game == UEGameProfile.Current.Game
+                                                           && string.Equals(r.Class, c, StringComparison.OrdinalIgnoreCase));
+                if (row.Class is null)
+                {
+                    if (!tabled) return false;
+                    int dot = c.IndexOf('.');
+                    UELib.Core.UClass script = dot > 0 ? HP1.Core.UEClassRegistry.Shared?.Find(c.Substring(0, dot), c.Substring(dot + 1)) : null;
+                    if (script is null)
+                        throw new NotSupportedException($"FindField: super class {c} of {cls} is neither tabled nor a loaded script class (STOP)");
+                    for (UELib.Core.UClass k = script; k is not null; k = HP1.Core.UEClassRegistry.Shared.CanonicalSuper(k))
+                        foreach (UELib.Core.UProperty p in k.EnumerateFields<UELib.Core.UProperty>())
+                            if (string.Equals(p.Name, property, StringComparison.OrdinalIgnoreCase)) return false;
+                    return true;
+                }
+                tabled = true;
+                if (Array.Exists(row.Properties, p => string.Equals(p, property, StringComparison.OrdinalIgnoreCase))) return false;
+                c = row.Super;
+            }
+            return tabled;
+        }
+
         // The class default is the LOWEST value layer, exactly as in shipped:
         // the saved overlay overrides ini, ini overrides the default.
         public static bool TryGet(string cls, string property, out string value)

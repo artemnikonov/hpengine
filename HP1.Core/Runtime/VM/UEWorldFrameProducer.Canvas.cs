@@ -25,7 +25,7 @@ namespace HP1.UEScript
         // Returns the frame size after the console border (for FSceneNode).
         (int X, int Y) HudPreRender(UEInterpreter interp, UEObject player)
         {
-            _hud.Clear();
+            _hud.Clear(); _hudDepthZ = null;
             if (interp is null || player is null)
                 return (_viewportX, _viewportY);
             if (_canvas is null)
@@ -76,7 +76,7 @@ namespace HP1.UEScript
         }
         public WorldFrame BuildLevelInfoFrame(UEInterpreter interp, int tick, string text)
         {
-            _hud.Clear();
+            _hud.Clear(); _hudDepthZ = null;
             UEObject c = Console;
             if (c is not null)
             {
@@ -123,8 +123,9 @@ namespace HP1.UEScript
                 _canvas.Props["SizeX"] = sizeX; _canvas.Props["ClipX"] = clipX;
                 if (LevelInfoOffsetX > 0) ShiftHud(0, LevelInfoOffsetX);
             }
+            RequireHudWithoutDepth();
             HudCommand[] hud = _hud.ToArray();
-            _hud.Clear();
+            _hud.Clear(); _hudDepthZ = null;
             return new WorldFrame(tick, "levelinfo", Array.Empty<ActorSnapshot>(), default,
                 Array.Empty<AudioCommand>(), default, hud, Array.Empty<ParticleInstance>(), -1, canvasScale: _canvasScale);
         }
@@ -144,6 +145,15 @@ namespace HP1.UEScript
         //   ClearZ -> Viewport->RenDev(+0x5c) vtable +0x9c (UD3DRenderDevice vtable 0x1001a010 + 0x9c = ClearZ) (Frame +0x7c);
         //   Render(+0x80) vtable +0x78 (URender vtable 0x10b38038 + 0x78 = DrawActor 0x10b01091) (Frame, A);
         //   A(+0x28) |= 2 — bHidden = 1 whatever it was before (0x10389a17); RendMap = saved (0x10389a24).
+        // UCanvas::execDrawClippedActor (Engine.dll.c:157170; export 0x4b42 -> 0x10389b30, disasm 0x10389b30..0x10389d1d) is
+        // the same sequence around a clipped frame: Frame(+0x7c) X(+0xa8) = X, Y(+0xac) = Y, XB(+0xb0) = XB, YB(+0xb4) = YB
+        // (old values saved), FSceneNode::ComputeRenderCoords(Frame, (0,0,0), (0,0,0)), ComputeRenderSize(Frame); then
+        // RendMap, bHidden = 0, ClearZ (Viewport->RenDev +0x9c on the clipped frame), Render DrawActor(Frame, A), bHidden = 1,
+        // RendMap restored, X/Y/XB/YB restored, ComputeRenderSize(Frame). NOT restored: the frame's Coords/Uncoords stay
+        // those of ComputeRenderCoords(0, 0) — the camera at the origin, unrotated — and its size fields are recomputed in
+        // the caller's x87 precision. Readers of the master frame after Console.PostRender: URender::PostRender (RendMap
+        // only; DrawStats, not player-visible) and a later DrawActor/DrawClippedActor of a drawable actor (a loud STOP
+        // below), so the port keeps no frame coords.
         // URender::DrawActor (0x10b33980): FDynamicSprite for A, FDynamicSprite::Setup (0x10b30c70) against the canvas frame,
         // nonzero -> DrawActorSprite. Ported here: the two Setup rejections that read no frame, BOTH only with ShowFlags & 0x20
         // clear (DrawType 1/7 and that flag jump to the sprite path 0x10b30e4b/0x10b30e4e first, 0x10b30c8a..0x10b30ca9) —
@@ -151,15 +161,50 @@ namespace HP1.UEScript
         //   DrawType 2, not a ParticleFX (0x10b30cfc loop), no Mesh (+0x164) and no Brush (+0x168): AActor::
         //   GetRenderBoundingBox (0x1037aa40) returns zero FCoords, |X|² == 0.0 (fcomp 0x10b385bc at 0x10b30d89) -> 0.
         //   (Inventory.BecomeItem sets Mesh = PlayerViewMesh, None for baseWand: Weapon.RenderOverlays of the wand.)
-        // NOT PORTED (loud): ClearZ, and every actor Setup could accept — DrawActorSprite on the canvas frame.
+        // ClearZ: RenDev->ClearZ = UD3DRenderDevice::ClearZ (vtable 0x1001a010 + 0x9c -> 0x10001041 -> 0x10008450):
+        //   IDirect3DDevice7::Clear(0, NULL, D3DCLEAR_ZBUFFER, 0, 1.0, 0) — the depth buffer only, to the far value. No
+        //   visible effect, so Core only reports the call (ClearZTap) and the frontend gets nothing. What can follow it in
+        //   the frame (UGameEngine::Draw, export 0x10303dfa, Engine.dll.c:117951..117996, after DrawWorld and RenDev +0xb0:
+        //   PlayerPawn and Console PostRender, the demo text, Render PostRender stats, Viewport Unlock) is canvas output:
+        //   DrawTile / DrawTileClipped tiles (execDrawTile / execDrawTileClipped pass Canvas.Z, this+0x4c), page-font glyphs
+        //   (FUN_10388b60, Canvas+0x4c), native-font text (WinDrv UWindowsViewport::DrawString: GDI DrawText, no depth),
+        //   and further DrawActor / DrawClippedActor / DrawPortal (loud STOPs here for anything drawable).
+        //   UD3DRenderDevice::DrawTile (0x100060b0) calls only SetBlending (0x100092d0: ZWRITEENABLE 0xe = the opaque bit,
+        //   never ZENABLE / ZFUNC) and draws at z = (1/Z)·a44 + a34 (0x10006118..0x1000613c); a34 = 0x3f800100,
+        //   a44 = 0xbf800100 (SetRes 0x1000b360, at 0x1000d336 / 0x1000d34a), so Canvas.Z = 1 gives exactly 0. ZENABLE is
+        //   set only in SetRes (0x1000d5fd = 1, 0x1000d61c = 2), ZFUNC stays LESSEQUAL (restored to 4 by
+        //   DrawComplexSurface and EndFlash): a z = 0 tile passes against any depth, cleared or not. Lock (0x100030c0)
+        //   clears Z every frame (Clear flags 2, 3 with +0xa6c & 1), so nothing reads the cleared depth in a later frame.
+        //   Shipped Canvas.Z writes (bytecode of every package; only HPMenu and UWindow import Canvas.Z): Canvas.Reset,
+        //   WindowConsole.RenderUWindow, HPConsole.RenderUWindow and the default, all 1.0.
+        //   Canvas.Z != 1: loud STOP (NoteCanvasZ / RequireHudWithoutDepth). NOT covered: SetRes's
+        //   W-buffer branch (ZENABLE 2 with D3DPRASTERCAPS_WBUFFER and a 16-bit Z: tile w = 1 against the world's w).
+        // NOT PORTED (loud): every actor Setup could accept — DrawActorSprite on the canvas frame (the mesh or
+        // sprite projected through the canvas frame's Coords, lit by the light manager for that frame, Z-tested against
+        // what the frame drew; none of it read yet, and no carrier: Restored HP1FlyKeys reaches only the meshless wand).
+        // Original: Engine.dll UCanvas::execDrawActor [HP1 0x10389930]
         internal void CanvasDrawActor(UEObject canvas, UEObject a, bool wireFrame, bool clearZ)
+            => DrawActorOnFrame(canvas, a, wireFrame, clearZ, null);
+
+        // Original: Engine.dll ?execDrawClippedActor@UCanvas@@QAEXAAUFFrame@@QAX@Z [HP1 0x10389B30] [HP2 0x10391E30]
+        internal void CanvasDrawClippedActor(UEObject canvas, UEObject a, bool wireFrame, int x, int y, int xb, int yb, bool clearZ)
+        {
+            FrameOf(canvas);   // Frame(+0x7c) is written first: no frame, shipped dereferences NULL
+            DrawActorOnFrame(canvas, a, wireFrame, clearZ, (x, y, xb, yb));
+        }
+
+        // Judge tap (canvas_judge.py): the state at the point the original calls Render->DrawActor — the actor, the
+        // clipped frame (null: the canvas frame as it is) and the viewer's RendMap. Observes only.
+        internal static Action<UEObject, (int X, int Y, int XB, int YB)?, object> DrawActorReachedTap;
+        // Judge tap: the RenDev->ClearZ call (the clipped frame, null: the canvas frame). Observes only.
+        internal static Action<(int X, int Y, int XB, int YB)?> ClearZTap;
+
+        void DrawActorOnFrame(UEObject canvas, UEObject a, bool wireFrame, bool clearZ, (int X, int Y, int XB, int YB)? clip)
         {
             UEObject viewer = (canvas?.GetProp("Viewport") as UEObject)?.GetProp(PK.Actor) as UEObject
                 ?? throw new InvalidOperationException("Canvas.DrawActor: no Canvas.Viewport.Actor (shipped dereferences it)");
             if (a is null) throw new InvalidOperationException("Canvas.DrawActor(None): shipped writes None+0x28 (access violation)");
             // The refusals come before the RendMap / bHidden writes (they read neither), so a refused call changes no state.
-            if (clearZ)
-                throw new NotSupportedException("Canvas.DrawActor ClearZ reached — not ported: RenDev->ClearZ(Frame) on the canvas frame");
             int dt = UEValue.ToInt(a.GetProp(PK.DrawType));
             bool icons = (UEValue.ToInt(viewer.GetProp(PK.ShowFlags)) & 0x20) != 0;
             bool rejected = !icons && (dt is not (1 or 7 or 2 or 8)
@@ -170,6 +215,8 @@ namespace HP1.UEScript
             object rendMap = viewer.GetProp(PK.RendMap);
             if (wireFrame) viewer.Props["RendMap"] = 1;
             a.Props["bHidden"] = false;
+            if (clearZ) ClearZTap?.Invoke(clip);   // no visible effect (see above)
+            DrawActorReachedTap?.Invoke(a, clip, viewer.GetProp(PK.RendMap));
             a.Props["bHidden"] = true;
             viewer.Props["RendMap"] = rendMap;
         }
@@ -185,6 +232,7 @@ namespace HP1.UEScript
             var post = interp.FindEventFunction(player, "PostRender");
             if (post is not null) interp.Invoke(player, post, new object[] { _canvas });
             ConsolePostRender(interp);
+            RequireHudWithoutDepth();
             _hudCache = _hud.ToArray();
         }
 
@@ -288,6 +336,27 @@ namespace HP1.UEScript
         }
 
         static float CanvasF(UEObject c, string p) => UEValue.AsFloat(c.GetProp(p));
+
+        // Canvas.Z (+0x4c) reaches the device with every tile and page-font glyph: UD3DRenderDevice::DrawTile draws at
+        // z = (1/Z)·a44 + a34 (0x10006118..0x1000613c, a34 = 0x3f800100, a44 = 0xbf800100), depth-tested LESSEQUAL
+        // against what the frame drew (see ClearZ above). Z = 1 gives z = 0, which passes against any depth: the port's
+        // depth-less HUD is exact only there. Any other Z (every shipped write is 1.0) is a loud STOP (DECISIONS.md)
+        // when the HUD is handed to the frontend (the canvas bodies themselves stay judgeable at any Z).
+        float? _hudDepthZ;
+        void NoteCanvasZ(UEObject canvas)
+        {
+            float z = CanvasF(canvas, "Z");
+            if (z != 1f) _hudDepthZ ??= z;
+        }
+        void RequireHudWithoutDepth()
+        {
+            if (_hudDepthZ is float z)
+            {
+                _hudDepthZ = null;
+                throw new NotSupportedException($"Canvas.Z = {z} on a tile/glyph: the device depth (1/Z)·a44 + a34 against the "
+                    + "frame's depth is not ported — the HUD has no depth (STOP)");
+            }
+        }
         static UEVector DrawColorOf(UEObject canvas)
             => canvas.GetProp(PK.DrawColor) is UEObject c
                 ? new UEVector(UEValue.AsByte(c.GetProp(PK.R)),
@@ -364,7 +433,11 @@ namespace HP1.UEScript
             // ALREADY the clipped width, so the pen follows what was drawn.
             // Disasm: fld SpaceX; fadd CurX; fadd XL; fstp CurX (execDrawTile 0x103897c4..0x103897cd,
             // execDrawTileClipped 0x1038a15e..0x1038a167); PC24 window — each addition in float (TilePenAdvance).
-            canvas.Props["CurX"] = TilePenAdvance(CanvasF(canvas, "SpaceX"), curX, xl);
+            // HP2's execDrawTile associates the other way: fld XL; fadd SpaceX; fadd CurX [HP2 0x10391a94..0x10391a9d];
+            // its execDrawTileClipped keeps HP1's order [HP2 0x1039248e..0x10392497].
+            canvas.Props["CurX"] = !clipped && UEGameProfile.Current.Game == UEEdition.Game.HP2
+                ? TilePenAdvanceHp2DrawTile(CanvasF(canvas, "SpaceX"), curX, xl)
+                : TilePenAdvance(CanvasF(canvas, "SpaceX"), curX, xl);
             // fld CurYL; fcom YL; test ah,1 (0x103897d0 / 0x1038a16a): YL is taken when CurYL < YL
             // and on NaN ("unordered" sets C0) — MathF.Max would return NaN.
             float curYL = CanvasF(canvas, "CurYL");
@@ -382,10 +455,10 @@ namespace HP1.UEScript
         // Render window (FastMathWindow, HUD/console) — PC24, every operation in float,
         // like the exec helpers ClipTileAxis*; outside the window (LoadMap loading screen)
         // — PC64, intermediates in the register (modelled as double), stored as float.
-        // Rest of the body: Texture->Update/AnimCur (a texture with AnimNext is a STOP in
-        // TexturePolyFlags: Update is not ported), Lock with scale USize·UScale/USize
+        // Rest of the body: Texture->Update(Viewport->CurrentTime) and Texture = AnimCur when set
+        // (0x103877c8..0x103877f5, GIsEditor 0 in the game; CanvasAnimCur), Lock with scale USize·UScale/USize
         // (cancels against the device division) and device PolyFlags =
-        // exec flags | (Texture->PolyFlags & PF_Masked) (0x1038781f-0x1038782e).
+        // exec flags | (Texture->PolyFlags & PF_Masked) (0x1038781f-0x1038782e), both of AnimCur.
         // Core decides the flags and puts them into the command; the frontend only applies
         // the blend mode they select.
         internal void EmitTile(UEObject canvas, object tex, float x, float y, float xl, float yl,
@@ -448,15 +521,34 @@ namespace HP1.UEScript
             return true;
         }
 
+        // Original: Engine.dll ?DrawTile@UCanvas@@UAEXPAVUTexture@@MMMMMMMMPAVFSpanBuffer@@MVFPlane@@2K@Z [HP1 0x10387630]
         void EmitClippedTile(UEObject canvas, object tex, float x, float y, float xl, float yl,
             float u, float v, float ul, float vl, int style, int execFlags, bool clipped)
         {
+            tex = CanvasAnimCur(tex);
             Func<object, int> texFlags = TexturePolyFlags
                 ?? throw new InvalidOperationException("UCanvas::DrawTile: TexturePolyFlags not assigned (UELevelRuntime.FrameProducer)");
             int polyFlags = (texFlags(tex) & PF_Masked) | execFlags;
+            NoteCanvasZ(canvas);
             _hud.Add(new HudCommand(HudKind.Tile, x, y, xl, yl, u, v, ul, vl,
                 TexPathOf(tex), null, null, DrawColorOf(canvas), style,
                 !UEValue.ToBool(canvas.GetProp(PK.bNoSmooth)), clipped, polyFlags: polyFlags));
+        }
+
+        // UCanvas::DrawTile 0x103877c8..0x103877f5: Texture->Update(Viewport->CurrentTime) (vtable +0x7c), then Texture = AnimCur
+        // when non-null. A package texture's chain is Core's UETextureAnim (TextureUse); a runtime texture
+        // (CreateTextureFromBMP, its `_A##` links are live objects) has no chain state here: its AnimNext stays the loud STOP
+        // of TexturePolyFlags.
+        // Original: Engine.dll ?DrawTile@UCanvas@@UAEXPAVUTexture@@MMMMMMMMPAVFSpanBuffer@@MVFPlane@@2K@Z [HP1 0x10387630] (0x103877c8..0x103877f5)
+        object CanvasAnimCur(object tex)
+        {
+            if (tex is UEObject || tex is null) return tex;
+            string path = TexPathOf(tex);
+            string cur = TextureUse(path);
+            if (cur == path) return tex;
+            // The chain frame is resolved with the head's class (a frame of another class does not resolve: loud).
+            string cls = tex is UEResourceRef rr ? rr.Class : (tex as UELib.Core.UObject)?.Class?.Name;
+            return new UEResourceRef(cls, cur.Substring(cur.LastIndexOf('.') + 1), cur);
         }
 
         // Tile exec-body flags are THE SAME for execDrawTile (0x1038971d-0x10389750)
@@ -496,6 +588,11 @@ namespace HP1.UEScript
         // DrawTile/DrawTileClipped pen advance: (SpaceX + CurX) + XL, PC24 — each addition rounded to float.
         public static float TilePenAdvance(float spaceX, float curX, float xl)
             => (float)((float)(spaceX + curX) + xl);
+
+        // HP2 DrawTile pen advance: (XL + SpaceX) + CurX, PC24 as above.
+        // Original: Engine.dll ?execDrawTile@UCanvas@@QAEXAAUFFrame@@QAX@Z [HP1 0x103895F0] [HP2 0x103918B0]
+        public static float TilePenAdvanceHp2DrawTile(float spaceX, float curX, float xl)
+            => (float)((float)(xl + spaceX) + curX);
 
         internal static int TilePolyFlags(int style, bool noSmooth)
             => (style == 3 ? PF_Translucent : style == 4 ? PF_Modulated : 0)

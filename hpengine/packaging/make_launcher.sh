@@ -22,6 +22,8 @@
 #              (CI) makes the flat engine-only ones under the same names, so do not share an --out between the two.
 # Version: launcher/VERSION, the release tag without "v" (a "-" suffix marks a pre-release); Info.plist HPEngineVersion,
 # compared with the GitHub release tags; CFBundleShortVersionString is its numeric part.
+# HP2 in the launcher (Logic.cs / Launcher.swift Hp2Release): a release build (the default) shows the HP2 tab disabled,
+# "Coming soon"; HPENGINE_HP2=1 makes a preview build with the HP2 tab on (-p:HPEngineHp2=true, Info.plist HPEngineHp2).
 # Needs .NET SDK 9 and network access for the pinned downloads (or a filled HPENGINE_TOOLS_CACHE); osx-* also needs
 # an Apple Silicon Mac with Rosetta, Xcode Command Line Tools (swiftc, lipo, codesign, ditto) and cmake.
 # Nothing of the game is packed: publish.sh --check refuses game files, and HP1Setup carries only SHA-1 hashes.
@@ -31,6 +33,7 @@ REPO=$(cd "$HERE/../.." && pwd)
 fail() { echo "FAILED: $*" >&2; exit 1; }
 # As publish.sh RELEASE_PROPS: no debug symbols, source paths mapped (publish.sh --check refuses both in the package).
 RELEASE_PROPS="-p:DebugType=none -p:DebugSymbols=false -p:PathMap=$REPO=/_/"
+HP2_PREVIEW=; [ "${HPENGINE_HP2:-}" = 1 ] && HP2_PREVIEW=1 && echo "HPENGINE_HP2=1: a preview build, the HP2 tab on"
 
 OUT="$REPO/.artifacts/hpengine-packages"; REUSE=0
 while [ $# -gt 0 ]; do
@@ -92,7 +95,7 @@ for rid in "$@"; do
     esac
     dotnet publish "$REPO/launcher/Desktop/HPEngineLauncher.csproj" -c Release -r "$rid" --self-contained true \
         -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true \
-        ${PUBKEY:+-p:HPEngineUpdateKey=$PUBKEY} $ICON_PROP $RELEASE_PROPS -o "$OUT/Launcher-$rid" -nologo -v q > "$OUT/launcher-$rid.log" 2>&1 \
+        ${PUBKEY:+-p:HPEngineUpdateKey=$PUBKEY} ${HP2_PREVIEW:+-p:HPEngineHp2=true} $ICON_PROP $RELEASE_PROPS -o "$OUT/Launcher-$rid" -nologo -v q > "$OUT/launcher-$rid.log" 2>&1 \
         || { tail -30 "$OUT/launcher-$rid.log"; fail "$rid: Launcher publish"; }
     stage="$OUT/archive-$rid"; rm -rf "$stage"; mkdir -p "$stage"
     cp -R "$dir" "$stage/HPEngine" || fail "$rid: staging"
@@ -139,6 +142,9 @@ case " $* " in *" osx-"*)
     rm -f "$OUT/.building/Launcher-arm64" "$OUT/.building/Launcher-x86_64"
     cp -R "$OUT/HPEngine-osx-arm64" "$APP/Contents/Resources/HPEngine"
     cp -R "$OUT/HPEngine-osx-x64" "$APP/Contents/Resources/HPEngine-x64"
+    # The title font (Cormorant Garamond Bold, SIL OFL 1.1: the licence goes with it; Launcher.swift registerTitleFont).
+    cp "$REPO/launcher/fonts/CormorantGaramond-Bold.ttf" "$APP/Contents/Resources/" || fail "title font"
+    cp "$REPO/launcher/fonts/OFL.txt" "$APP/Contents/Resources/CormorantGaramond-OFL.txt" || fail "title font licence"
     # Each slice runs the runtime of its own architecture, and that runtime is entirely of that architecture.
     for a in arm64 x86_64; do
         rt=$(arch -$a "$APP/Contents/MacOS/Launcher" --runtime-path) || fail "Launcher --runtime-path under arch -$a"
@@ -163,7 +169,8 @@ case " $* " in *" osx-"*)
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleShortVersionString</key><string>${V%%-*}</string>
 	<key>HPEngineVersion</key><string>$V</string>${PUBKEY:+
-	<key>HPEngineUpdateKey</key><string>$PUBKEY</string>}
+	<key>HPEngineUpdateKey</key><string>$PUBKEY</string>}${HP2_PREVIEW:+
+	<key>HPEngineHp2</key><true/>}
 	<key>LSMinimumSystemVersion</key><string>13.0</string>
 	<key>LSApplicationCategoryType</key><string>public.app-category.games</string>
 	<key>NSHighResolutionCapable</key><true/>

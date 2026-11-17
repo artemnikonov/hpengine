@@ -234,16 +234,34 @@ namespace HP1.UEScript
             { Sequences = sequences; FrameVerts = frameVerts; AnimFrames = animFrames; }
         }
 
+        // ── PACKAGE VERSION BRANCHES OF THE UMesh WALK (B39) ──────────────────
+        // UPrimitive::Serialize (Engine 0x103fa0d0) and the second box of UMesh::Serialize (0x103b7d30..0x103b7d72) write the
+        // BoundingSphere as an FVector when Ver < 62 (cmp 0x3d / jg), with W from 62 on; the TArray<FSphere> elements the same
+        // (FUN_103ba650). A TLazyArray (FUN_103b9b30 verts, FUN_103b9d30 tris, FUN_103ba450 connects, FUN_103ba8b0 links,
+        // loading branch) reads its absolute skip offset first from 62 on; before 62 there is none: the count, then
+        // Count·sizeof(T) bytes (skip = Tell + Count·sizeof(T), then Seek).
+        // Original: Engine.dll ?Serialize@UPrimitive@@UAEXAAVFArchive@@@Z [HP1 0x103FA0D0]
+        // Original: Engine.dll ?Serialize@UMesh@@UAEXAAVFArchive@@@Z [HP1 0x103B7C50]
+        // Original: not exported: FUN_103b9b30, FUN_103b9d30, FUN_103ba450, FUN_103ba8b0 [HP1 0x103B9B30, 0x103B9D30,
+        //   0x103BA450, 0x103BA8B0] (the TLazyArray serializers UMesh::Serialize calls at 0x103b7c8b, 0x103b7c98, 0x103b7ce3,
+        //   0x103b7d7d through thunks 0x10302928, 0x103026ad, 0x1030106e, 0x1030443f)
+        protected int SphereSize => _version < 62 ? 12 : 16;
+        protected void SkipLazyArray(RawReader r, int elementSize, string label)
+        {
+            if (_version >= 62) r.Position = r.Int32();
+            else SkipArray(r, elementSize, label);
+        }
+
+        // Original: Engine.dll ?Serialize@UMesh@@UAEXAAVFArchive@@@Z [HP1 0x103B7C50]
         public UEMeshAnimInfo ReadMeshAnimInfo(PackageExport export)
         {
             var r = new RawReader(_data) { Position = export.Offset };
             SkipTaggedProperties(r);
-            if (_version <= 61) throw new NotSupportedException("mesh anim info: pre-62 package");
             int headerAt = r.Position;
-            r.Skip(12 + 12 + 1 + 16);
+            r.Skip(12 + 12 + 1 + SphereSize);
             int headerEnd = r.Position;
-            r.Position = r.Int32();   // verts
-            r.Position = r.Int32();   // tris
+            SkipLazyArray(r, 4, "verts");
+            SkipLazyArray(r, 20, "tris");
             int animSeqs = CheckedCount(r.CompactIndex(), "anim sequences");
             var seqs = new UEMeshAnimSeq[animSeqs];
             for (int i = 0; i < animSeqs; i++)
@@ -257,13 +275,13 @@ namespace HP1.UEScript
                 float rate = r.Single();
                 seqs[i] = new UEMeshAnimSeq(name, group, startFrame, numFrames, rate);
             }
-            r.Position = r.Int32();   // connects
+            SkipLazyArray(r, 8, "connects");
             r.Skip(headerEnd - headerAt);
-            r.Position = r.Int32();   // vertex links
+            SkipLazyArray(r, 4, "vertex links");
             int textures = CheckedCount(r.CompactIndex(), "textures");
             for (int i = 0; i < textures; i++) r.CompactIndex();
             r.Skip(CheckedCount(r.CompactIndex(), "bounding boxes") * 25);
-            r.Skip(CheckedCount(r.CompactIndex(), "bounding spheres") * 16);
+            r.Skip(CheckedCount(r.CompactIndex(), "bounding spheres") * SphereSize);
             // The UMesh scalar tail starts with FrameVerts and AnimFrames — exactly the two
             // numbers DrawLodMesh addresses a frame by.
             int frameVerts = r.Int32();
@@ -271,20 +289,19 @@ namespace HP1.UEScript
             return new UEMeshAnimInfo(seqs, frameVerts, animFrames);
         }
 
+        // Original: Engine.dll ?Serialize@UMesh@@UAEXAAVFArchive@@@Z [HP1 0x103B7C50]
         Hp1MeshHashFields ReadMeshPrefix(RawReader r, PackageExport export)
         {
             SkipTaggedProperties(r);
-            if (_version <= 61)
-                throw new NotSupportedException("mesh hash fields: pre-62 package");
 
             int headerAt = r.Position;
             var boundMin = new Vector3(r.Single(), r.Single(), r.Single());
             var boundMax = new Vector3(r.Single(), r.Single(), r.Single());
-            r.Skip(1 + 16); // box valid byte + sphere
+            r.Skip(1 + SphereSize); // box valid byte + sphere
             int headerEnd = r.Position;
 
-            r.Position = r.Int32();  // verts (lazy, absolute skip offset)
-            r.Position = r.Int32();  // tris
+            SkipLazyArray(r, 4, "verts");
+            SkipLazyArray(r, 20, "tris");
             int animSeqs = CheckedCount(r.CompactIndex(), "anim sequences");
             for (int i = 0; i < animSeqs; i++)
             {
@@ -293,7 +310,7 @@ namespace HP1.UEScript
                 for (int j = 0; j < notifies; j++) { r.Skip(4); r.CompactIndex(); }
                 r.Skip(4);
             }
-            r.Position = r.Int32();  // connects
+            SkipLazyArray(r, 8, "connects");
 
             int dupAt = r.Position;
             for (int i = 0; i < headerEnd - headerAt; i++)
@@ -302,11 +319,11 @@ namespace HP1.UEScript
                         $"mesh hash fields: duplicate bound mismatch at +{i} ({export.Name})");
             r.Skip(headerEnd - headerAt);
 
-            r.Position = r.Int32();  // vertex links (lazy)
+            SkipLazyArray(r, 4, "vertex links");
             int textures = CheckedCount(r.CompactIndex(), "textures");
             for (int i = 0; i < textures; i++) r.CompactIndex();
             r.Skip(CheckedCount(r.CompactIndex(), "bounding boxes") * 25);
-            r.Skip(CheckedCount(r.CompactIndex(), "bounding spheres") * 16);
+            r.Skip(CheckedCount(r.CompactIndex(), "bounding spheres") * SphereSize);
             // Scalar tail (UMesh::Serialize, this+0xf0..+0x128): dwords 4-6 =
             // Scale, 7-9 = Origin, 10-12 = RotOrigin.
             r.Skip(16);
@@ -545,11 +562,15 @@ namespace HP1.UEScript
             return ((b & 0x3f) << 8) | r.Byte();
         }
 
-        protected void SkipTaggedProperties(RawReader r)
+        protected void SkipTaggedProperties(RawReader r) => SkipTaggedProperties(r, _names);
+
+        // The same walk over any package's name table (the font reader, UEWorldFrameProducer.Text.cs).
+        internal static void SkipTaggedProperties(RawReader r, IReadOnlyList<string> names)
         {
             for (int guard = 0; guard < 10000; guard++)
             {
-                string name = Name(r.CompactIndex());
+                int ni = r.CompactIndex();
+                string name = ni >= 0 && ni < names.Count ? names[ni] : throw new InvalidDataException("invalid name index: " + ni);
                 if (name.Equals("None", StringComparison.OrdinalIgnoreCase)) return;
                 byte info = r.Byte();
                 int type = info & 0x0f;

@@ -66,13 +66,22 @@ namespace HP1.UEScript
         public int HearChecks, HearCulledByRadius, HearOccluded, HearOccludedCulled, HearDelivered;
 
         // ── PlaySound / PlayOwnedSound ───────────────────────────────────────
+        // Original: Engine.dll ?execPlaySound@AActor@@QAEXAAUFFrame@@QAX@Z [HP1 0x1040b000] [HP2 0x104192b0]
         public object PlaySoundNative(UEInterpreter interp, UEFrame frame, object[] args)
             => PlaySoundShared(interp, frame, args, owned: false);
 
+        // Original: Engine.dll ?execPlayOwnedSound@AActor@@QAEXAAUFFrame@@QAX@Z [HP1 0x1040b890] [HP2 0x10419ca0]
         public object PlayOwnedSoundNative(UEInterpreter interp, UEFrame frame, object[] args)
             => PlaySoundShared(interp, frame, args, owned: true);
 
-        object PlaySoundShared(UEInterpreter interp, UEFrame frame, object[] args, bool owned)
+        // The arguments and Id as PlaySound's; then every Client->Viewports(i)->Actor on this XLevel hears it, with no
+        // NetMode or simulated test (HP1 0x1040ad90.., HP2 0x10418d3c..0x10418e2c: the HP2 lines are Disable3D / Loop, as
+        // PlaySound's). Reached only from the demo-recording branch of PlaySound / PlayOwnedSound (an event, never script).
+        // Original: Engine.dll ?execDemoPlaySound@AActor@@QAEXAAUFFrame@@QAX@Z [HP1 0x1040ad90] [HP2 0x10418bf0]
+        public object DemoPlaySoundNative(UEInterpreter interp, UEFrame frame, object[] args)
+            => PlaySoundShared(interp, frame, args, owned: false, demo: true);
+
+        object PlaySoundShared(UEInterpreter interp, UEFrame frame, object[] args, bool owned, bool demo = false)
         {
             UEObject self = frame.Context ?? frame.Object;
             if (self is null) return null;
@@ -95,6 +104,13 @@ namespace HP1.UEScript
             float pitch = args.Length > 5 && args[5] is not null
                 ? UEInterpreter.AsFloat(args[5])
                 : UEInterpreter.AsFloat(self.GetProp(PK.TransientSoundPitch)) * 0.015625f;
+            // HP2 adds `optional bool Disable3D, optional bool Loop` (default 0, P_GET_UBOOL_OPTX
+            // [HP2 0x10419467..0x10419503]); the Pitch default is TransientSoundPitch / 64.0f [HP2 0x1041941c..0x10419422] (HP1's
+            // * 0.015625f: the same value). Disable3D and Loop pass unread to CheckHearSound (PlayOwnedSound
+            // [HP2 0x10419ca0] and DemoPlaySound [HP2 0x10418bf0] read the same eight arguments, the same defaults).
+            bool hp2 = UEGameProfile.Current.Game == UEEdition.Game.HP2;
+            bool disable3D = hp2 && args.Length > 6 && args[6] is not null && UEInterpreter.ToBool(args[6]);
+            bool loop = hp2 && args.Length > 7 && args[7] is not null && UEInterpreter.ToBool(args[7]);
             // `if (Sound == 0) return;` — BEFORE any side effects (63838).
             if (sound is null) return null;
 
@@ -119,7 +135,7 @@ namespace HP1.UEScript
             // otherwise -> Level.PawnList with bIsPlayer. STATE code is not a UFunction
             // (IsA check 0x1040b450-0x1040b4be), its call goes through PawnList.
             // PlayOwnedSound (0x1040baaa) looks ONLY at NetMode == 3.
-            bool viaViewports = netMode == 3
+            bool viaViewports = demo || netMode == 3
                 || (!owned && frame.Func is UFunction caller
                     && caller.FunctionFlags.HasFlag(UELib.Flags.FunctionFlag.Simulated));
             if (viaViewports)
@@ -129,13 +145,14 @@ namespace HP1.UEScript
                 // its level's runtime: the Entry world has none, so an Entry sound
                 // on this branch is heard by no one — same as the XLevel check.
                 if (Viewport?.GetProp(PK.Actor) is UEObject viewActor && !viewActor.Destroyed)
-                    CheckHearSound(interp, self, viewActor, id, sound, parameters, radiusSq);
+                    CheckHearSound(interp, self, viewActor, id, sound, parameters, radiusSq, disable3D, loop);
                 return null;
             }
 
             // PlayOwnedSound excludes a listener only when NetMode != 0
-            // (0x1040bb97-0x1040bc4c): an owner player with a Viewport does not hear
-            // its own sound. Standalone has no exclusion.
+            // (HP1 0x1040bb97-0x1040bc4c, HP2 0x1041a022-0x1041a0d7): self if a PlayerPawn, else its Owner if a
+            // PlayerPawn, whose Player is set and NOT a Viewport (a remote connection: it plays its own sound itself).
+            // Standalone has no exclusion.
             UEObject excluded = null;
             if (owned && netMode != 0)
             {
@@ -143,7 +160,7 @@ namespace HP1.UEScript
                     : self.GetProp(PK.Owner) as UEObject;
                 if (owner is not null && UEInterpreter.ClassIsA(owner.Class, "PlayerPawn")
                     && owner.GetProp(PK.Player) is UEObject player
-                    && UEInterpreter.ClassIsA(player.Class, "Viewport"))
+                    && !UEInterpreter.ClassIsA(player.Class, "Viewport"))
                     excluded = owner;
             }
             for (UEObject pawn = level?.GetProp(PK.PawnList) as UEObject;
@@ -151,7 +168,7 @@ namespace HP1.UEScript
             {
                 if (!PropBool(pawn, "bIsPlayer")) continue;           // +0x25c bit 0x2
                 if (ReferenceEquals(pawn, excluded)) continue;
-                CheckHearSound(interp, self, pawn, id, sound, parameters, radiusSq);
+                CheckHearSound(interp, self, pawn, id, sound, parameters, radiusSq, disable3D, loop);
             }
             return null;
         }
@@ -171,9 +188,15 @@ namespace HP1.UEScript
         //     if float(d²) > t — return (C0|C3 = 0)     0x1040aca7-0x1040acb4
         //   ProcessEvent(ClientHearSound, {this, Id, Sound, Location, Parameters})
         //                                               0x1040acb6-0x1040ad13
+        //
+        // HP2 (two more arguments, Disable3D and Loop): the same radius test (the same x87 sequence, 0x10418a1f..0x10418a7e);
+        // a sound in slot 5 (`(Id & 0xe) == 10`, SLOT_Talk) skips the FastLineCheck and its muffling (0x10418a84..0x10418a8d);
+        // ClientHearSound gets Disable3D and Loop as its last two parameters (0x10418b01..0x10418b6e).
+        // Original: Engine.dll ?CheckHearSound@AActor@@QAEXPAVAPawn@@HPAVUSound@@VFVector@@M@Z [HP1 0x1040ab90] (HP2: ?CheckHearSound@AActor@@QAEXPAVAPawn@@HPAVUSound@@VFVector@@MHH@Z [HP2 0x104189d0])
         public void CheckHearSound(UEInterpreter interp, UEObject self, UEObject hearer,
-            int id, object sound, Vector3 parameters, float radiusSq)
+            int id, object sound, Vector3 parameters, float radiusSq, bool disable3D = false, bool loop = false)
         {
+            bool hp2 = UEGameProfile.Current.Game == UEEdition.Game.HP2;
             HearChecks++;
             UEObject hearActor = hearer;
             if (UEInterpreter.ClassIsA(hearer.Class, "PlayerPawn")
@@ -192,10 +215,10 @@ namespace HP1.UEScript
             float distSqF = distSq.ToFloat();
             if (!(distSq.CompareTo(HP1.Core.X87Ext.From(thr)) < 0)) { HearCulledByRadius++; return; }
 
-            if (Bsp is null)
+            if (Bsp is null && !(hp2 && (id & 0xe) == 10))
                 throw new InvalidOperationException(
                     "CheckHearSound: FastLineCheck before the world BSP is loaded");
-            if (!Bsp.FastLineCheckClear(hear, src))
+            if (!(hp2 && (id & 0xe) == 10) && !Bsp.FastLineCheckClear(hear, src))
             {
                 HearOccluded++;
                 HP1.Core.X87Ext t = HP1.Core.X87Ext.From(thr);
@@ -207,8 +230,9 @@ namespace HP1.UEScript
             HearDelivered++;
             // FindFunctionChecked + ProcessEvent: the ProcessEvent gate (probe,
             // bDeleteMe, Disable) is the same as for all Core events.
-            UELifecycle.CallEventArgs(interp, hearer, "ClientHearSound",
-                new object[] { self, id, sound, src, parameters });
+            UELifecycle.CallEventArgs(interp, hearer, "ClientHearSound", hp2
+                ? new object[] { self, id, sound, src, parameters, disable3D, loop }
+                : new object[] { self, id, sound, src, parameters });
         }
 
         // ── APawn::execClientHearSound — disasm 0x10407f30-0x104080ed ────────
@@ -219,6 +243,7 @@ namespace HP1.UEScript
         //   Actor with bDeleteMe (+0x28 bit 0x200) -> None;
         //   Radius = Parameters.Y ? Parameters.Y : 1600;
         //   Audio->PlaySound(Actor, Id, S, SoundLocation, Volume, Radius, Pitch).
+        // Original: Engine.dll ?execClientHearSound@APawn@@QAEXAAUFFrame@@QAX@Z [HP1 0x10407f30] [HP2 0x104156a0]
         public object ClientHearSoundNative(UEInterpreter interp, UEFrame frame, object[] args)
         {
             UEObject self = frame.Context ?? frame.Object;
@@ -233,6 +258,32 @@ namespace HP1.UEScript
             if (!UEInterpreter.ClassIsA(self.Class, "PlayerPawn")) return null;
             if (!(self.GetProp(PK.Player) is UEObject player)
                 || !UEInterpreter.ClassIsA(player.Class, "Viewport")) return null;
+            // HP2 [HP2 0x104156a0]: then `XLevel->Engine->Audio == NULL` returns [HP2 0x10415836..0x10415842]: UGameEngine::Init
+            // creates Audio (UEWorldFrameProducer.InitAudio) only after the first Login. Then Actor = NULL for bDeleteMe
+            // [0x10415848..0x10415859]; Flags = USound+0xb4 | 0x10 when Disable3D or the Actor is the viewport's actor or owned by
+            // it (the Owner chain) [0x1041585c..0x10415892] | 0x02 for Loop [0x10415897..0x1041589c]; Radius = Parameters.Y,
+            // 0 -> GAudioDefaultRadius (Core, 450.0f; only ALAudio's console command changes it) [0x1041589f..0x104158b9];
+            // Audio->PlaySound(Actor, Id, S, SoundLocation, Volume, Radius, Pitch, Flags, 0, 0) (+0x70, 0x104158f7).
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2)
+            {
+                UEWorldFrameProducer fp = ProducerOf(interp);
+                if (fp.AudioDevice is null) return null;
+                bool disable3D = args.Length > 5 && UEInterpreter.ToBool(args[5]);
+                bool loop = args.Length > 6 && UEInterpreter.ToBool(args[6]);
+                string sp = sound is null ? null : ResolveSoundPath(actor ?? self, sound);
+                if (actor is not null && (actor.Destroyed || PropBool(actor, "bDeleteMe"))) actor = null;
+                UEALAudio.Sound s = fp.ALSound(sp);
+                uint flags = s?.DataFlags ?? throw new InvalidOperationException("ClientHearSound: Sound None reaches USound+0xb4");
+                UEObject viewActor = player.GetProp(PK.Actor) as UEObject;
+                bool own = disable3D;
+                for (UEObject o = actor; !own && o is not null; o = o.GetProp(PK.Owner) as UEObject)
+                    own = ReferenceEquals(o, viewActor);
+                if (own) flags |= 0x10;
+                if (loop) flags |= 0x02;
+                fp.ALAudio.PlaySound(actor?.ObjectId ?? 0, id, s, soundLocation, volume,
+                    parameters.y == 0f ? 450f : parameters.y, pitch, flags, 0f, 0f);
+                return null;
+            }
             // The sound path is recovered from the SOURCE (a pathless marker holds
             // the sounding actor's property, not the listener's) — before Actor is cleared.
             string path = sound is null ? "None" : ResolveSoundPath(actor ?? self, sound);
@@ -256,12 +307,30 @@ namespace HP1.UEScript
         //   Audio->StopSound(this, ((Slot&0xff) + Index*8)*2, Sound) (+0x98).
         // Channel match and "the FIRST one is silenced" — Galaxy 0x10607ba0-0x10607c13,
         // rule UEGalaxyChannels; executed by the Core pool (UEGalaxyAudio).
+        // HP2 [HP2 0x1041a550]: a third optional argument (dword, default 0) read before P_FINISH [0x1041a5a0..0x1041a5c4];
+        // XLevel->Engine->Audio NULL: nothing [0x1041a5e8..0x1041a5f6]; else Audio->StopSound(this, Id, Sound, it) (+0x74 =
+        // UALAudioSubsystem::StopSound(AActor*, int, USound*, float), UEALAudio.StopSound) [0x1041a618].
+        // Original: Engine.dll ?execStopSound@AActor@@QAEXAAUFFrame@@QAX@Z [HP1 0x1040c060] [HP2 0x1041a550]
         public object StopSoundNative(UEInterpreter interp, UEFrame frame, object[] args)
         {
             UEObject self = frame.Context ?? frame.Object;
             if (self is null) return null;
             object soundArg = args.Length > 0 ? args[0] : null;
             int slot = args.Length > 1 && args[1] is not null ? UEInterpreter.ToInt(args[1]) & 0xff : 1;
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2)
+            {
+                float fade = args.Length > 2 ? args[2] switch
+                {
+                    null => 0f,
+                    float f => f,
+                    var v => throw new NotSupportedException($"HP2 StopSound: third argument {v.GetType().Name} (the device takes the dword as a float; a non-float script type is not ported)"),
+                } : 0f;
+                UEWorldFrameProducer fp = ProducerOf(interp);
+                if (fp.AudioDevice is null) return null;
+                UEALAudio.Sound s = soundArg is null ? null : fp.ALSound(ResolveSoundPath(self, soundArg));
+                fp.ALAudio.StopSound(self.ObjectId, UEGalaxyChannels.ChannelId(self.ObjectId, slot, false), s, fade);
+                return null;
+            }
             string path = soundArg is null ? "None" : ResolveSoundPath(self, soundArg);
             var cmd = new AudioCommand(AudioKind.Stop, self.ObjectId,
                 self.GetProp(PK.Name)?.ToString(), path, slot, 0f, 0f, 0f, false,
@@ -278,6 +347,9 @@ namespace HP1.UEScript
         // Galaxy ModifySound 0x10607ae0-0x10607b67: 1 if the channel is found (even
         // for an unknown parameter — 0x10607b32 `jne` to the common `mov eax, 1`),
         // else 0. The pool is Core's (UEGalaxyAudio).
+        // HP2 [HP2 0x1041a3e0]: XLevel->Engine->Audio (+0x5c) NULL: 0 [0x1041a499..0x1041a4a7, 0x1041a4e1]; else
+        // Audio->ModifySound(this, Id, Sound, Parameter, Value) (+0x98 = UALAudioSubsystem::ModifySound, UEALAudio.ModifySound).
+        // Original: Engine.dll ?execModifySound@AActor@@QAEXAAUFFrame@@QAX@Z [HP1 0x1040bf20] [HP2 0x1041a3e0]
         public object ModifySoundNative(UEInterpreter interp, UEFrame frame, object[] args)
         {
             UEObject self = frame.Context ?? frame.Object;
@@ -286,6 +358,14 @@ namespace HP1.UEScript
             float value = args.Length > 1 && args[1] is not null ? UEInterpreter.AsFloat(args[1]) : 0f;
             object soundArg = args.Length > 2 ? args[2] : null;
             int slot = args.Length > 3 && args[3] is not null ? UEInterpreter.ToInt(args[3]) & 0xff : 1;
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2)
+            {
+                UEWorldFrameProducer fp = ProducerOf(interp);
+                if (fp.AudioDevice is null) return false;
+                UEALAudio.Sound s = soundArg is null ? null : fp.ALSound(ResolveSoundPath(self, soundArg));
+                return fp.ALAudio.ModifySound(self.ObjectId, UEGalaxyChannels.ChannelId(self.ObjectId, slot, false), s,
+                    (byte)param, value);
+            }
             string path = soundArg is null ? null : ResolveSoundPath(self, soundArg);
             var cmd = new AudioCommand(AudioKind.Modify, self.ObjectId,
                 self.GetProp(PK.Name)?.ToString(), path ?? "None", slot,
@@ -299,6 +379,9 @@ namespace HP1.UEScript
         // ── AActor::execGetSoundDuration — disasm 0x1040bdc0-0x1040be5b ──────
         //   None -> 0; else USound+0x60 (FSoundData::GetPeriod cache, filled
         //   when negative). Formula — UESoundCatalog.
+        // HP2 [HP2 0x1041a280]: None -> 0; else the virtual USound::GetDuration (+0x58) [HP2 0x10359400]: the same cache at
+        // +0x68 (UESoundCatalog.HP2Duration; a negative one asks the HP2 GetPeriod: a loud STOP there).
+        // Original: Engine.dll ?execGetSoundDuration@AActor@@QAEXAAUFFrame@@QAX@Z [HP1 0x1040bdc0] [HP2 0x1041a280]
         public object GetSoundDurationNative(UEInterpreter interp, UEFrame frame, object[] args)
         {
             object sound = args.Length > 0 ? args[0] : null;

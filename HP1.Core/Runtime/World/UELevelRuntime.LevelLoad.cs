@@ -155,8 +155,10 @@ namespace HP1.UEScript
             return pkg;
         }
 
+        // urlMap: LoadMap's URL.Map when the caller knows it (Entry: FURL(L"Entry")); else the captured travel URL, else
+        // the file name.
         public List<UEActorGraphLoader.ActorEntry> LoadWorld(string mapPath, UEInterpreter interp,
-            IEnumerable<UEObject> extraActors = null)
+            IEnumerable<UEObject> extraActors = null, string urlMap = null)
         {
             if (interp is null) throw new ArgumentNullException(nameof(interp));
             LevelPackageName = TakeLevelPackageName(mapPath);
@@ -184,8 +186,8 @@ namespace HP1.UEScript
                 InitCollisionHash();
                 // UGameEngine::LoadMap: an empty LevelEnterText of the new LevelInfo0 =
                 // URL.Map (UELevelRuntime.LoadMapScreens). Transition URL — captured by
-                // TryTakeLevelTravel; without it (first map, Entry) — the file name.
-                ApplyLoadMapLevelEnterText(_capturedUrl?.Map ?? System.IO.Path.GetFileName(mapPath));
+                // TryTakeLevelTravel; without it (the first map) — the file name.
+                ApplyLoadMapLevelEnterText(urlMap ?? _capturedUrl?.Map ?? System.IO.Path.GetFileName(mapPath));
                 return entries;
             }
             catch
@@ -284,7 +286,6 @@ namespace HP1.UEScript
             CollisionHash = null;
             _hashHandle.Clear();
             _hashActor.Clear();
-            _hashColLocation.Clear();
             _nextHashHandle = 0;
             BrushBoundsByExport = new Dictionary<int, BrushBounds>();
             _brushMapPath = null;

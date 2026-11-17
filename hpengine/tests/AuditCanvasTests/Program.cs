@@ -117,7 +117,7 @@ static class Program
         string sys = Path.Combine(Path.GetTempPath(), "auditcanvas_" + Environment.ProcessId);
         Directory.CreateDirectory(Path.Combine(sys, "0"));
         File.WriteAllText(Path.Combine(sys, "0", "Default.ini"),
-            "[Galaxy.GalaxyAudioSubsystem]\nUseSurround=False\nReverseStereo=False\nAmbientFactor=0.7\nDopplerSpeed=9000.0\nLatency=40\nOutputRate=22050Hz\n");
+            "[Galaxy.GalaxyAudioSubsystem]\nUseSurround=False\nReverseStereo=False\nAmbientFactor=0.7\nDopplerSpeed=9000.0\nLatency=40\nOutputRate=22050Hz\nUseDigitalMusic=False\nUseCDMusic=False\n");
         _producer = new UEWorldFrameProducer(sys, 640, 480);
         var catalog = typeof(UEWorldFrameProducer).GetField("_fonts", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(_producer);
         var cache = (Dictionary<string, Hp1FontMetrics>)catalog!.GetType().GetField("_cache", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(catalog)!;

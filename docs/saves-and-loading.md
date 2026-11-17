@@ -95,11 +95,13 @@ not established. The port also draws the loading parchment at the menu's full br
 - **Original saves are not shown (2026-11-01, not original).** A slot that has only the original's `GameSaveInfo` and
   `.usa` reads as empty, so the menu can never send `open save<N>.usa`. A port save to that slot overwrites the shared
   `GameSaveInfo` name.
-- **Compatibility across port builds.** The body carries a version (5 now); every older version has a read branch. Version 3
+- **Compatibility across port builds.** The body carries a version (6 now); every older version has a read branch. Version 3
   introduced state-frame positions as bytecode offsets and latent actions by name; version 4 writes class values with
   their package so a fresh process can load any slot; version 5 puts the enabled mods' names right after the version (the
   Launchers read them without the engine) and appends the GUID of every script package the save depends on and the
-  level-entry travel set (what travel carried into the level).
+  level-entry travel set (what travel carried into the level); version 6 (0.4.0) appends the `ULevel::Actors` slot list
+  (an actor record index per slot), as `ULevelBase::Serialize` writes `Actors` slot by slot, so an actor a shipped map
+  holds in two slots is in two slots after a load too. A version 5 file (0.3.0) reads its slots from the actor records.
 - A damaged file, one written by a newer build, or one that does not fit the current scripts (mods turned on or off: a
   package GUID differs, or a class, state, state-code position or class value it names is missing) is checked **before**
   the old world is torn down. A damaged or newer file takes the same "Failed launching URL" route as a missing file. A

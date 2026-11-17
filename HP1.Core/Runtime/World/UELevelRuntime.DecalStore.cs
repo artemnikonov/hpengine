@@ -174,6 +174,7 @@ namespace HP1.UEScript
 
         // execAttachDecal. distance, decalDir — native arguments; randInt — the render
         // rand() stream (appFrand of the random-direction branch, PC24 window).
+        // Original: Engine.dll ?execAttachDecal@ADecal@@QAEXAAUFFrame@@QAX@Z [HP1 0x10410770] [HP2 0x1041EF90]
         public UEResourceRef AttachDecalCore(UEObject self, float distance, Vector3 decalDir, Func<int> randInt)
         {
             DecalCoreAttachCalls++;
@@ -236,8 +237,9 @@ namespace HP1.UEScript
                     if ((rs.PolyFlags & PfDecalReject) != 0) continue;
                     Vector3 nS = Bsp.Vector(rs.VNormal), bS = Bsp.Point(rs.PBase);
                     float len2 = (float)Math.Sqrt(SizeSq(n2)), lenS = (float)Math.Sqrt(SizeSq(nS));
-                    // 0x104119b5; RU EA (UEEdition.RuOrder; RU Engine 0x1040ed34): (z·z + y·y) + x·x.
-                    float c = (UEEdition.RuOrder ? (n2.z * nS.z + n2.y * nS.y) + n2.x * nS.x
+                    // 0x104119b5; RU EA (UEEdition.RuOrder; RU Engine 0x1040ed34) and HP2 (0x104200f8-0x1042010d):
+                    // (z·z + y·y) + x·x.
+                    float c = (UEEdition.RuOrder || UEGameProfile.Current.Game == UEEdition.Game.HP2 ? (n2.z * nS.z + n2.y * nS.y) + n2.x * nS.x
                         : (n2.x * nS.x + nS.z * n2.z) + nS.y * n2.y) / (len2 * lenS);
                     if (!(Math.Abs((double)c) > 0.7)) continue;
                     SurfDecal wr = NewSurfDecal(self, sS);
@@ -303,9 +305,11 @@ namespace HP1.UEScript
         }
 
         // d = (D.x·N.x + D.z·N.z) + D.y·N.y (0x10410e9c, 0x1041110d); RU EA (UEEdition.RuOrder; RU Engine 0x1040e2f0,
-        // 0x1040e564): (D.y·N.y + D.z·N.z) + D.x·N.x.
+        // 0x1040e564): (D.y·N.y + D.z·N.z) + D.x·N.x; HP2 (0x1041f6b1, 0x1041f928): (D.x·N.x + D.y·N.y) + D.z·N.z.
+        // Original: Engine.dll ?execAttachDecal@ADecal@@QAEXAAUFFrame@@QAX@Z [HP1 0x10410770] [HP2 0x1041EF90]
         static float DecalDot(Vector3 D, Vector3 n)
-            => UEEdition.RuOrder ? (D.y * n.y + D.z * n.z) + D.x * n.x : (D.x * n.x + D.z * n.z) + D.y * n.y;
+            => UEGameProfile.Current.Game == UEEdition.Game.HP2 ? (D.x * n.x + D.y * n.y) + D.z * n.z
+             : UEEdition.RuOrder ? (D.y * n.y + D.z * n.z) + D.x * n.x : (D.x * n.x + D.z * n.z) + D.y * n.y;
 
         // Main record vertices (0x10410e5b-0x104113cd): radius, basis, four points in world space.
         void MainVertices(SurfDecal main, Vector3 point2, Vector3 n2, Vector3 base2, Vector3 decalDir, bool random, object texture, UEObject self)
@@ -332,8 +336,10 @@ namespace HP1.UEScript
                 {
                     var v = new Vector3(a.y * n2.z - a.z * n2.y, a.z * n2.x - a.x * n2.z, a.x * n2.y - a.y * n2.x);
                     a = NormalizeLoose(a);
-                    // |V|² here is reduced in z, y, x order (0x1041104d-0x10411061).
-                    float vq = (v.z * v.z + v.y * v.y) + v.x * v.x;
+                    // |V|² here is reduced in z, y, x order (0x1041104d-0x10411061); HP2 in x, z, y order
+                    // (0x1041f851-0x1041f865).
+                    float vq = UEGameProfile.Current.Game == UEEdition.Game.HP2 ? (v.x * v.x + v.z * v.z) + v.y * v.y
+                        : (v.z * v.z + v.y * v.y) + v.x * v.x;
                     if (!X87Lt(vq, 9.99999993922529e-09f))
                     {
                         float vi = (float)(1.0 / (float)Math.Sqrt(vq));
@@ -375,6 +381,7 @@ namespace HP1.UEScript
 
         // One-node body of FUN_104127c0: the record (in world space) is clipped by the "normal ×
         // edge" planes of the polygon; true — something remains.
+        // Original: Engine.dll not exported: FUN_104127c0 [HP1 0x104127C0] [HP2 0x10420E50] (the FDecal node builder, called by execAttachDecal at HP1 0x104113cd / 0x10411e0a, HP2 0x1041fbcd / 0x104204d1)
         static bool RecordSurvivesPolygon(Func<int, Vector3> vertex, int nv, Vector3 n, SurfDecal rec)
         {
             Span<float> px = stackalloc float[24], py = stackalloc float[24], pz = stackalloc float[24], dist = stackalloc float[24];
@@ -396,7 +403,10 @@ namespace HP1.UEScript
                         bool cross = (!X87Le(dist[i], 0f) && X87Lt(dist[nx], 0f)) || (X87Lt(dist[i], 0f) && !X87Le(dist[nx], 0f));
                         if (!cross) continue;
                         float dz = pz[nx] - pz[i], dy = py[nx] - py[i], dx = px[nx] - px[i];
-                        float t = (Dp - ((Mx * px[i] + Mz * pz[i]) + My * py[i])) / ((My * dy + Mz * dz) + dx * Mx);
+                        // the plane's value at the point: (x, z, y) order [HP1 0x10412a70]; HP2 (z, y, x) [HP2 0x104210fd]
+                        float at = UEGameProfile.Current.Game == UEEdition.Game.HP2 ? (Mz * pz[i] + My * py[i]) + Mx * px[i]
+                            : (Mx * px[i] + Mz * pz[i]) + My * py[i];
+                        float t = (Dp - at) / ((My * dy + Mz * dz) + dx * Mx);
                         float ix = dx * t + px[i], iy = dy * t + py[i], iz = dz * t + pz[i];
                         for (int m = count; m > i + 1; m--) { dist[m] = dist[m - 1]; px[m] = px[m - 1]; py[m] = py[m - 1]; pz[m] = pz[m - 1]; }
                         dist[i + 1] = 0f; px[i + 1] = ix; py[i + 1] = iy; pz[i + 1] = iz;

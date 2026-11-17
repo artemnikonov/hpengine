@@ -32,7 +32,7 @@ namespace HPEngine.Sprites
         public int LiquidQuads;   // droplets per frame
         // AnimNext chain frame at draw time: Textures[0]->Update(Viewport->CurrentTime), then AnimCur (FUN_10b15090,
         // Render.dll.c:9703-9713) (Engine 0x103040f7; Update is UTexture vtable 0x1046df90 +0x7c). In game:
-        // UETextureAnim.CurrentFrame, the same as BSP batches (SdlRenderer.AnimateWorld); flags and size from the frame.
+        // Core's WorldFrame.TextureFrames, the same as BSP batches (SdlRenderer.AnimateWorld); flags and size from the frame.
         // Unset: chain head.
         public Func<string, string> FrameOf = static p => p;
 

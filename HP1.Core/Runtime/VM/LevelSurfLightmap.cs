@@ -84,11 +84,10 @@ namespace HP1.UEScript
     //     in shipped: here this is detected and
     //     printed (FillerInputsChanged), not hidden;
     //   * limit of 256 records (PTR_DAT_10b3810c, step 0xc4, R:7832) — refusal.
-    //   * only the LEVEL MODEL is handled. Brushes of movers without bDynamicLightMover
-    //     take the same branch in shipped but with their own model (Brush +0x168,
-    //     R:19854); the port bakes their lightmaps as layer sets, and their per-frame part
-    //     (categories 1/2) is NOT assembled — a named debt (the "mover_" set
-    //     bake prints the number of lost references).
+    //   * only the LEVEL MODEL is handled here. Brushes of movers without bDynamicLightMover take the same branch with
+    //     their own model (Brush +0x168, R:19854), per draw record of a tracker surface: MoverLevelLightmap
+    //     (UELevelRuntime.MoverLightmaps.cs), which keeps cache 0x16 (SurfLightmap.Held) — a moved face changes the
+    //     filler's inputs.
     public static class LevelSurfLightmap
     {
         // Lightmap zones: per lightmap — the DISTINCT iZone[1] of render nodes carrying its surface,
@@ -237,9 +236,13 @@ namespace HP1.UEScript
 
         // Per-frame part (key 0x31): acc = copy of cache 0x18, then
         // categories 1 (own mask) and 2 (no shadow) in list order, with frame fx.
+        // heldOf(listIndex) — cache 0x16 of a category-1 record with flag 0x84 = 0 (SurfLightmap.Held); null — the filler
+        // runs every frame (level surfaces: see "caches 0x15/0x16 are NOT maintained" above).
+        // Original: Render.dll not exported: FUN_10b077f0 FLightManager::SetupForSurf [HP1 0x10B077F0] — slot 3 of the FLightManager vtable 0x10b386d4 (unwind string "FLightManager::SetupForSurf") (the per-frame loop 0x10b0917f.., R:20580-20732)
         public static int FillFrame(UEVector[] acc, UEVector[] staticAcc, in SurfLightmap.Surface s, in SurfLightmap.Map m,
                                     in SurfLightmap.Basis basis, IReadOnlyList<MoverMode3.LightIn?> list,
-                                    List<Entry> accepted, Func<int, float[]> shadowOf, SurfLightmap.FrameFx fx)
+                                    List<Entry> accepted, Func<int, float[]> shadowOf, SurfLightmap.FrameFx fx,
+                                    Func<int, SurfLightmap.Held> heldOf = null)
         {
             if (fx is null) throw new InvalidOperationException("frame lightmap: FrameFx not passed");
             int n = m.Width * m.Height;
@@ -252,7 +255,8 @@ namespace HP1.UEScript
                 if (cat != 1 && cat != 2) continue;
                 SurfLightmap.Light L = LightOf(list[accepted[e].ListIndex].Value);
                 float[] mask = cat == 1 ? shadowOf(accepted[e].ListIndex) : null;
-                if (SurfLightmap.FillLight(acc, in s, in m, in basis, in L, mask, fx)) touched++;
+                SurfLightmap.Held held = cat == 1 && !MoverMode3.EffectIsDynamic(L.Effect) ? heldOf?.Invoke(accepted[e].ListIndex) : null;
+                if (SurfLightmap.FillLight(acc, in s, in m, in basis, in L, mask, fx, held)) touched++;
             }
             return touched;
         }
@@ -549,6 +553,7 @@ namespace HP1.UEScript
             Mix((uint)((L.DarkLight ? 1 : 0) | (L.Period << 8) | (L.Phase << 16)));
             Mix((uint)L.Source);
             Mix((uint)BitConverter.SingleToInt32Bits(L.BrightnessScale));
+            Mix((uint)L.Palette);
             Mix((uint)((l.Static ? 1 : 0) | (l.NoDelete ? 2 : 0) | (l.DynamicLight ? 4 : 0) | (l.SpecialLit ? 8 : 0)));
             Mix((uint)BitConverter.SingleToInt32Bits(l.Scale));
             return h == 0 ? 1UL : h;

@@ -86,6 +86,15 @@ namespace HP1.UEScript
             USound sound = FindLocked(objectPath, mayFail, out UnrealPackage package, out byte[] payload);
             if (sound is null) return null;
             string format = sound.FileType?.ToString() ?? "None";
+            if (IsHP2)
+            {
+                var h = ReadHP2Header(sound, objectPath);
+                // Loop: RegisterSound opens a streamed lap as looping when (+0xb8 | +0xb4) & 2; +0xb4 is this data flag,
+                // +0xb8 the PlaySound flags of the play (ALAudio PlaySound). No shipped sound carries 2.
+                var hp2 = new UESoundRef(sound.Name, objectPath, HP2Duration(h, objectPath), (h.Flags & 2) != 0);
+                _sounds.Add(objectPath, hp2);
+                return hp2;
+            }
             bool looping = ReadLoopFlag(sound, package, payload, objectPath);
             int periodBytes = ReadPeriodBytes(sound, package, objectPath);
             float duration = SoundPeriod(payload, format, objectPath, periodBytes);
@@ -106,6 +115,7 @@ namespace HP1.UEScript
             {
                 USound sound = FindLocked(objectPath, mayFail: false, out UnrealPackage package, out payload);
                 format = sound.FileType?.ToString() ?? "None";
+                if (IsHP2) return (null, HP2Pcm(sound, payload, objectPath));
                 if (format.Equals("mp2", StringComparison.OrdinalIgnoreCase)) endBytes = ReadPeriodBytes(sound, package, objectPath);
             }
             return format.Equals("mp2", StringComparison.OrdinalIgnoreCase)
@@ -115,19 +125,19 @@ namespace HP1.UEScript
 
         // Frames of one lap, rate and channels for the Galaxy pool, without decoding the sound (perf/spikes: the whole
         // mp2 decode in the tick). null — not resolved. Cached by path.
-        readonly Dictionary<string, (long Frames, int Rate, int Channels)?> _info = new(StringComparer.OrdinalIgnoreCase);
-        public (long Frames, int Rate, int Channels)? LoadInfo(string objectPath)
+        readonly Dictionary<string, (long Frames, int Rate, int Channels, bool Finishes)?> _info = new(StringComparer.OrdinalIgnoreCase);
+        public (long Frames, int Rate, int Channels, bool Finishes)? LoadInfo(string objectPath)
         {
             lock (_info)
                 if (_info.TryGetValue(objectPath, out var hit)) return hit;
-            (long, int, int)? info;
+            (long, int, int, bool)? info;
             try
             {
                 if (!Exists(objectPath)) info = null;
                 else
                 {
                     var (mp2, wav) = OpenStream(objectPath);
-                    info = mp2 != null ? (mp2.LoopSamples / mp2.Channels, mp2.SampleRate, mp2.Channels) : (wav.Frames, wav.SampleRate, wav.Channels);
+                    info = mp2 != null ? (mp2.LoopSamples / mp2.Channels, mp2.SampleRate, mp2.Channels, mp2.Finishes) : (wav.Frames, wav.SampleRate, wav.Channels, false);
                 }
             }
             catch (Exception e) { HP1.Core.UETrace.Warn($"[audio] sound '{objectPath}' not resolved: {e.Message}"); info = null; }
@@ -142,6 +152,7 @@ namespace HP1.UEScript
             {
                 USound sound = FindLocked(objectPath, mayFail: false, out UnrealPackage package, out payload);
                 format = sound.FileType?.ToString() ?? "None";
+                if (IsHP2) return HP2Pcm(sound, payload, objectPath);
                 if (format.Equals("mp2", StringComparison.OrdinalIgnoreCase))
                 {
                     endBytes = ReadPeriodBytes(sound, package, objectPath);
@@ -265,7 +276,7 @@ namespace HP1.UEScript
         {
             if (_packages.TryGetValue(packageName, out UnrealPackage package)) return package;
             string file = _packageFiles[packageName];
-            package = UnrealLoader.LoadPackage(file, FileAccess.Read);
+            package = HP1.UEScript.UEPackageOpen.Load(file, FileAccess.Read);
             // Objects are constructed, not deserialized: a Sound is read when it is requested (FindLocked ->
             // USound.Load), as ULinkerLoad creates an export only on demand. The RU HPSounds.u (EA) carries the script
             // exports WavSounds/ScriptText/ScriptText/PackSounds with SerialOffset 16617..16620 one byte apart and their
@@ -309,6 +320,7 @@ namespace HP1.UEScript
         // (FWaveModInfo: loop count > 0). The flag is set on 167 shipped sounds, so a name list cannot replace it.
         private static bool ReadLoopFlag(USound sound, UnrealPackage package, byte[] payload, string objectPath)
         {
+            NotHP2Tail(objectPath);
             if (package.Version < 0x46) return WavHasSampleLoops(payload);
             long tail = checked(sound.RawData.StorageOffset + sound.RawData.StorageSize);
             byte[] bytes = new byte[4];
@@ -339,8 +351,115 @@ namespace HP1.UEScript
             return false;
         }
 
+        static bool IsHP2 => HP1.UEScript.UEGameProfile.Current.Game == HP1.UEScript.UEEdition.Game.HP2;
+
+        // HP2 USound header: +0xb4 flags, +0x68 duration, then +0x6c NumSamples (Ver > 76), +0x70 bits and +0x74
+        // channels (Ver > 77), +0x78 rate (Ver > 78) — read by UELib's HP2 build (judged against the HP2 USound::Serialize
+        // body 0x103854e0, tools/hp2/sound_serialize_judge.py); the record names are UELib's.
+        public readonly record struct HP2SoundHeader(uint Flags, float Duration, int NumSamples, int Bits, int Channels, int Rate);
+
+        public static HP2SoundHeader ReadHP2Header(USound sound, string objectPath)
+        {
+            var f = sound.BinaryMetaData?.Fields ?? throw new InvalidDataException($"{objectPath}: no HP2 USound header records");
+            object V(string n) => f.Where(x => x.Field == n).Select(x => x.Value).SingleOrDefault()
+                ?? throw new NotSupportedException($"{objectPath}: HP2 USound header without {n} (package older than v79: not shipped, not ported)");
+            return new HP2SoundHeader((uint)V("flags"), (float)V("duration"), (int)V("numSamples"),
+                (int)V("bitsPerSample"), (int)V("numChannels"), (int)V("sampleRate"));
+        }
+
+        // Original: Engine.dll ?GetDuration@USound@@UAEMXZ [HP2 0x10359400] (thunk 0x10304e6c)
+        // +0x68 when it is not below 0.0 (fcomp [0x10474598] = 0.0); otherwise FSoundData::GetPeriod (HP2 body not ported).
+        static float HP2Duration(HP2SoundHeader h, string objectPath)
+            => h.Duration >= 0f ? h.Duration
+                : throw new NotSupportedException($"{objectPath}: HP2 duration {h.Duration} < 0 asks FSoundData::GetPeriod (not ported, STOP)");
+
+        // The PCM UALAudioSubsystem::RegisterSound [HP2 ALAudio 0x10003400] gives OpenAL for one lap (looping streams:
+        // UEXaStream). Flags & 4 clear: FWaveModInfo::ReadWaveInfo [HP2 Engine 0x10301c80] over the data — the data chunk,
+        // rate, channels, bits of the WAV. Flags & 4 with FileType "ogg": a file stream through vorbisfile (OGG: STOP in
+        // DECISIONS.md, not ported). Flags & 4 otherwise: the Core XA stream of NumSamples samples.
+        static UEPcm HP2Pcm(USound sound, byte[] payload, string objectPath)
+        {
+            var h = ReadHP2Header(sound, objectPath);
+            if ((h.Flags & 4) == 0) return UESoundPcm.Decode(payload, "WAV", objectPath);
+            if (string.Equals(sound.FileType?.ToString(), "ogg", StringComparison.OrdinalIgnoreCase))
+                throw new NotSupportedException($"{objectPath}: HP2 OGG stream (vorbisfile) is not ported (STOP, DECISIONS.md)");
+            if (h.Bits == 8)
+                throw new NotSupportedException($"{objectPath}: HP2 8-bit XA stream (AL_FORMAT_*8 over 16-bit decoder output; not shipped)");
+            var pcm = new UEPcm { SampleRate = h.Rate, Channels = h.Channels == 1 ? 1 : 2, Samples = new short[h.NumSamples] };
+            new UEXaStream(payload, h.NumSamples, looping: false, objectPath).Read(pcm.Samples, h.NumSamples);
+            return pcm;
+        }
+
+        // HP2: what UALAudioSubsystem::RegisterSound [HP2 ALAudio 0x10003400] reads of a USound for one lap: +0xb4 flags;
+        // flags & 4 clear: the WAV data chunk (FWaveModInfo::ReadWaveInfo [HP2 Engine 0x10301c80]: frames, rate, channels) and
+        // whether it has smpl loops (buffer handle flags 2); flags & 4: the XA stream's NumSamples, rate, channels (header,
+        // not decoded). An OGG FileType in a package refuses as in HP2Pcm.
+        public (uint Flags, int Frames, int Rate, int Channels, bool SampleLoops) HP2Registration(string objectPath)
+        {
+            if (!IsHP2) throw new InvalidOperationException($"{objectPath}: HP2Registration outside HP2");
+            USound sound; byte[] payload;
+            lock (_lock) sound = FindLocked(objectPath, mayFail: false, out _, out payload);
+            var h = ReadHP2Header(sound, objectPath);
+            if ((h.Flags & 4) != 0)
+            {
+                if (string.Equals(sound.FileType?.ToString(), "ogg", StringComparison.OrdinalIgnoreCase))
+                    throw new NotSupportedException($"{objectPath}: HP2 OGG stream in a package (vorbisfile file stream) is not ported");
+                return (h.Flags, h.NumSamples, h.Rate, h.Channels == 1 ? 1 : 2, false);
+            }
+            UEPcm pcm = UESoundPcm.Decode(payload, "WAV", objectPath);
+            return (h.Flags, (int)pcm.Frames, pcm.SampleRate, pcm.Channels, WavHasSampleLoops(payload));
+        }
+
+        public HP2SoundHeader HP2HeaderOf(string objectPath)
+        {
+            lock (_lock) return ReadHP2Header(FindLocked(objectPath, mayFail: false, out _, out _), objectPath);
+        }
+
+        // HP2: the lip-sync amplitudes of a sound whose +0xb4 has 0x80 — the FLipSyncData at USound+0x44, a lazy byte array
+        // (TLazyArray<BYTE>: data +0xc, count +0x10) serialized after the sample data (USound::Serialize [HP2 Engine
+        // 0x103854e0], seek targets judged by tools/hp2/sound_serialize_judge.py); null without 0x80.
+        public byte[] HP2LipSync(string objectPath)
+        {
+            if (!IsHP2) throw new InvalidOperationException($"{objectPath}: HP2LipSync outside HP2");
+            lock (_lock)
+            {
+                USound sound = FindLocked(objectPath, mayFail: false, out UnrealPackage package, out _);
+                if ((sound.HP2Flags & 0x80) == 0) return null;
+                sound.HP2SecondData.LoadData(package.Stream);
+                return sound.HP2SecondData.ElementData ?? Array.Empty<byte>();
+            }
+        }
+
+        // HP2: the stream a streamed XA sound plays from (a new one per play, as RegisterSound creates one); null for a
+        // non-streamed sound (its PCM is LoadPcm's) and outside HP2. OGG refuses as in HP2Pcm.
+        public UEXaStream OpenXaStream(string objectPath)
+        {
+            if (!IsHP2) return null;
+            USound sound; byte[] payload;
+            lock (_lock) sound = FindLocked(objectPath, mayFail: false, out _, out payload);
+            var h = ReadHP2Header(sound, objectPath);
+            if ((h.Flags & 4) == 0) return null;
+            if (string.Equals(sound.FileType?.ToString(), "ogg", StringComparison.OrdinalIgnoreCase))
+                throw new NotSupportedException($"{objectPath}: HP2 OGG stream (vorbisfile) is not ported");
+            if (h.Bits == 8)
+                throw new NotSupportedException($"{objectPath}: HP2 8-bit XA stream (not shipped)");
+            return new UEXaStream(payload, h.NumSamples, looping: false, objectPath)
+            { SampleRate = h.Rate, Channels = h.Channels == 1 ? 1 : 2 };
+        }
+
+        // HP2 has no tail after the data: its USound header precedes it (UELib HP2 build, judged by
+        // tools/hp2/sound_serialize_judge.py); HP2 reads loop and duration from that header (ReadHP2Header, HP2Duration),
+        // so these HP1 tail readers must never see an HP2 sound.
+        // (USound::Serialize: HP1 Engine.dll body 0x103800a0, HP2 Engine.dll body 0x103854e0.)
+        internal static void NotHP2Tail(string objectPath)
+        {
+            if (HP1.UEScript.UEGameProfile.Current.Game == HP1.UEScript.UEEdition.Game.HP2)
+                throw new NotSupportedException($"{objectPath}: the HP1 USound tail reader was reached for an HP2 sound");
+        }
+
         private static int ReadPeriodBytes(USound sound, UnrealPackage package, string objectPath)
         {
+            NotHP2Tail(objectPath);
             // USound::Serialize (Engine.dll.c:71492-71503): the tail after the data depends on package version —
             // +54/+6c/+44/+48 at version > 0x45, +70 — > 0x46, +4c — > 0x48, +50 — > 0x49. A package of version
             // < 0x49 has no +0x4c counter in the file: Serialize computes it itself (branch < 0x49 with +0x6c != 0 —

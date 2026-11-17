@@ -55,7 +55,9 @@ namespace HP1.UEScript
                 BoneWorld root = DivCoords(CoordsOfPlace(cache.Places[0]), AsBoneWorld(cache.MeshCoords));
                 return BoxByCoords(b, new BrushCoords { Origin = root.Origin, X = root.X, Y = root.Y, Z = root.Z });
             }
-            if (meshRef.Class.Equals("LodMesh", StringComparison.OrdinalIgnoreCase))
+            // UMesh's body for a plain UMesh and a ULodMesh alike (ULodMesh has no override).
+            if (meshRef.Class.Equals("LodMesh", StringComparison.OrdinalIgnoreCase)
+                || meshRef.Class.Equals("Mesh", StringComparison.OrdinalIgnoreCase))
                 return VertexMeshRenderBoundingBox(actor, meshRef);
             throw new NotSupportedException(
                 $"GetRenderBoundingBox: mesh of class {meshRef.Class} not ported mesh={meshRef.Name}");
@@ -116,10 +118,11 @@ namespace HP1.UEScript
         // The body sets no control word; its only caller is GetRenderBoundingBox from FDynamicSprite::Setup, inside the
         // render window (PC24): every fsub/fmul/fadd rounds to 24 bits, i.e. float steps in the same order.
         // RU EA (UEEdition.RuOrder; RU Core 0x1014ed12..0x1014ed50): Origin.y and .z summed as x is,
-        // ((n.y·Y + n.z·Z) + n.x·X) + O.
+        // ((n.y·Y + n.z·Z) + n.x·X) + O. HP2 sums all three that way too [HP2 Core 0x10150bc7..0x10150c17].
+        // Original: Core.dll ??6@YA?AVFCoords@@ABVFBox@@ABV0@@Z [HP1 0x1014F3A0] [HP2 0x10150B60]
         static BrushCoords BoxByCoords(in Hp1Box b, in BrushCoords c)
         {
-            bool ru = UEEdition.RuOrder;
+            bool ru = UEEdition.RuOrder || UEGameProfile.Current.Game == UEEdition.Game.HP2;
             if (UEWorldFrameProducer.FastMathWindow)
             {
                 float fz = b.Max.z - b.Min.z, fy = b.Max.y - b.Min.y, fx = b.Max.x - b.Min.x;
@@ -162,6 +165,7 @@ namespace HP1.UEScript
                 UEInterpreter.AsVector3(actor.GetProp(PK.Location)));
         }
 
+        // Original: Engine.dll ?GetRenderBoundingBox@UMesh@@UAE?AVFCoords@@PBVAActor@@H@Z [HP1 0x103B80F0]
         // UMesh::GetRenderBoundingBox body over its inputs (also called by the --lodboxdump export for the oracle).
         public static BrushCoords UMeshRenderBoundingBox(Hp1VertexMesh vm, Hp1AnimSequence seq, float animFrame,
             float ds, Vector3 pre, UERotator rot, Vector3 loc)

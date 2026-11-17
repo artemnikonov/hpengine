@@ -6,25 +6,40 @@ namespace HP1.UEScript
     // PER-FRAME LIGHTMAPS OF MOVER SURFACES — owned by Core.
     //
     // SetupForSurf takes a mover surface (BrushTracker->SurfIsDynamic, Render.dll.c:19845-19856) into one of two branches:
-    //   * a mover without bDynamicLightMover — the LEVEL branch with the mover's brush model (+0x168): its iLightActors
-    //     list, then the draw record's +0x48 list (URender::SurfLights of the tracker surface), every element through
-    //     thunk(mover, light) (R:19867-19894). Here: LevelSurfLightmapRuntime over the mover geometry (UEMoverGeometry),
-    //     the +0x48 lists translated from tracker surfaces (TrackedBrushModel.Link[FPoly] = iSurf) to geometry surfaces;
+    //   * a mover without bDynamicLightMover — the LEVEL branch with the mover's brush model (+0x168): MoverLevelLightmap,
+    //     run once per frame for every (lightmap, zone) whose tracker fragment Core's occlusion drew in this frame's tree
+    //     (UESceneNode.DrawnPolys; zone iZone[side] of the fragment node, Render.dll.c:5872-5874);
     //   * a mover with bDynamicLightMover — the mover branch (MoverMode3Lightmaps).
-    // Zone layer: a lightmap's static tile follows the zone its polygon's fragments are drawn in (ZoneLayerTiles);
-    // per-frame tiles belong to the load zone.
-    // Tiles: one list per Core frame, in write order (level branch, zone layer, mode 3); the frontend copies them into
-    // its mover atlas.
+    // Both light the face the caller hands SetupForSurf: the tracker surface (Points[pBase], Vectors[vTextureU/V/vNormal] of
+    // Level->Model, Render.dll 0x10b25c84..0x10b25d42) where FMovingBrushTracker last put the brush polygon (TrackerFace).
+    // Tiles: one list per Core frame, in write order (level branch, mode 3); the frontend copies them into its mover atlas,
+    // one slot per mover lightmap (Tile.Zone = the slot zone of the mover geometry: a slot name, not a lighting input).
+    // A polygon drawn through zones whose lightmaps differ (another ambient, or a cache 0x18 made at another pose) keeps its
+    // current tile: the frontend draws a mover polygon whole, per-fragment pieces are not ported (B12, SpanningLightmaps).
     public sealed class UEMoverLightmaps
     {
         readonly UELevelRuntime _rt;
         public readonly UEMoverGeometry Geo;
-        readonly LevelSurfLightmapRuntime _level;
         public readonly MoverMode3Lightmaps Mode3;
-        readonly int[] _trackerSurf;            // geometry surface -> tracker iSurf (-1: none)
-        readonly bool[] _mode3Surf;             // geometry surface of a bDynamicLightMover mover
         public readonly List<LevelSurfLightmapRuntime.Tile> Tiles = new();
-        public LevelSurfLightmapRuntime Level => _level;
+        public readonly List<string> Refusals = new();
+
+        // A lit polygon of a level-branch mover. Movers sharing a brush share its lightmap body: shipped keys the caches by
+        // the brush model (0x18/0x31: model index, iLightMap, zone byte; 0x16: light index, iSurf — the brush's surfaces).
+        sealed class Lm
+        {
+            public int LightMap, SlotZone;
+            public int[] Refs;              // iLightActors exports (Model->Lights, null-terminated), without the 0
+            public MoverLevelLightmap Body;
+            public byte[] Shown;            // bytes in the atlas slot (null: none written yet)
+            public int ShownKey = -1;
+            public bool Refused;
+        }
+        readonly List<Lm> _lms = new();
+        readonly Dictionary<(int MoverId, int Poly), int> _lmOf = new();
+        readonly HashSet<int> _referenced = new();
+        public int SpanningLightmaps, ZoneSwitches, MissingLights;
+        readonly Dictionary<(int Brush, int LightMap), MoverLevelLightmap> _bodies = new();
 
         public UEMoverLightmaps(UELevelRuntime rt, WorldFrame frame)
         {
@@ -32,19 +47,26 @@ namespace HP1.UEScript
             var zoneById = new Dictionary<int, int>();
             foreach (ref readonly ActorSnapshot a in frame.ActorSpan) zoneById[a.ObjectId] = a.ZoneNumber;
             Geo = rt.BuildMoverGeometry(o => zoneById.TryGetValue(o.ObjectId, out int z) ? z : 0);
-            _level = new LevelSurfLightmapRuntime(Geo.Geometry, Geo.LightBits);
             Mode3 = new MoverMode3Lightmaps(rt, Geo, TrackerSurfOf);
             StaticGeometry g = Geo.Geometry;
-            _trackerSurf = new int[g.Surfaces.Length];
-            _mode3Surf = new bool[g.Surfaces.Length];
-            Array.Fill(_trackerSurf, -1);
-            for (int n = 0; n < g.Nodes.Length; n++)
+            foreach (UEMoverGeometry.Mover m in Geo.Movers)
             {
-                int s = g.Nodes[n].Surf;
-                if (s < 0 || s >= g.Surfaces.Length) continue;
-                UEObject mover = Geo.Movers[Geo.MoverOfNode[n]].Actor;
-                _trackerSurf[s] = TrackerSurfOf(mover, Geo.PolyOfSurf[s]);
-                _mode3Surf[s] = UEInterpreter.ToBool(mover.GetProp("bDynamicLightMover"));
+                if (UEInterpreter.ToBool(m.Actor.GetProp("bDynamicLightMover"))) continue;
+                int brush = ((UEModelRef)m.Actor.GetProp(PK.Brush)).ExportIndex;
+                for (int n = m.FirstNode; n < m.FirstNode + m.NodeCount; n++)
+                {
+                    int s = g.Nodes[n].Surf, lm = g.Surfaces[s].LightMap;
+                    if (lm < 0) continue;
+                    StaticLightMap rec = g.LightMaps[lm];
+                    if (rec.UClamp <= 0 || rec.VClamp <= 0) continue;
+                    var refs = new List<int>();
+                    for (int k = rec.LightActors; k >= 0 && k < g.LightExports.Length && g.LightExports[k] != 0; k++) refs.Add(g.LightExports[k]);
+                    var key = (brush, lm - m.FirstLightMap);
+                    if (!_bodies.TryGetValue(key, out MoverLevelLightmap body)) _bodies[key] = body = new MoverLevelLightmap(in rec, Geo.LightBits);
+                    _lmOf[(m.Actor.ObjectId, Geo.PolyOfSurf[s])] = _lms.Count;
+                    _lms.Add(new Lm { LightMap = lm, SlotZone = g.Nodes[n].Zone1, Refs = refs.ToArray(), Body = body });
+                    _referenced.UnionWith(refs);
+                }
             }
         }
 
@@ -55,98 +77,187 @@ namespace HP1.UEScript
             return bm is not null && poly >= 0 && poly < bm.Link.Length ? bm.Link[poly] : -1;
         }
 
-        // One Core frame. surfDyn — UEWorldFrameProducer.SurfDynamicLights (tracker iSurf -> light ObjectIds).
+        // Original: Render.dll ?DrawFrame@URender@@QAEXPAUFSceneNode@@@Z [HP1 0x10B254F0] (the slot-3 face, 0x10b25c84..0x10b25d42)
+        // The face SetupForSurf gets for a tracker surface (0x10b25c84..0x10b25d42): Origin = Points[pBase],
+        // X = Vectors[vTextureU], Y = Vectors[vTextureV], Z = Vectors[vNormal] of the level model as the tracker last wrote them.
+        internal static SurfLightmap.Surface TrackerFace(HeadlessBspModel m, int surf)
+        {
+            BspSurfRecord s = m.Surf(surf);
+            return new SurfLightmap.Surface { B = m.LivePoint(s.PBase), U = m.Vector(s.VTextureU), V = m.Vector(s.VTextureV), N = m.Vector(s.VNormal) };
+        }
+
+        // One Core frame. surfDyn — UEWorldFrameProducer.SurfDynamicLights (tracker iSurf -> light ObjectIds); master — the
+        // frame's occlusion tree (null: no OccludeBsp this frame, nothing drawn).
         public void Update(WorldFrame frame, SurfLightmap.FrameFx fx, Func<int, (int h, int s, int b)> zoneAmbient,
-                           IReadOnlyDictionary<int, int[]> surfDyn)
+                           IReadOnlyDictionary<int, int[]> surfDyn, UESceneNode master)
         {
             Tiles.Clear();
-            Dictionary<int, int[]> local = null;
-            if (surfDyn is { Count: > 0 })
-                for (int s = 0; s < _trackerSurf.Length; s++)
-                    if (!_mode3Surf[s] && _trackerSurf[s] >= 0 && surfDyn.TryGetValue(_trackerSurf[s], out int[] ids))
-                        (local ??= new Dictionary<int, int[]>())[s] = ids;
-            _level.Update(frame, fx, zoneAmbient, local);
-            Tiles.AddRange(_level.Tiles);
-            Tiles.AddRange(ZoneLayerTiles(frame, fx, zoneAmbient));
+            if (frame is not null && fx is not null && master is not null) LevelBranch(frame, fx, zoneAmbient, surfDyn, master);
             Tiles.AddRange(Mode3.Update(frame, fx, surfDyn));
         }
 
-        // Zone layer: shipped seeds a mover lightmap from the zone of the node the fragment is DRAWN through
-        // (SetupForSurf 0x10b079d7: draw record +0x34 = Zones[iZone[side]].ZoneActor; cache 0x18 key = iLightMap + zone
-        // byte). Each brush polygon has its own lightmap (iBrushPoly), so a lightmap's zone is the front zone (iZone[1])
-        // of its polygon's live tracker fragments. A lightmap whose fragments lie in zones of different ambient
-        // (SpanningLightmaps) keeps its current tile: it would need per-fragment pieces (not ported).
-        readonly Dictionary<int, Dictionary<int, LevelSurfLightmapRuntime.Tile>> _zoneTiles = new();
-        Dictionary<int, int> _geoOfTracker;   // ZoneLayerTiles scratch (allocation only)
-        readonly Dictionary<int, HashSet<int>> _zonesOf = new();
-        readonly Stack<HashSet<int>> _zoneSetPool = new();
-        readonly HashSet<(int, int, int)> _seeds = new();
-        int[] _shownZone, _slotZone;   // per geometry lightmap: shown zone and the zone of its atlas slot (load zone)
-        public int ZoneSwitches, SpanningLightmaps;
-        public int ShownZone(int lightMap) => _shownZone is null ? -1 : _shownZone[lightMap];
+        readonly SortedDictionary<int, (int Surf, List<int> Zones)> _drawn = new();
+        readonly Dictionary<int, MoverMode3.LightIn> _byExport = new(), _byId = new();
+        readonly List<MoverMode3.LightIn?> _records = new();
 
-        List<LevelSurfLightmapRuntime.Tile> ZoneLayerTiles(WorldFrame frame, SurfLightmap.FrameFx fx, Func<int, (int h, int s, int b)> zoneAmbient)
+        // Original: Render.dll not exported: FUN_10b077f0 FLightManager::SetupForSurf [HP1 0x10B077F0] — slot 3 of the FLightManager vtable 0x10b386d4 (unwind string "FLightManager::SetupForSurf") (one call per drawn tracker fragment's record)
+        void LevelBranch(WorldFrame frame, SurfLightmap.FrameFx fx, Func<int, (int h, int s, int b)> zoneAmbient,
+                         IReadOnlyDictionary<int, int[]> surfDyn, UESceneNode master)
         {
-            var outTiles = new List<LevelSurfLightmapRuntime.Tile>();
-            StaticGeometry g = Geo.Geometry;
-            if (_shownZone is null)
-            {
-                _shownZone = new int[g.LightMaps.Length];
-                foreach (StaticNode n in g.Nodes)
-                    if (n.Surf >= 0 && g.Surfaces[n.Surf].LightMap >= 0) _shownZone[g.Surfaces[n.Surf].LightMap] = n.Zone1;
-                _slotZone = (int[])_shownZone.Clone();
-            }
             HeadlessBspModel m = _rt.Bsp;
-            if (m?.Tracker is null) return outTiles;
-            // _trackerSurf/_mode3Surf are fixed at construction, so the tracker -> geometry surface map is built once.
-            // zonesOf, its sets and seeds are reused per frame: Clear keeps insertion-order enumeration (no removals),
-            // so the walk below sees the same lightmaps and zones in the same order as with fresh containers.
-            if (_geoOfTracker is null)
+            if (m?.Tracker is null) return;
+            _drawn.Clear();
+            void Walk(UESceneNode f)
             {
-                _geoOfTracker = new Dictionary<int, int>();
-                for (int s = 0; s < _trackerSurf.Length; s++) if (_trackerSurf[s] >= 0 && !_mode3Surf[s]) _geoOfTracker[_trackerSurf[s]] = s;
+                foreach (var (surf, node, _, back) in f.DrawnPolys)
+                {
+                    if (node < m.LoadedNodeCount || m.Tracker.NodeOwner(node) is not UEObject mover) continue;
+                    if (!_lmOf.TryGetValue((mover.ObjectId, m.Surf(surf).BrushPoly), out int li)) continue;
+                    m.LiveNode(node, out _, out _, out _, out _, out _, out _, out _, out _, out int z0, out int z1, out _, out _, out _, out _, out _, out _, out _);
+                    if (!_drawn.TryGetValue(li, out var d)) _drawn[li] = d = (surf, new List<int>());
+                    int zone = back ? z0 : z1;
+                    if (!d.Zones.Contains(zone)) d.Zones.Add(zone);
+                }
+                foreach (UESceneNode c in f.Children) Walk(c);
             }
-            Dictionary<int, int> geoOfTracker = _geoOfTracker;
-            var zonesOf = _zonesOf;
-            foreach (HashSet<int> used in zonesOf.Values) { used.Clear(); _zoneSetPool.Push(used); }
-            zonesOf.Clear();
-            for (int i = m.LoadedNodeCount; i < m.LiveNodeCount; i++)
+            Walk(master);
+            if (_drawn.Count == 0) return;
+            _byExport.Clear(); _byId.Clear();
+            var want = new HashSet<int>();
+            if (surfDyn is not null) foreach (var (_, d) in _drawn) if (surfDyn.TryGetValue(d.Surf, out int[] ids)) want.UnionWith(ids);
+            foreach (ref readonly ActorSnapshot a in frame.ActorSpan)
             {
-                if (m.Tracker.NodeOwner(i) is null) continue;
-                m.LiveNode(i, out _, out _, out _, out _, out _, out _, out _, out int ts, out _, out int z1, out _, out _, out _, out _, out _, out _, out _);
-                if (!geoOfTracker.TryGetValue(ts, out int gs)) continue;
-                int lm = g.Surfaces[gs].LightMap;
-                if (lm < 0) continue;
-                if (!zonesOf.TryGetValue(lm, out var set)) zonesOf[lm] = set = _zoneSetPool.Count > 0 ? _zoneSetPool.Pop() : new HashSet<int>();
-                set.Add(z1);
+                if (a.Destroyed) continue;
+                if (a.ExportIndex > 0 && _referenced.Contains(a.ExportIndex)) _byExport[a.ExportIndex] = MoverMode3.FromSnapshot(in a);
+                if (want.Contains(a.ObjectId)) _byId[a.ObjectId] = MoverMode3.FromSnapshot(in a);
             }
-            SpanningLightmaps = 0;
-            var seeds = _seeds;
-            foreach (var (lm, zones) in zonesOf)
+            foreach (var (li, d) in _drawn)
             {
-                seeds.Clear();
-                foreach (int z in zones) seeds.Add(zoneAmbient(z));
-                if (seeds.Count > 1) { SpanningLightmaps++; continue; }
-                int zone = -1;
-                foreach (int z in zones) { zone = z; break; }
-                if (zone == _shownZone[lm]) continue;
-                _shownZone[lm] = zone; ZoneSwitches++;
-                if (TilesForZone(zone, frame, fx, zoneAmbient).TryGetValue(lm, out var t))
-                    outTiles.Add(new LevelSurfLightmapRuntime.Tile { LightMap = t.LightMap, Zone = _slotZone[lm], Width = t.Width, Height = t.Height, Rgb = t.Rgb, Frame = t.Frame });
+                Lm e = _lms[li];
+                if (e.Refused) continue;
+                try
+                {
+                    SurfLightmap.Surface face = TrackerFace(m, d.Surf);
+                    _records.Clear();
+                    foreach (int ex in e.Refs) _records.Add(_byExport.TryGetValue(ex, out var l) ? l : (MoverMode3.LightIn?)null);
+                    // The draw record's +0x48 list (URender::SurfLights[iSurf]) after the iLightActors records (R:19892-19894).
+                    // A light destroyed between DrawFrame and the snapshot is not in the frame (as LevelSurfLightmapRuntime).
+                    if (surfDyn is not null && surfDyn.TryGetValue(d.Surf, out int[] dyn))
+                        foreach (int id in dyn) if (_byId.TryGetValue(id, out var l)) _records.Add(l);
+                    UEVector[] texels = null; int shownKey = -1; bool frameLm = false, spanning = false;
+                    foreach (int zone in d.Zones)
+                    {
+                        int key = _rt.ZoneCacheByte(zone);
+                        (int h, int s, int b) amb = zoneAmbient(zone);
+                        int missing = 0;
+                        UEVector[] t = e.Body.Draw(in face, key, SurfLightmap.AmbientSeed(amb.h, amb.s, amb.b), _records, e.Refs.Length, fx, ref missing, out bool fr);
+                        MissingLights += missing;
+                        if (texels is null) { texels = t; shownKey = key; frameLm = fr; }
+                        else if (!t.AsSpan().SequenceEqual(texels)) spanning = true;
+                    }
+                    if (spanning) { SpanningLightmaps++; continue; }
+                    var rgb = new byte[texels.Length * 3];
+                    for (int i = 0; i < texels.Length; i++)
+                    {
+                        rgb[i * 3] = SurfLightmap.EncodeChan(texels[i].x);
+                        rgb[i * 3 + 1] = SurfLightmap.EncodeChan(texels[i].y);
+                        rgb[i * 3 + 2] = SurfLightmap.EncodeChan(texels[i].z);
+                    }
+                    if (e.Shown is not null && e.Shown.AsSpan().SequenceEqual(rgb)) continue;
+                    if (e.ShownKey >= 0 && e.ShownKey != shownKey) ZoneSwitches++;
+                    e.Shown = rgb; e.ShownKey = shownKey;
+                    Tiles.Add(new LevelSurfLightmapRuntime.Tile { LightMap = e.LightMap, Zone = e.SlotZone, Width = e.Body.Width, Height = e.Body.Height, Rgb = rgb, Frame = frameLm });
+                }
+                catch (InvalidOperationException ex)
+                {
+                    e.Refused = true;
+                    string why = $"mover lightmap {e.LightMap}: {ex.Message}";
+                    Refusals.Add(why);
+                    HP1.Core.UETrace.Warn("[MoverLightmaps] REFUSED " + why);
+                }
             }
-            return outTiles;
+        }
+    }
+
+    // ONE MOVER LIGHTMAP IN THE LEVEL BRANCH — slot 3 of FLightManager::SetupForSurf (FUN_10b077f0) with the brush model of a
+    // mover without bDynamicLightMover (+0x168, Render.dll.c:19845-19856), called as shipped calls it: per draw record of
+    // the polygon's tracker surface, with that frame's face (UEMoverLightmaps.TrackerFace).
+    //   * cache 0x18 (zone seed + category 0 with its own masks; key brush model + iLightMap + zone byte, R:20290-20323) is
+    //     made on the first draw of (lightmap, zone byte) at that draw's face, lights and Level.Brightness, and then kept:
+    //     the level branch zeroes the mover pointer (0x10b07c83 `mov [ebp-0x4c],ebx`, ebx = 0 at 0x10b07c70), so the
+    //     cache's pose test (0x10b08a87 `test edi,edi; je 0x10b08b2e`; mover +0xa4/+0xfc..+0x110 against the cache header,
+    //     0x10b08a9a..0x10b08b2c) never runs here — the static part keeps the pose of its first draw (the mover branch,
+    //     bDynamicLightMover, runs that test);
+    //   * the per-frame part (0x31, rebuilt every frame: copy of 0x18 + categories 1/2 in record order, R:20480-20732) at the
+    //     face of the draw; a category-1 light with flag 0x84 = 0 merges its cache 0x16 (SurfLightmap.Held, one per light:
+    //     the key is light index + iSurf) from its first per-frame build.
+    // NOT MODELLED (as the level surfaces, LevelSurfLightmap): FMemCache eviction (a cache dropped by LRU is made again at
+    // the pose of its next draw) and bLightChanged (DAT_10b5f684; set only by the editor).
+    public sealed class MoverLevelLightmap
+    {
+        readonly StaticLightMap _rec;
+        readonly SurfLightmap.Map _map;
+        readonly byte[] _bits;
+        readonly Dictionary<int, UEVector[]> _static = new();         // zone byte -> cache 0x18
+        readonly Dictionary<int, SurfLightmap.Held> _held = new();    // light export -> cache 0x16
+        readonly Dictionary<int, float[]> _masks = new();
+        readonly List<LevelSurfLightmap.Entry> _acc = new();
+        IReadOnlyList<MoverMode3.LightIn?> _list;
+        int _refs;
+
+        public MoverLevelLightmap(in StaticLightMap rec, byte[] lightBits)
+        {
+            _rec = rec;
+            _map = LevelSurfLightmap.MapOf(in rec);
+            _bits = lightBits ?? throw new ArgumentNullException(nameof(lightBits));
+        }
+        public int Width => _map.Width;
+        public int Height => _map.Height;
+        public int StaticParts => _static.Count;
+
+        // One draw record. face — this frame's tracker surface; zoneKey — the record's zone byte (UELevelRuntime.ZoneCacheByte)
+        // and seed its ambient; records — the iLightActors list (null: the reference has no actor), then the +0x48 lights;
+        // refs — how many come from the list (only they have a LightBits mask: DataOffset + k·VClamp·((UClamp+7)>>3),
+        // R:19864-19880). Returns the texels (W×H, channels 0..127); frame — the per-frame result (0x31), else cache 0x18.
+        // Original: Render.dll not exported: FUN_10b077f0 FLightManager::SetupForSurf [HP1 0x10B077F0] — slot 3 of the FLightManager vtable 0x10b386d4 (unwind string "FLightManager::SetupForSurf") (the level branch 0x10b07c6a..0x10b07cdc, caches 0x18/0x31/0x16)
+        public UEVector[] Draw(in SurfLightmap.Surface face, int zoneKey, UEVector seed, IReadOnlyList<MoverMode3.LightIn?> records,
+                               int refs, SurfLightmap.FrameFx fx, ref int missing, out bool frame)
+        {
+            if (fx is null) throw new InvalidOperationException("mover lightmap: FrameFx not passed");
+            frame = LevelSurfLightmap.Classify(records, _acc, ref missing, fx.NoDynamicLights);
+            foreach (LevelSurfLightmap.Entry e in _acc)
+                if (e.ListIndex >= refs && e.Cat is 0 or 1)
+                    throw new InvalidOperationException($"a +0x48 light got category {e.Cat} — the SetupDynamics gate admits only category 2/3 lights");
+            _list = records; _refs = refs;
+            SurfLightmap.Basis basis = SurfLightmap.ComputeBasis(in face, in _map);
+            if (!_static.TryGetValue(zoneKey, out UEVector[] st))
+            {
+                st = new UEVector[_map.Width * _map.Height];
+                LevelSurfLightmap.FillStatic(st, in face, in _map, in basis, seed, records, _acc, _maskAt ??= MaskAt, fx);
+                _static[zoneKey] = st;
+            }
+            if (!frame) return st;
+            var acc = new UEVector[st.Length];
+            LevelSurfLightmap.FillFrame(acc, st, in face, in _map, in basis, records, _acc, _maskAt ??= MaskAt, fx, _heldAt ??= HeldAt);
+            return acc;
         }
 
-        Dictionary<int, LevelSurfLightmapRuntime.Tile> TilesForZone(int zone, WorldFrame frame, SurfLightmap.FrameFx fx, Func<int, (int h, int s, int b)> zoneAmbient)
+        Func<int, float[]> _maskAt;
+        Func<int, SurfLightmap.Held> _heldAt;
+        float[] MaskAt(int k)
         {
-            if (_zoneTiles.TryGetValue(zone, out var hit)) return hit;
-            UEMoverGeometry g = _rt.BuildMoverGeometry(_ => zone);
-            var run = new LevelSurfLightmapRuntime(g.Geometry, g.LightBits);
-            run.Update(frame, fx, zoneAmbient);
-            var map = new Dictionary<int, LevelSurfLightmapRuntime.Tile>();
-            foreach (var t in run.Tiles) map[t.LightMap] = t;
-            _zoneTiles[zone] = map;
-            return map;
+            if (k >= _refs) return null;   // a +0x48 record: mask pointer 0 (the categoriser zeroes it, R:7877)
+            if (_masks.TryGetValue(k, out float[] m)) return m;
+            m = LevelSurfLightmap.ExpandShadowMask(_bits, LevelSurfLightmap.ShadowOffset(in _rec, k), _rec.UClamp, _rec.VClamp);
+            _masks[k] = m;
+            return m;
+        }
+        SurfLightmap.Held HeldAt(int k)
+        {
+            int export = _list[k].Value.Export;
+            if (export <= 0) throw new InvalidOperationException("a category-1 light without a map export (bStatic/bNoDelete actors are placed)");
+            if (!_held.TryGetValue(export, out SurfLightmap.Held h)) _held[export] = h = new SurfLightmap.Held();
+            return h;
         }
     }
 

@@ -62,8 +62,17 @@ namespace HP1.UEScript
         // Saves elsewhere than <root>/Save: test fixtures (a temp folder, so checks never write into the install's Save)
         // and a game root that is not the install (the mod working copy: UEGameEngine.Boot saveDir).
         internal string SaveDirOverride;
-        string SaveDir => SaveDirOverride ?? Path.Combine(_gameRoot, "Save");
-        string SaveFilePath(string stem) => UELevelRuntime.SaveBodyPath(SaveDir, stem);
+        // HP2 (DECISIONS 2026-11-16, save dir (b), coordinator): the install's Save holds the player's REAL HP2 saves, so the
+        // port's HP2 saves live only in a directory the host names (HPEngine --hp2-savedir); none -> a loud refusal on use.
+        string SaveDir => SaveDirOverride ?? (UEGameProfile.Current.Game == UEEdition.Game.HP2
+            ? throw new InvalidOperationException("HP2: no port save directory was given (HPEngine --hp2-savedir); the install's Save folder holds the player's own HP2 saves and is never written")
+            : Path.Combine(_gameRoot, "Save"));
+        string SaveFilePath(string stem) => UELevelRuntime.SaveBodyPath(GameSaveDir, stem);
+        // HP2's save slot: the original's Game.exe launcher passes `-SAVESLOT=<n>` (null: none given). The frontend sets it.
+        internal int? SaveSlot;
+        // The directory the GameSaveInfo/SaveGameExists natives read: HP1 GSys->SavePath (+0x34), HP2 GSys+0x40
+        // (UELevelRuntime.SaveSlotDir).
+        string GameSaveDir => UEGameProfile.Current.Game == UEEdition.Game.HP2 ? UELevelRuntime.SaveSlotDir(SaveDir, SaveSlot) : SaveDir;
 
         // The enabled HPEngine mods (UEGameEngine.Boot; the game root is then ModOverlay's working copy): recorded in saves
         // and compared on load (UELevelRuntime.SaveScriptMismatch).
@@ -167,12 +176,53 @@ namespace HP1.UEScript
             _journal.Add("load_notice dropped_for_save");
         }
 
+        // HP2's save model (DECISIONS.md 2026-11-16, HP2 save model (a); the maintainer's notes 
+        // hp2_saves_disasm.md): the port's body file (D-01) in the slot directory, plus what UGameEngine::SaveGame
+        // [HP2 0x103ab430] keeps besides the level: the hub-stack copies, the PA cache snapshot, the thumbnail, the
+        // Pre/PostSaveGame events (UELevelRuntime.SaveGame, Hp2SaveGameTail).
+        // HP2 UGameEngine::SaveGame after a written package [HP2 0x103ab6c3..0x103ab7ba]: for i < LevelInfo.HubStackLevel
+        // (+0x4b4) GFileManager->Copy(dest "%s\Game%i.usa", src "%s\Save%i%i.usa") (Copy's arg1 is the destination,
+        // Game.exe 0x10909d4e); then from i = HubStackLevel on, Save<P><i> while FileSize > 0 is deleted. The port's names
+        // (D-01): game<i> and save<P><i> bodies. No shipped map or script uses ?push/?pop/?peer: HubStackLevel stays 0, the
+        // copy loop never runs and the delete loop finds no save<P>0 — unless slot P's body save<P>0 exists (SaveGame(1)
+        // and save10: the original's names collide the same way). HP1's SaveGame has the same loops, not ported (no trigger).
+        void Hp2HubStackAfterSave(UEInterpreter interp, int slot)
+        {
+            int hub = UEInterpreter.ToInt(interp.GetLevelInfo()?.GetProp("HubStackLevel"));
+            for (int i = 0; i < hub; i++)
+                if (File.Exists(SaveFilePath($"save{slot}{i}"))) File.Copy(SaveFilePath($"save{slot}{i}"), SaveFilePath($"game{i}"), true);
+            for (int i = hub; ; i++)
+            {
+                string f = SaveFilePath($"save{slot}{i}");
+                if (!File.Exists(f) || new FileInfo(f).Length <= 0) break;
+                File.Delete(f);
+                _journal.Add($"savegame_hub_delete file={Path.GetFileName(f)}");
+            }
+        }
+
+        // HP2 appInit after the slot directory (Core [HP2 0x10157249..0x1015768a]): MakeDirectory(slot), then
+        // LoadPersistentActorCache() — the session's cache starts as the slot's snapshot (0x1015768a).
+        internal void AppInitSaveSlot()
+        {
+            if (UEGameProfile.Current.Game != UEEdition.Game.HP2 || SaveDirOverride is null) return;   // no port save dir: nothing to restore
+            Directory.CreateDirectory(GameSaveDir);
+            UELevelRuntime.LoadPersistentActorCache(GameSaveDir);
+        }
+
+        // Core appPreExit's ClearCache call [HP2 0x10158108] (HP1: none): the session's PA cache does not outlive the process.
+        internal void PreExit()
+        {
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2 && SaveDirOverride is not null) UELevelRuntime.ClearPersistentActorCache(GameSaveDir);
+        }
+
         public void InstallSaveGameHandlers(UEInterpreter interp)
         {
             UEConsoleCommand.SaveGameHandler = slot =>
             {
+                bool hp2 = UEGameProfile.Current.Game == UEEdition.Game.HP2;
                 DropLoadNoticeForSave(interp);
-                Directory.CreateDirectory(SaveDir);
+                if (hp2) Directory.CreateDirectory(SaveDir);   // HP2: MakeDirectory(SavePath), MakeDirectory(GSys+0x40)
+                Directory.CreateDirectory(GameSaveDir);
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 byte[] data = Runtime.SaveGame(interp, ActiveMods);
                 double serMs = sw.Elapsed.TotalMilliseconds;
@@ -181,11 +231,43 @@ namespace HP1.UEScript
                 _journal.Add($"savegame slot={slot} file={Path.GetFileName(path)} bytes={data.Length} "
                     + $"ser_ms={serMs:F1} write_ms={sw.Elapsed.TotalMilliseconds - serMs:F1}");
                 _journal.Add($"savegame_channels {Runtime.AnimChannelDigest()}");
+                if (hp2)
+                {
+                    Hp2HubStackAfterSave(interp, slot);
+                    Runtime.Hp2SaveGameTail(interp, GameSaveDir, Path.Combine(_gameRoot, "System"));
+                }
+                return "";
+            };
+            // HP2 LOADGAME n (UEConsoleCommand's branch, UGameEngine::Exec [HP2 0x103a29b5..0x103a2be7]).
+            UEConsoleCommand.LoadGameHandler = slot =>
+            {
+                UELevelRuntime.LoadPersistentActorCache(GameSaveDir);           // 0x103a29e2
+                LoadGameTravel(interp, slot);
+                return "";
+            };
+            UEConsoleCommand.SavePActorsHandler = () =>
+            {
+                Directory.CreateDirectory(SaveDir);
+                Directory.CreateDirectory(GameSaveDir);
+                Runtime.SavePersistentActors(Runtime.Actors[0].GetProp(PK.LevelEnterText) as string);
                 return "";
             };
             UEConsoleCommand.OpenHandler = url => { Runtime.RequestOpen(interp, url); return ""; };
             UEConsoleCommand.ExitHandler = () => _journal.Add("exit_request");
             UEConsoleCommand.FlushHandler = () => Runtime.FlushGCache();
+        }
+
+        internal void LoadGameTravel(UEInterpreter interp, int slot)
+        {
+            Directory.CreateDirectory(SaveDir); Directory.CreateDirectory(GameSaveDir);
+            // The original's URL is "%s\Save%i.usa" (0x104dace0: the slot directory's platform path). The port's save
+            // directory is its own (D-01) and its travel finds a ".usa" body there by name (SaveFilePath), so the URL
+            // carries the file name only; URL.Map's name part, all LoadPersistentActors takes of it, is the same.
+            string file = $"Save{slot}.usa";
+            _journal.Add($"loadgame slot={slot} file={file}");
+            UEObject lvl = interp.GetLevelInfo();
+            interp.Invoke(lvl, interp.FindEventFunction(lvl, "ServerTravel")
+                ?? throw new InvalidDataException("LevelInfo.ServerTravel missing"), file, false);
         }
         private readonly Dictionary<int, (string Url, bool Items)> _travelProbe = new();
         // appSeconds for the LoadMap fade (UELevelRuntime.RunLoadMapFade); a test may replace it.
@@ -263,6 +345,7 @@ namespace HP1.UEScript
             : base(seed)
         {
             _journal = journal;
+            MainRuntime.Hp2SlotDir = () => SaveDirOverride is null && UEGameProfile.Current.Game == UEEdition.Game.HP2 ? null : GameSaveDir;
             _ini = new IniFile(defaultIni);
             _iniCore = new UEIniFile(defaultIni);
             // Shipped SpawnPlayActor reads "usr:DefaultPlayer.Class" FIRST
@@ -377,7 +460,7 @@ namespace HP1.UEScript
             RegisterTypeOpsPure();
             RegisterStateOpsPure();
             RegisterEntryLevelOps(() => MainRuntime);   // Core-owned GetEntryLevel
-            RegisterLocalizationOps(() => SaveDir);   // Localize/GetLanguage/SaveConfig/GameSaveInfo — Core bodies
+            RegisterLocalizationOps(() => GameSaveDir);   // Localize/GetLanguage/SaveConfig/GameSaveInfo — Core bodies
             RegisterMathOps();
             RegisterVectorOps();
             _registering = "headless";
@@ -393,6 +476,7 @@ namespace HP1.UEScript
                 journal.Add("warn " + (args.Length > 0 ? args[0]?.ToString() ?? "" : ""));
                 return null;
             });
+            // Original: Engine.dll ?execError@AActor@@QAEXAAUFFrame@@QAX@Z [HP1 0x10407010] [HP2 0x10414680]
             // AActor::execError 233 (Engine.dll.c:27538): FOutputDevice::Log(Stack, S), then
             // XLevel(+0x80) vtable +0x98 DestroyActor(this, 0) — the same call as Destroy (279).
             Pair(233, "Error", (interp, frame, args) =>
@@ -442,6 +526,7 @@ namespace HP1.UEScript
             Pair(260, "LoopAnim", Runtime.LoopAnimNative);
             Pair(294, "TweenAnim", Runtime.TweenAnimNative);
             Pair(261, "FinishAnim", Runtime.FinishAnimNative);
+            Pair(0, "LinkSkelAnim", Runtime.LinkSkelAnimNative);
             Pair(282, "IsAnimating", Runtime.IsAnimatingNative);
             Pair(263, "HasAnim", Runtime.HasAnimNative);
             Pair(293, "GetAnimGroup", Runtime.GetAnimGroupNative);
@@ -466,8 +551,10 @@ namespace HP1.UEScript
                 // oriented cylinder, a box and a nonzero CollisionWidth give DIFFERENT answers
                 // than a plain loc±(r,r,h).
                 var (min, max) = Runtime.WorldCollisionBox(self, bVisual);
-                return new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
-                    { { "Min", min }, { "Max", max }, { "IsValid", (byte)1 } };
+                // A struct bag like every other struct value (copied by value, saved by the Struct encoding).
+                var box = new UEObject(UEPropLayout.ForStructName("BoundingBox")) { IsStruct = true };
+                box.Props["Min"] = min; box.Props["Max"] = max; box.Props["IsValid"] = (byte)1;
+                return box;
             });
             // Core owns the candidate set (UELevelRuntime.AllActorsNative) — the single
             // answer to "what is Level.Actors"; see the comment in Core.
@@ -484,6 +571,19 @@ namespace HP1.UEScript
                 if (self?.GetProp(PK.Player) is UEObject player && UEInterpreter.ClassIsA(player.Class, "Viewport") && Runtime.Input is { } input)
                     input.ResetKeyboard(Runtime.Config);
                 return null;
+            });
+            // 542 ScreenToWorld(vector ScreenLoc): the view is the pawn's own PlayerCalcView (ProcessEvent with ViewActor = self,
+            // CameraLocation = Location, CameraRotation = Rotation pre-filled, 0x103d5b54..0x103d5bd8 — ProjectCamera does
+            // the same call), the viewport is XLevel->Engine->Client->Viewports(0) (+0x80 +0x40 +0x4c +0x2c [0]): the
+            // viewport size Core owns. Body: ScreenToWorld below.
+            Pair(542, "ScreenToWorld", (interp, frame, args) =>
+            {
+                UEObject self = frame.Context ?? frame.Object;
+                UEVector s = UEValue.AsVector3(args[0]);
+                float fov = UEValue.AsFloat(self.GetProp(PK.FOVAngle));   // read before the event (0x103d5b1b)
+                CameraSnapshot cam = WorldFrameProjector.ProjectCamera(interp, self);
+                return ScreenToWorld(s, FrameProducer.ViewportX, FrameProducer.ViewportY, fov, cam.Location, cam.Rotation,
+                    UEWorldFrameProducer.FastMathWindow);
             });
             // UObject::execResetConfig (Core.dll.c:19367, export 0x1a5f): ResetConfig(this->Class) (UEObjectConfig.ResetConfig).
             Pair(0, "ResetConfig", (interp, frame, args) =>
@@ -514,6 +614,7 @@ namespace HP1.UEScript
                 if (save) last.SaveURLConfig(Runtime.Config, UEConfig.ScopeUser, "DefaultPlayer", opt);
                 return null;
             });
+            // Original: Engine.dll ?execClientTravel@APlayerPawn@@QAEXAAUFFrame@@QAX@Z [HP1 0x104071f0] [HP2 0x10414890]
             // APlayerPawn::execClientTravel (URL, TravelType, bItems): with a Player — ProcessEvent PreClientTravel, then
             // Engine->SetClientTravel(Player, URL, bItems, TravelType) (vtable +0x8c). Without a Player nothing.
             Pair(0, "ClientTravel", (interp, frame, args) =>
@@ -539,8 +640,52 @@ namespace HP1.UEScript
                 return null;
             });
             Pair(547, "GetURLMap", (interp, frame, args) => Runtime.UrlMapNative());
+            // AActor::execGetMapName (539): the body is UEInstallPath.GetMapName (the [Core.System] path list owner).
+            Pair(539, "GetMapName", (interp, frame, args) =>
+                UEInstallPath.GetMapName(_gameRoot, StrArg(args, 0), StrArg(args, 1), args.Length > 2 ? UEInterpreter.ToInt(args[2]) : 0));
+            // AActor::execGetNextSkin (545): UERegistry.NextSkin; out SkinName, out SkinDesc. No return value.
+            Pair(545, "GetNextSkin", (interp, frame, args) =>
+            {
+                var (name, desc) = UERegistry.NextSkin(StrArg(args, 0), StrArg(args, 1), args.Length > 2 ? UEInterpreter.ToInt(args[2]) : 0);
+                if (args.Length > 3) args[3] = name;
+                if (args.Length > 4) args[4] = desc;
+                return null;
+            });
+            // Original: Engine.dll ?execSaveGameExists@AActor@@QAEXAAUFFrame@@QAX@Z [HP1 0x1040c420] [HP2 0x1041aa70]
+            // (Engine.dll.c:107023): P_FINISH; GFileManager->FileSize(FString::Printf("%s\\Save%i.usa", dir, 9)) > 0 —
+            // slot 9 is a constant (push 9, HP1 0x1040c470, HP2 0x1041aadd). dir: HP1 GSys->SavePath, HP2 GSys+0x40
+            // (appSaveSlotDir inlined, HP2 0x1041aabe..0x1041aad7: "" when its Num is 0). NOT ORIGINAL file (D-01, the
+            // port's own save format): the slot-9 body is save9.hp1sav in that directory, the file `SaveGame 9` writes.
+            Pair(3972, "SaveGameExists", (interp, frame, args) => SaveGameExists(GameSaveDir));
+            // Original: Engine.dll.c:76300 AActor::execAutonomousPhysics (export 0x2c6b, body 0x103e4b40): P_GET_FLOAT,
+            // P_FINISH, then UELevelRuntime.AutonomousPhysics.
+            Pair(3971, "AutonomousPhysics", (interp, frame, args) =>
+            {
+                Runtime.AutonomousPhysics(interp, frame.Context ?? frame.Object, UEInterpreter.AsFloat(args.Length > 0 ? args[0] : null));
+                return null;
+            });
             Pair(425, "GetWind", (interp, frame, args) =>
                 Runtime.WindNative(frame.Context ?? frame.Object, UEInterpreter.AsVector3(args.Length > 0 ? args[0] : null)));
+            // ParticleFX 431-435: bodies in UEWorldFrameProducer.ParticleNatives (Core owns the particle container).
+            // AddParticle writes no result (null); GetParticleParams writes its out struct only when found.
+            Pair(431, "NumParticles", (interp, frame, args) => FrameProducer.NativeNumParticles(frame.Context ?? frame.Object));
+            Pair(432, "AddParticle", (interp, frame, args) =>
+            {
+                FrameProducer.NativeAddParticle(frame.Context ?? frame.Object, UEInterpreter.ToInt(args[0]),
+                    UEInterpreter.AsVector3(args[1]), NextRandomInt15);
+                return null;
+            });
+            Pair(433, "GetParticleParams", (interp, frame, args) =>
+            {
+                UEObject pp = FrameProducer.NativeGetParticleParams(frame.Context ?? frame.Object, UEInterpreter.ToInt(args[0]));
+                if (pp is null) return false;
+                args[1] = pp;
+                return true;
+            });
+            Pair(434, "SetParticleParams", (interp, frame, args) =>
+                FrameProducer.NativeSetParticleParams(frame.Context ?? frame.Object, UEInterpreter.ToInt(args[0]), args[1] as UEObject));
+            Pair(435, "RecomputeDeltas", (interp, frame, args) =>
+                FrameProducer.NativeRecomputeDeltas(frame.Context ?? frame.Object, UEInterpreter.ToInt(args[0])));
             Pair(307, "TouchingActors", (interp, frame, args) => Runtime.TouchingActorsNative(interp, frame, args));
             Pair(308, "ZoneActors", (interp, frame, args) => Runtime.ZoneActorsNative(interp, frame, args));
             Pair(262, "SetCollision", (interp, frame, args) =>
@@ -622,6 +767,31 @@ namespace HP1.UEScript
             Pair(552, "Multiply_ColorFloat", (interp, frame, args) => ColorScale(args[0], UEInterpreter.AsFloat(args[1])));
             Pair(550, "Multiply_FloatColor", (interp, frame, args) => ColorScale(args[1], UEInterpreter.AsFloat(args[0])));
 
+            // Original: Engine.dll ?execPlayMusic@AActor@@QAEXAAUFFrame@@QAX@Z [HP2 0x10418ee0] (HP1: none)
+            // Original: Engine.dll ?execStopAllMusic@AActor@@QAEXAAUFFrame@@QAX@Z [HP2 0x10419210] (HP1: none)
+            // Original: Engine.dll ?execStopMusic@AActor@@QAEXAAUFFrame@@QAX@Z [HP2 0x10419140] (HP1: none)
+            // After P_FINISH both test XLevel->Engine->Audio (+0x40, +0x5c): NULL -> PlayMusic's result 0
+            // [HP2 0x10418f72..0x10418fba], StopAllMusic nothing [0x10419261..0x10419271]; otherwise Audio vtable +0x7c /
+            // +0x84: UALAudioSubsystem::PlayMusic(Song, FadeInTime) (its answer the result) / StopAllMusic(FadeOutTime);
+            // StopMusic: NULL -> nothing, else vtable +0x80 StopMusic(Source, FadeOutTime) [HP2 0x104191b5..0x104191d3]. The
+            // port's HP2 Audio exists only after InitAudio (UEWorldFrameProducer.ALAudio).
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2)
+            {
+                Pair(0, "PlayMusic", (interp, frame, args) => FrameProducer.ALAudio is { } al
+                    ? al.PlayMusic(args.Length > 0 ? args[0] as string : "", args.Length > 1 ? UEInterpreter.AsFloat(args[1]) : 0f, out _) : 0);
+                Pair(0, "StopMusic", (interp, frame, args) =>
+                {
+                    FrameProducer.ALAudio?.StopMusic(args.Length > 0 ? UEInterpreter.ToInt(args[0]) : 0,
+                        args.Length > 1 ? UEInterpreter.AsFloat(args[1]) : 0f);
+                    return null;
+                });
+                Pair(0, "StopAllMusic", (interp, frame, args) =>
+                {
+                    FrameProducer.ALAudio?.StopAllMusic(args.Length > 0 ? UEInterpreter.AsFloat(args[0]) : 0f);
+                    return null;
+                });
+            }
+
             // Sound natives — BODIES IN CORE (UELevelRuntime.SoundNatives.cs): the
             // PlaySound/PlayOwnedSound listener walk, AActor::CheckHearSound, the
             // ClientHearSound event and its native (APawn::execClientHearSound, by name),
@@ -630,6 +800,8 @@ namespace HP1.UEScript
                 Runtime.PlaySoundNative(interp, frame, args));
             Pair(0, "PlayOwnedSound", (interp, frame, args) =>
                 Runtime.PlayOwnedSoundNative(interp, frame, args));
+            Pair(0, "DemoPlaySound", (interp, frame, args) =>
+                Runtime.DemoPlaySoundNative(interp, frame, args));
             Pair(0, "ClientHearSound", (interp, frame, args) =>
                 Runtime.ClientHearSoundNative(interp, frame, args));
             Pair(568, "StopSound", (interp, frame, args) =>
@@ -742,6 +914,11 @@ namespace HP1.UEScript
                 if (self is null) return UEVector.zero;
                 return Runtime.BonePosNative(self, args.Length > 0 ? args[0]?.ToString() : null);
             });
+            // Actor.uc (HP2) native(328) final function rotator BoneRot(name Bone) (HP1: index 328 unregistered); body
+            // UELevelRuntime.SkeletalPose.BoneRotNative.
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2)
+                Pair(328, "BoneRot", (interp, frame, args) =>
+                    Runtime.BoneRotNative(frame.Context ?? frame.Object, args.Length > 0 ? args[0]?.ToString() : null));
             Pair(520, "actorReachable", (interp, frame, args) =>
             {
                 UEObject self = frame.Context ?? frame.Object;
@@ -903,6 +1080,25 @@ namespace HP1.UEScript
                 Runtime.PickAnyTargetNative(interp, frame, args));
             // ALevelInfo::execGetLocalURL — FURL::String of the level URL (UELevelRuntime.LevelUrl.cs).
             Pair(0, "GetLocalURL", (interp, frame, args) => Runtime.LocalUrlNative());
+            Pair(0, "GetAddressURL", (interp, frame, args) => Runtime.AddressUrlNative());
+            // Original: Engine.dll ?execGetNetworkNumber@AGameInfo@@QAEXAAUFFrame@@QAX@Z [HP1 0x1040feb0] [HP2 0x1041e6b0]
+            // P_FINISH; XLevel->NetDriver (ULevel +0x3c) ? NetDriver->LowLevelGetNetworkNumber() (vtable +0x60) : "".
+            // The port has no net driver (standalone only): "".
+            Pair(0, "GetNetworkNumber", (interp, frame, args) => "");
+            // Original: Engine.dll ?execGetPlayerNetworkAddress@APlayerPawn@@QAEXAAUFFrame@@QAX@Z [HP1 0x10407470] [HP2 0x10414b30]
+            // P_FINISH; Player IsA UNetConnection ? Player->LowLevelGetRemoteAddress() (vtable +0x5c) : "". The port's
+            // Player is the viewport or none, never a connection: "".
+            Pair(0, "GetPlayerNetworkAddress", (interp, frame, args) => "");
+            // Original: Engine.dll ?execParseKillMessage@AGameInfo@@QAEXAAUFFrame@@QAX@Z [HP1 0x10410160] [HP2 0x1041e970]
+            Pair(0, "ParseKillMessage", (interp, frame, args) =>
+                ParseKillMessage(StrArg(args, 0), StrArg(args, 1), StrArg(args, 2), StrArg(args, 3)));
+            // Original: Engine.dll ?execGetCurrentKeyState@AActor@@QAEXAAUFFrame@@QAX@Z [HP2 0x10422c60] (thunk 0x1030345e;
+            // HP1: index 330 unregistered). P_GET_BYTE(Key), P_FINISH; XLevel(+0x94)->Engine(+0x40)->Client(+0x54)->
+            // Viewports(0) (+0x2c): none -> false; else that viewport's Input(+0x58) KeyDownTable[Min(Key, 0xfe)] (+0xeb0,
+            // UInput::KeyDown inlined) into the result byte. The one viewport is the runtime's, its UInput the port's UEInput.
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2)
+                Pair(330, "GetCurrentKeyState", (interp, frame, args) =>
+                    Runtime.Viewport is not null && Runtime.Input.KeyDownTable(UEInterpreter.ToInt(args[0])));
             // 321 CreateTextureFromBMP — Core body (RegisterLocalizationOps ->
             // UETextureImport). 322 CreateTextureFromScreenShot: a raster frame
             // snapshot is a frontend boundary; headless has no frame. LOUD debt: None
@@ -976,6 +1172,10 @@ namespace HP1.UEScript
             // consume the shared appFrand stream.
             Pair(531, "PickTarget", (interp, frame, args) =>
                 Runtime.PickTargetNative(interp, frame, args));
+            // Original: Engine.dll ?execConsoleCommand@APlayerPawn@@QAEXAAUFFrame@@QAX@Z [HP1 0x103d5770] [HP2 0x103e2c50]
+            // Original: Engine.dll ?execConsoleCommand@AActor@@QAEXAAUFFrame@@QAX@Z [HP1 0x10406d50] [HP2 0x104143d0]
+            // UConsole::execConsoleCommand [HP1 0x1038b460] [HP2 0x10393840] (UBOOL Viewport->Exec, its text to the console) is NOT
+            // this body, yet binds here by its name: a Console.ConsoleCommand call gets this string answer (not ported).
             Pair(0, "ConsoleCommand", (interp, frame, args) =>
             {
                 // Core-owned (UEConsoleCommand.Execute): the RESULT is gameplay —
@@ -985,19 +1185,81 @@ namespace HP1.UEScript
                 // from [Engine.Input]); KEYBINDING needs it. The viewport device is the
                 // frontend's: GetCurrentRes/SetRes must see the ACTUAL canvas, not what the ini saved.
                 return UEConsoleCommand.Execute(Runtime?.Config, args.Length > 0 ? args[0]?.ToString() : null,
-                    Runtime?.Input, _viewport);
+                    Runtime?.Input, _viewport, interp, FrameProducer?.ALAudio, LiveActors());
             });
         }
+
+        // The port's live objects of an actor class (GlobalSetProperty's GObjObjects walk): the game level's and the
+        // resident Entry's actors.
+        internal IEnumerable<UEObject> LiveActors()
+            => MainRuntime.EntryWorld is { } e ? System.Linq.Enumerable.Concat(MainRuntime.Actors, e.Actors) : MainRuntime.Actors;
 
         private static string NameArg(object[] args, int index)
             => args.Length <= index || args[index] is null ? "None"
              : args[index] is UEName name ? name.Value : args[index].ToString();
 
+        static string StrArg(object[] args, int i) => (i < args.Length ? args[i] : null)?.ToString() ?? "";
+
+        // Original: Engine.dll ?execParseKillMessage@AGameInfo@@QAEXAAUFFrame@@QAX@Z [HP1 0x10410160] [HP2 0x1041e970]
+        // Temp = DeathMessage; for (%k Killer, %o Victim, %w Weapon): the first occurrence (appStrstr / InStr, exact) ->
+        // Message = Temp.Left(i) + name + Temp.Right(Len - i - 2); then Temp = Message UNCONDITIONALLY (HP1 0x104103b9 is
+        // reached from both misses of the %k test, 0x104104c7 from both of %o): no "%k" in the message leaves Message
+        // empty and the result is "". Result = Message. Corpus: se_harness/bsp_diff/data/parsekill.tsv (SelfTest parsekill_corpus).
+        internal static string ParseKillMessage(string killer, string victim, string weapon, string death)
+        {
+            string temp = death, message = "";
+            foreach (var (tag, name) in new[] { ("%k", killer), ("%o", victim), ("%w", weapon) })
+            {
+                int i = temp.IndexOf(tag, StringComparison.Ordinal);
+                if (i >= 0) message = temp.Substring(0, i) + name + temp.Substring(i + 2);
+                temp = message;
+            }
+            return message;
+        }
+
+        internal static bool SaveGameExists(string saveDir)
+        {
+            var f = new FileInfo(UELevelRuntime.SaveBodyPath(saveDir, "save9"));
+            return f.Exists && f.Length > 0;
+        }
+
+        // Original: Engine.dll APlayerPawn::execScreenToWorld [HP1 0x103d5ac0] (export 0x36b1; Engine.dll.c:103011, disasm
+        // 0x103d5ac0..0x103d5cd6). The body sets no control word: PC64 in game logic, PC24 inside the render window
+        // (HUD/console script), every register operation rounding at that precision (pc24).
+        //   tan = appTan(double(FovAngle·0.008726646f))       fld; fmul dword 0x10474588; fstp qword; call; fstp qword
+        //   f   = float(Z / (SizeX / tan))                    fild SizeX; fdiv qword tan; fld Z; fdiv st,st(1); fstp dword
+        //   V   = (float((2X − SizeX)·f), float((2Y − SizeY)·f), Z)   fadd st,st; fisub; fmul dword f; fstp dword
+        //   C   = GMath.UnitCoords *= CameraRotation            (Core FCoords::operator*=(FRotator), import 0x10608cd0)
+        //   R   = (float((V.x·C.X.x + V.y·C.X.y) + V.z·C.X.z), the same with C.Y and C.Z)   in the register, 0x103d5c40..
+        //   out = CameraLocation + R, each component fadd dword then fstp dword            0x103d5c97..0x103d5cc6
+        // CameraLocation/Rotation are PlayerCalcView's out values; FovAngle and the viewport size are read before it.
+        internal static UEVector ScreenToWorld(UEVector s, int sizeX, int sizeY, float fov, UEVector camLoc, UERotator camRot, bool pc24)
+        {
+            X87Ext R(X87Ext v) => pc24 ? X87Ext.Round24(v) : X87Ext.Round64(v);
+            X87Ext L(double v) => X87Ext.From(v);
+            double tanArg = pc24 ? (double)(fov * 0.008726646f) : (double)fov * (double)0.008726646f;
+            double tan = UEX87Transcendental.AppTan(L(tanArg)).ToDouble();
+            X87Ext q = pc24 ? X87Ext.Div24(L(sizeX), L(tan)) : X87Ext.Div64(L(sizeX), L(tan));
+            float f = (pc24 ? X87Ext.Div24(L(s.z), q) : X87Ext.Div64(L(s.z), q)).ToFloat();
+            float vy = R(R(R(L(s.y) + L(s.y)) - L(sizeY)) * L(f)).ToFloat();
+            float vx = R(R(R(L(s.x) + L(s.x)) - L(sizeX)) * L(f)).ToFloat();
+            float vz = s.z;
+            float[] ax = { 1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f };
+            if (pc24) HeadlessBspModel.MovingBrushTracker.MulRotator<FpuPc24>(ax, camRot.Pitch, camRot.Yaw, camRot.Roll);
+            else HeadlessBspModel.MovingBrushTracker.MulRotator<FpuPc64>(ax, camRot.Pitch, camRot.Yaw, camRot.Roll);
+            float Row(int r) => R(R(R(L(vx) * L(ax[r])) + R(L(vy) * L(ax[r + 1]))) + R(L(vz) * L(ax[r + 2]))).ToFloat();
+            float rx = Row(0), ry = Row(3), rz = Row(6);
+            return new UEVector(R(L(camLoc.x) + L(rx)).ToFloat(), R(L(camLoc.y) + L(ry)).ToFloat(), R(L(camLoc.z) + L(rz)).ToFloat());
+        }
+
         // execGetNextInt/execGetNextIntDesc: the class lookup, the registry list and List(Num) (null = past the end).
-        // StaticFindObjectChecked(UClass, ANY_PACKAGE, Name): "Pkg.Class" resolves the package (ResolveName), a bare name
-        // takes the first object of its GObjHash chain; a miss is appErrorf (fatal). The port has no hash chain order, so a
-        // bare name naming classes in two packages is refused, as is a miss. Num < 0 reads outside the TArray (no check
-        // in the shipped body): refused.
+        // StaticFindObjectChecked(UClass, ANY_PACKAGE, Name): "Pkg.Class" resolves the package (ResolveName); a bare name
+        // gets Outer NULL, so the GObjHash chain (hash Name ^ 0) holds no class (their Outer is a package), and the
+        // ANY_PACKAGE scan of StaticFindObject (Core 0x1015ba69..0x1015bb34) returns the object with the LOWEST
+        // GObjObjects index whose Name matches and whose class IsA UClass (D06). A miss is appErrorf (fatal). The port
+        // keeps no GObjObjects index (object creation order, indices reused from GObjAvailable after a purge), so a bare
+        // name naming classes in two packages is refused (STOP), as is a miss. Num < 0 reads outside the TArray (no
+        // check in the shipped body): refused.
         // The class resolution and its filtered list are cached per name (case-insensitive, like the FName lookup) while the
         // class catalogue (UEClassRegistry.Generation) and the driver lists (UERegistry.Generation) are unchanged.
         private static readonly Dictionary<string, (UEClassRegistry Reg, int RegGen, int DrvGen, List<UERegistry.ObjectInfo> List)> _nextIntCache
@@ -1015,20 +1277,11 @@ namespace HP1.UEScript
                 if (num < 0) throw new InvalidOperationException($"GetNextInt('{name}', {num}): negative Num reads outside the list in the shipped body");
                 return num < hit.List.Count ? hit.List[num] : null;
             }
-            int dot = name.LastIndexOf('.');
-            string pkg = dot < 0 ? null : name.Substring(0, dot), leaf = name.Substring(dot + 1);
-            var hits = new List<string>();
-            foreach (var p in reg.Packages.Distinct())
-                if (pkg is null || string.Equals(p.PackageName, pkg, StringComparison.OrdinalIgnoreCase))
-                    foreach (var ex in p.Exports)
-                        if (ex.Object is UClass c && !UEClassRegistry.IsImportStub(c) && string.Equals(c.Name, leaf, StringComparison.OrdinalIgnoreCase))
-                            hits.Add(p.PackageName + "." + c.Name);
-            if (hits.Count != 1)
-                throw new InvalidOperationException($"GetNextInt('{name}'): StaticFindObjectChecked(UClass, ANY_PACKAGE) found "
-                    + (hits.Count == 0 ? "no class (shipped: appErrorf, fatal)" : "classes in several packages: " + string.Join(", ", hits)
-                    + " (shipped takes the first of its GObjHash chain; the port has no such order)"));
+            UClass meta = UEObjectConfig.FindClassAnyPackage(name)
+                ?? throw new InvalidOperationException($"GetNextInt('{name}'): StaticFindObjectChecked(UClass, ANY_PACKAGE) found "
+                    + "no class (shipped: appErrorf, fatal)");
             if (num < 0) throw new InvalidOperationException($"GetNextInt('{name}', {num}): negative Num reads outside the list in the shipped body");
-            List<UERegistry.ObjectInfo> list = UERegistry.GetRegistryObjects("Class", hits[0]);
+            List<UERegistry.ObjectInfo> list = UERegistry.GetRegistryObjects("Class", UEObjectConfig.ClassPath(meta));
             _nextIntCache[name] = (reg, reg.Generation, UERegistry.Generation, list);
             return num < list.Count ? list[num] : null;
         }
@@ -1045,7 +1298,9 @@ namespace HP1.UEScript
             string boneName = args.Length > 2 && args[2] is UEName ueName
                 ? ueName.Value : args.Length > 2 ? args[2]?.ToString() : null;
             bool autoDestroy = args.Length > 3 && UEInterpreter.ToBool(args[3]);
-            return Runtime.CreateAnimChannel(interp, owner, cls, animType, boneName, autoDestroy);
+            // HP2's fifth parameter, optional bool bNotReplaceable (HP1 declares four).
+            bool notReplaceable = args.Length > 4 && UEInterpreter.ToBool(args[4]);
+            return Runtime.CreateAnimChannel(interp, owner, cls, animType, boneName, autoDestroy, notReplaceable);
         }
 
         private object Spawn(UEInterpreter interp, UEFrame frame, object[] args)
@@ -1184,6 +1439,8 @@ namespace HP1.UEScript
                 // tick frame nor a fade / progress frame of the same tick may share it.
                 if (Runtime.EngineFrameOwedAfterLoad && Runtime.FrameProducer is not null)
                     Runtime.RunEngineFrame(interp, Runtime.NextInsideTickFrameNumber(), "load", deltaSeconds);
+                // HP2: the top of UGameEngine::Tick, the device's appSeconds (UEWorldFrameProducer.AdvanceAudioClock).
+                if (Runtime.FrameProducer?.ALAudio is not null) Runtime.FrameProducer.AdvanceAudioClockForTick(deltaSeconds);
                 float levelDelta = AdvanceLevelClock(interp, deltaSeconds);
                 _journal.Add($"tick {tick} begin dt={levelDelta:R} actors={_actors.Count}");
                 // Input — hook point (harness: HP1_TRACE_SETLOC and the fixture input
@@ -1213,6 +1470,21 @@ namespace HP1.UEScript
                 // GEntry->Tick right after the game level (FUN_103a0900,
                 // Engine.dll.c:249090-249096) — with the same raw DeltaSeconds.
                 MainRuntime.TickEntryWorld(interp, deltaSeconds);
+                // HP2 UGameEngine::Tick [HP2 0x103a9b53..0x103a9ce4], right after the level ticks: with a client viewport whose
+                // Actor has bQueuedToSaveGame (+0x958 & 1, PlayerPawn.SaveGame sets it): MakeDirectory x2, the log, the bit
+                // cleared, SaveGame(0), Exec("RestartSounds"), Flush(1), and Tick returns — no Browse (0x103aa323) and no
+                // Client->Tick this frame (the frame: as a browsed one's, nothing new drawn).
+                bool queuedSave = UEGameProfile.Current.Game == UEEdition.Game.HP2 && _viewport is not null
+                    && Runtime.Viewport?.GetProp(PK.Actor) is UEObject qa && UEInterpreter.ToBool(qa.GetProp("bQueuedToSaveGame"));
+                if (queuedSave)
+                {
+                    Directory.CreateDirectory(SaveDir); Directory.CreateDirectory(GameSaveDir);
+                    _journal.Add($"queued_savegame file={Path.GetFileName(SaveFilePath("save0"))}");
+                    ((UEObject)Runtime.Viewport.GetProp(PK.Actor)).Props["bQueuedToSaveGame"] = false;
+                    UEConsoleCommand.SaveGameHandler(0);
+                    UEConsoleCommand.Execute(Runtime?.Config, "RestartSounds", Runtime?.Input, _viewport, interp, FrameProducer?.ALAudio);
+                    UEConsoleCommand.FlushHandler?.Invoke();
+                }
                 // Engine half of level travel: the script has already put the request
                 // in LevelInfo (ServerTravel -> ProcessServerTravel), Core takes it, and
                 // this runner turns the map name into a path — the file system belongs
@@ -1222,7 +1494,8 @@ namespace HP1.UEScript
                 // inside Runtime.GetTravelInfo — exactly where shipped reads it
                 // (Engine.dll.c:249177) — so here it is only journalled, not passed by a
                 // second path (one source of truth).
-                bool browsed = Runtime.TryTakeLevelTravel(interp, deltaSeconds, out string travelUrl, out bool travelItems);
+                string travelUrl = null; bool travelItems = false;
+                bool browsed = !queuedSave && Runtime.TryTakeLevelTravel(interp, deltaSeconds, out travelUrl, out travelItems);
                 if (browsed)
                 {
                     _journal.Add($"travel_request url={travelUrl} items={travelItems}");
@@ -1235,7 +1508,9 @@ namespace HP1.UEScript
                     bool isSave = map.EndsWith(".usa", StringComparison.OrdinalIgnoreCase);
                     byte[] data = null; string savedMap = null, savedMapPath = null, badReason = null;
                     _loadNotice = null; _loadNoticePopup = null;   // a notice belongs to one load
-                    string targetPath = isSave ? SaveFilePath(Path.GetFileNameWithoutExtension(map))
+                    // HP2's LOADGAME names the save "Save<N>.usa" and SaveGame writes "save<N>": found as Windows finds it.
+                    string targetPath = isSave ? (UEGameProfile.Current.Game == UEEdition.Game.HP2
+                            ? UEInstallPath.File(SaveFilePath(Path.GetFileNameWithoutExtension(map))) : null) ?? SaveFilePath(Path.GetFileNameWithoutExtension(map))
                         : UEInstallPath.File(Path.Combine(_gameRoot, "Maps", map.EndsWith(".unr", StringComparison.OrdinalIgnoreCase) ? map : map + ".unr"))
                           ?? Path.Combine(_gameRoot, "Maps", map.EndsWith(".unr", StringComparison.OrdinalIgnoreCase) ? map : map + ".unr");
                     if (!File.Exists(targetPath))
@@ -1301,7 +1576,7 @@ namespace HP1.UEScript
                         // `open saveN.usa` — world from a save (UELevelRuntime.SaveGame).
                         string savePath = targetPath;
                         _journal.Add($"load_savegame file={Path.GetFileName(savePath)} map={savedMap} bytes={data.Length}");
-                        _localPlayer = Runtime.LoadSavedWorldAndBootstrap(interp, savedMapPath, data, cfg);
+                        _localPlayer = Runtime.LoadSavedWorldAndBootstrap(interp, savedMapPath, data, cfg, map);
                         _journal.Add($"load_savegame_done actors={Runtime.Actors.Count} player={_localPlayer?.GetProp("Name")}");
                         _journal.Add($"load_savegame_channels {Runtime.AnimChannelDigest()}");
                         _journal.Add($"load_savegame_level_action saved={Runtime.LoadedSaveLevelAction} "
@@ -1317,7 +1592,7 @@ namespace HP1.UEScript
                     WorldFrame screen = Runtime.LastLoadMapScreen;
                     _journal.Add($"loadmap_levelinfo hud={screen?.Hud.Count ?? -1}");
                 }
-                else TryShowLoadNotice(interp);
+                else if (!queuedSave) TryShowLoadNotice(interp);
                 // EVERY tick, not only when a frontend asks for the snapshot.
                 //
                 // UEWorldFrameProducer.Build IS the port of UGameEngine::Draw: it
@@ -1341,7 +1616,7 @@ namespace HP1.UEScript
                                              // 0x103a11ea -> ret 0x103a1313, client travel 0x103a1622 -> jmp 0x103a12fe -> ret — so neither
                                              // Client->Tick (Draw, Console.Tick: the slot 99 save) nor the pending level runs; the loading screen
                                              // stays up and the new level is first drawn after its first ULevel::Tick, in the next frame.
-                WorldFrame frame = browsed ? Runtime.HoldLoadMapScreen(tick) : Runtime.RunEngineFrame(interp, tick, "gate", deltaSeconds);
+                WorldFrame frame = browsed || queuedSave ? Runtime.HoldLoadMapScreen(tick) : Runtime.RunEngineFrame(interp, tick, "gate", deltaSeconds);
                 if (UELevelRuntime.ProfileTicks) UELevelRuntime.ProfileFrameTicks += System.Diagnostics.Stopwatch.GetTimestamp() - frameT0;
                 // Comparison journals and route checkpoints (runtime_poc).
                 AfterFrame?.Invoke(interp, tick, frame, deltaSeconds);

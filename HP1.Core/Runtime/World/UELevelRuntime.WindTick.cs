@@ -1,4 +1,5 @@
-// AWind::Tick (Engine.dll.c:100405-100460, body 0x10430db0) — 1:1 port.
+// AWind::Tick (Engine.dll.c:100405-100460, body 0x10430db0) — 1:1 port. The caller (TickActor) runs it after every
+// return of AActor::Tick: the body ignores its result (0x10430dc2..0x10430dc7).
 //
 // Virtual wind Tick: first AActor::Tick, then, when WindFluctuation (+0x262) != 0,
 // the fluctuation. Precision as in shipped (PC64, x87 extended): every `fstp dword`
@@ -25,6 +26,7 @@ namespace HP1.UEScript
 {
     public sealed partial class UELevelRuntime
     {
+        // Original: Engine.dll ?Tick@AWind@@UAEHMW4ELevelTick@@@Z [HP1 0x10430db0]
         internal void TickWind(UEObject actor, float dt)
         {
             int fluct = UEInterpreter.ToInt(actor.GetProp(PK.WindFluctuation)) & 0xff;

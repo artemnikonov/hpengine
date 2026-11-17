@@ -8,6 +8,7 @@
 //   Launcher --pick-release <releases.json> <current version>
 import AppKit
 import CryptoKit
+import GameController
 import SwiftUI
 
 let bundleID = "io.github.hpengine.launcher"  // make_launcher.sh Info.plist
@@ -56,6 +57,25 @@ final class LineReader: @unchecked Sendable {
   @Published var playing = false
   @Published var installed = Launcher.isInstalled()
   @Published var edition = Launcher.installedEdition()  // "US 1.53: exact" (HP1Setup's EDITION line, kept in the marker)
+  @Published var runError: String?  // the error of a failed game run: its banner offers "Open log"
+  // Per game (GameScope): HP1's errors in `error`, HP2's here, the launcher's own (its update, its location) on both tabs.
+  @Published var hp2Error: String?
+  @Published var hp2RunError: String?
+  @Published var launcherError: String?
+  @Published var modsOpen = false   // HP1: the Mods page in place of the game page
+  // Focus and gamepad (extension below): the focused target, the ring (once the pad or the keys moved focus), a pad
+  // connected (the button hints), the open list (Menu, Language, Start map) and the targets the window registered.
+  @Published var padFocus: String?
+  @Published var padUsed = false
+  @Published var padConnected = false
+  @Published var popup: Popup?
+  @Published var listOffset: CGFloat = 0   // the open list's scroll offset, read from its NSScrollView (its indicator)
+  weak var listScroller: NSScrollView?      // the open list's NSScrollView (ScrollProbe): the indicator's drag scrolls it
+  var padTargets: [PadTarget] = []
+  var focusBeforePopup: String?
+  var padLast: UInt32 = 0
+  static let page = 6   // Page Up / Page Down in an open list: about the items a list under a control holds
+  var forcedLooks: [String: Int] = [:]   // --render-states only: target id -> 1 hover, 2 pressed (the look without a pointer)
 
   static let home = NSHomeDirectory()
   static let dataURL = URL(fileURLWithPath: home + "/Library/Application Support/HPEngine")
@@ -64,6 +84,9 @@ final class LineReader: @unchecked Sendable {
   static let settingsURL = gameURL.appendingPathComponent("HPEngineData")
   static let logsURL = settingsURL.appendingPathComponent("logs")
   static let launchLogURL = URL(fileURLWithPath: home + "/Library/Logs/HPEngine.log")
+  // Per game: the capture of a run's console output (HPEngine.log, HPEngine-HP2.log) and the run logs HPEngine writes.
+  static func launchLog(hp2: Bool) -> URL { URL(fileURLWithPath: GameScope.consoleLog(launchLogURL.path, hp2: hp2)) }
+  static func logsDir(hp2: Bool) -> URL { URL(fileURLWithPath: GameScope.logsDir(gameURL.path, hp2: hp2)) }
   // The app is universal: each slice of this binary runs the engine of its own architecture (make_launcher.sh puts
   // osx-arm64 in Resources/HPEngine and osx-x64 in Resources/HPEngine-x64; Launcher --runtime-path prints the choice).
   #if arch(x86_64)
@@ -95,9 +118,10 @@ final class LineReader: @unchecked Sendable {
   // HP1Setup and HPEngine. Clear it on the whole bundle (not possible while macOS runs the app from a translocated copy).
   func unquarantine() -> Bool {
     if Bundle.main.bundlePath.contains("/AppTranslocation/") {
-      error = "Move HPEngine Launcher to the Applications folder, open it from there and try again."
+      launcherError = "Move HPEngine Launcher to the Applications folder, open it from there and try again."
       return false
     }
+    launcherError = nil
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
     p.arguments = ["-dr", "com.apple.quarantine", Bundle.main.bundlePath]
@@ -172,12 +196,31 @@ final class LineReader: @unchecked Sendable {
           self.updateModsNotice()   // the run may have written slots
           if status != 0 {
             let said = ((try? String(contentsOf: Launcher.launchLogURL, encoding: .utf8)) ?? "").components(separatedBy: "\n")
-            self.error = Launcher.errorBanner(said, code: status, log: "More → Open Logs.")
+            self.error = Launcher.errorBanner(said, code: status, log: "Open log, or \(Launcher.launchLogURL.path).")
+            self.runError = self.error
           }
         }
       }
     }
     do { try p.run(); playing = true; error = nil } catch { self.error = error.localizedDescription; return }
+    Launcher.handFocus(to: p.processIdentifier)
+  }
+
+  // The game is our child process, not launched through LaunchServices, so nothing activates it; from macOS 14 an app's
+  // own activate request (SDL_RaiseWindow) is only honoured if the active app yields to it. The launcher is the active
+  // app when Play is pressed: once the game has registered as an application (SDL video init), activate it from here.
+  // Without this its window stayed inactive (no key focus, OS cursor visible, "capture on ... focus False") until a click.
+  static func handFocus(to pid: pid_t, deadline: Date = Date().addingTimeInterval(30)) {
+    Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { t in
+      MainActor.assumeIsolated {
+        guard let app = NSRunningApplication(processIdentifier: pid) else {
+          if Date() > deadline || kill(pid, 0) != 0 { t.invalidate() }
+          return
+        }
+        t.invalidate()
+        if #available(macOS 14.0, *) { app.activate(from: .current) } else { app.activate(options: .activateIgnoringOtherApps) }
+      }
+    }
   }
 
   // What the engine itself said when it stopped with an error: the last line of its console output that names the cause.
@@ -197,12 +240,15 @@ final class LineReader: @unchecked Sendable {
   func resetSettings() {
     let a = NSAlert()
     a.messageText = "Reset settings?"
-    a.informativeText = "Video, sound and control settings go back to the game's defaults. Saved games are kept."
+    a.informativeText = "Video, sound and control settings go back to the game's defaults. Saved games are kept. The old files are moved to HPEngineData/settings-backup."
     a.addButton(withTitle: "Reset"); a.addButton(withTitle: "Cancel")
     guard a.runModal() == .alertFirstButtonReturn else { return }
+    let fm = FileManager.default, bak = Launcher.settingsURL.appendingPathComponent("settings-backup")
+    let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"; let stamp = f.string(from: Date())
     for n in ["Default.ini", "DefUser.ini"] {  // the overlay HPEngine writes; the game's own ini files are never changed
-      let u = Launcher.settingsURL.appendingPathComponent(n)
-      if FileManager.default.fileExists(atPath: u.path) { try? FileManager.default.trashItem(at: u, resultingItemURL: nil) }
+      let u = Launcher.settingsURL.appendingPathComponent(n), to = bak.appendingPathComponent("\(n).\(stamp)")
+      guard fm.fileExists(atPath: u.path) else { continue }
+      try? fm.createDirectory(at: bak, withIntermediateDirectories: true); try? fm.removeItem(at: to); try? fm.moveItem(at: u, to: to)
     }
   }
 
@@ -313,9 +359,133 @@ final class LineReader: @unchecked Sendable {
   }
 
   func loadMods() {
+    loadLanguages()
     mods = Launcher.modList(game: Launcher.gameURL)
     updateModsNotice()
     updateStartMaps()
+  }
+
+  // ── Game language (NOT ORIGINAL): the languages of the installed data, chosen as the Windows/Linux Launcher does. The
+  // rule's owner is hpengine/packaging/GameLanguage.cs (the engine places the chosen folder's files, ModOverlay); this
+  // MIRRORS its listing and its write of HPEngineData/Default.ini, byte for byte (launcher/test_update.sh runs both on the
+  // same folders and compares): each System/ and System/<digits>/ Default.ini's [Engine.Engine] Language (FConfigFile::Read:
+  // no comments, no trimming, quotes stripped, the last duplicate wins; UTF-16 with a BOM, else ISO-8859-1), a 2-4 letter
+  // code, the first folder of a code wins, by label without case; the choice writes [HPEngine] DataLanguage, [Engine.Engine]
+  // Language and [HPBase.baseNarrator] CurLanguageName = the name in capitals, other lines kept, ISO-8859-1.
+  struct LanguageChoice: Equatable { let code: String; let label: String; let folder: String? }
+  nonisolated static let languageDefault = "Game default"
+  nonisolated static let languageNames: [String: String] = [
+    "eng": "English", "int": "English", "fin": "Finnish", "dan": "Danish", "swe": "Swedish", "nor": "Norwegian",
+    "fra": "French", "fre": "French", "deu": "German", "ger": "German", "ita": "Italian", "esn": "Spanish", "esp": "Spanish",
+    "rus": "Russian", "pol": "Polish", "hun": "Hungarian", "por": "Portuguese", "dut": "Dutch", "nld": "Dutch", "cze": "Czech",
+  ]
+  nonisolated static func languageSettings(_ game: URL) -> URL { game.appendingPathComponent("HPEngineData/Default.ini") }
+  nonisolated static func loadIni(_ u: URL) -> String? {
+    guard let d = FileManager.default.contents(atPath: u.path) else { return nil }
+    let b = [UInt8](d)
+    if b.count > 1 && b.count % 2 == 0 && b[0] == 0xff && b[1] == 0xfe { return String(data: d.dropFirst(2), encoding: .utf16LittleEndian) }
+    if b.count > 1 && b.count % 2 == 0 && b[0] == 0xfe && b[1] == 0xff { return String(data: d.dropFirst(2), encoding: .utf16BigEndian) }
+    return String(data: d, encoding: .isoLatin1)
+  }
+  nonisolated static func iniValue(_ text: String, _ section: String, _ key: String) -> String? {
+    var inside = false, value: String? = nil
+    for line in text.components(separatedBy: CharacterSet(charactersIn: "\r\n")) where !line.isEmpty {
+      if line.hasPrefix("[") && line.hasSuffix("]") {
+        inside = String(line.dropFirst().dropLast()).caseInsensitiveCompare(section) == .orderedSame; continue
+      }
+      guard inside, let eq = line.firstIndex(of: "="), String(line[..<eq]).caseInsensitiveCompare(key) == .orderedSame else { continue }
+      var v = String(line[line.index(after: eq)...])
+      if v.count > 1 && v.hasPrefix("\"") && v.hasSuffix("\"") { v = String(v.dropFirst().dropLast()) }
+      value = v
+    }
+    return value
+  }
+  nonisolated static func languages(game: URL) -> [LanguageChoice] {
+    guard let system = child(game, "System", dir: true) else { return [] }
+    let numbered = entries(system).filter { isDir($0) && !$0.lastPathComponent.isEmpty && $0.lastPathComponent.allSatisfy { ("0"..."9").contains($0) } }
+      .sorted { $0.lastPathComponent.unicodeScalars.lexicographicallyPrecedes($1.lastPathComponent.unicodeScalars) }
+    var choices: [LanguageChoice] = []
+    for dir in [system] + numbered {
+      guard let ini = child(dir, "Default.ini", dir: false), let text = loadIni(ini),
+            let code = iniValue(text, "Engine.Engine", "Language")?.lowercased(),
+            (2...4).contains(code.count), code.unicodeScalars.allSatisfy({ ("a"..."z").contains($0) }),
+            !choices.contains(where: { $0.code == code }) else { continue }
+      choices.append(LanguageChoice(code: code, label: languageNames[code] ?? code, folder: dir == system ? nil : dir.lastPathComponent))
+    }
+    return choices.enumerated().sorted { a, b in   // stable, as Enumerable.OrderBy with StringComparer.OrdinalIgnoreCase
+      let x = a.element.label.uppercased(), y = b.element.label.uppercased()
+      return x != y ? x.unicodeScalars.lexicographicallyPrecedes(y.unicodeScalars) : a.offset < b.offset
+    }.map(\.element)
+  }
+  nonisolated static func selectedLanguage(game: URL) -> String? {
+    loadIni(languageSettings(game)).flatMap { iniValue($0, "HPEngine", "DataLanguage") }
+  }
+  // GameLanguage.Set: the section's key replaced (or added at the section's end, or a new section), other lines kept.
+  nonisolated static func iniSet(_ text: String, _ section: String, _ key: String, _ value: String?) -> String {
+    let nl = text.contains("\r\n") ? "\r\n" : "\n"
+    var lines = text.components(separatedBy: "\n").map { l in var l = l; while l.hasSuffix("\r") { l.removeLast() }; return l }
+    if lines.last == "" { lines.removeLast() }
+    var result: [String] = [], inside = false, placed = false, found = false
+    func place() { if !placed, let value { result.append(key + "=" + value) }; placed = true }
+    for line in lines {
+      let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+      if t.hasPrefix("[") {
+        if inside { place() }
+        inside = t.caseInsensitiveCompare("[" + section + "]") == .orderedSame; found = found || inside
+      }
+      if inside, let eq = t.firstIndex(of: "="), eq != t.startIndex,
+         t[..<eq].trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(key) == .orderedSame { place(); continue }
+      result.append(line)
+    }
+    if inside { place() }
+    if !found, let value { if !result.isEmpty { result.append("") }; result.append("[" + section + "]"); result.append(key + "=" + value) }
+    return result.joined(separator: nl) + nl
+  }
+  struct LanguageError: Error { let text: String }
+  nonisolated static func saveLanguage(game: URL, _ code: String?) throws {
+    var choice: LanguageChoice? = nil
+    if let code {
+      guard let c = languages(game: game).first(where: { $0.code == code }) else { throw LanguageError(text: "The selected language is no longer installed: " + code) }
+      choice = c
+    }
+    let u = languageSettings(game)
+    var text = FileManager.default.fileExists(atPath: u.path) ? (loadIni(u) ?? "") : ""
+    text = iniSet(text, "HPEngine", "DataLanguage", choice?.code)
+    text = iniSet(text, "Engine.Engine", "Language", choice?.code)
+    text = iniSet(text, "HPBase.baseNarrator", "CurLanguageName", choice.flatMap { languageNames[$0.code]?.uppercased() })
+    try FileManager.default.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let temp = URL(fileURLWithPath: u.path + ".language-new")
+    try text.data(using: .isoLatin1, allowLossyConversion: true)!.write(to: temp)
+    if FileManager.default.fileExists(atPath: u.path) { _ = try FileManager.default.replaceItemAt(u, withItemAt: temp) }
+    else { try FileManager.default.moveItem(at: temp, to: u) }
+  }
+  // The chooser's entries: "Game default" (nil), the languages, and a pick whose folder is gone ("Unavailable (<code>)").
+  nonisolated static func languageEntries(_ langs: [LanguageChoice], selected: String?) -> [(code: String?, label: String)] {
+    var e: [(code: String?, label: String)] = [(nil, languageDefault)] + langs.map { ($0.code, $0.label) }
+    if let s = selected, !s.isEmpty, !langs.contains(where: { $0.code == s }) { e.append((s, "Unavailable (\(s))")) }
+    return e
+  }
+  // The Game card's edition text with a multilingual data set (launcher/Desktop/Logic.cs EditionLabel.Describe).
+  nonisolated static func editionDisplay(_ edition: String, _ langs: [LanguageChoice]) -> (name: String, tier: String, detail: String?) {
+    let parts = edition.components(separatedBy: ": ")
+    let name = parts.count > 1 ? parts.dropLast().joined(separator: ": ") : edition, tier = parts.count > 1 ? parts.last! : ""
+    if langs.count < 2 { return (name, tier, nil) }
+    let nordic = Set(langs.map { $0.code.lowercased() }) == ["dan", "eng", "fin", "nor", "swe"]
+    let detail = (name.isEmpty ? "" : "Engine family: \(name). ") + "Languages: " + langs.map(\.label).joined(separator: ", ") + "."
+    return (nordic ? "Nordic multilingual data" : "Multilingual game data", nordic && name == "UK 1.1" && tier == "modified" ? "different data" : tier, detail)
+  }
+  @Published var languageList: [LanguageChoice] = []
+  @Published var language: String?
+  func loadLanguages() {
+    languageList = installed ? Launcher.languages(game: Launcher.gameURL) : []
+    language = installed ? Launcher.selectedLanguage(game: Launcher.gameURL) : nil
+  }
+  func setLanguage(_ code: String?) {
+    guard !playing, !running, code != language else { return }
+    do { try Launcher.saveLanguage(game: Launcher.gameURL, code); error = nil }
+    catch let e as LanguageError { error = "Could not change game language: " + e.text }
+    catch { self.error = "Could not change game language: " + error.localizedDescription }
+    loadLanguages()
   }
 
   // ── Start map, next to Play: the maps the enabled mods ADD to the game (community map mods; the original starts
@@ -351,13 +521,18 @@ final class LineReader: @unchecked Sendable {
     ["--root", game.path, "--launched-by-launcher"] + (map.map { ["--map", $0] } ?? [])
   }
 
-  nonisolated static func addedMaps(game: URL) -> [StartMap] {
+  // Prepare's placement (hpengine/packaging/ModOverlay.cs Collect): per enabled mod, in order, the game path of each of
+  // its files ("Dir/sub/name" as spelled in the mod; a flat file under the game directory of its extension). nil while
+  // the engine would refuse the mods (a mod without folder or game files, flat files without Default.ini).
+  nonisolated static func entries(_ dir: URL) -> [URL] {
+    (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+  }
+  nonisolated static func isDir(_ u: URL) -> Bool { (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false }
+  nonisolated static func child(_ dir: URL, _ name: String, dir wantDir: Bool) -> URL? {
+    entries(dir).first { $0.lastPathComponent.caseInsensitiveCompare(name) == .orderedSame && isDir($0) == wantDir }
+  }
+  nonisolated static func placedFiles(game: URL) -> [(mod: String, rels: [String])]? {
     let fm = FileManager.default
-    func entries(_ dir: URL) -> [URL] { (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey])) ?? [] }
-    func isDir(_ u: URL) -> Bool { (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false }
-    func child(_ dir: URL, _ name: String, dir wantDir: Bool) -> URL? {
-      entries(dir).first { $0.lastPathComponent.caseInsensitiveCompare(name) == .orderedSame && isDir($0) == wantDir }
-    }
     let mods = modList(game: game).filter(\.enabled)
     if mods.isEmpty { return [] }
     // extension (lower case, with the dot) -> game directory, for flat files; nil: no Default.ini
@@ -377,33 +552,69 @@ final class LineReader: @unchecked Sendable {
       }
       flatDirs = map
     }
-    let shipped = Set(entries(game).filter { isDir($0) && $0.lastPathComponent.lowercased() == "maps" }.flatMap(entries)
-      .filter { !isDir($0) }.map { $0.lastPathComponent.lowercased() })
-    var maps: [String: StartMap] = [:]
+    var placed: [(mod: String, rels: [String])] = []
     for m in mods {
-      let dir = game.appendingPathComponent("Mods").appendingPathComponent(m.name)
-      var files = 0, mine: [URL] = []
-      for e in entries(dir) {
+      var rels: [String] = []
+      for e in entries(game.appendingPathComponent("Mods").appendingPathComponent(m.name)) {
         if isDir(e) {
           for case let f as URL in fm.enumerator(at: e, includingPropertiesForKeys: [.isRegularFileKey]) ?? FileManager.DirectoryEnumerator()
           where ((try? f.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false) && !f.lastPathComponent.hasPrefix(".") {
-            files += 1
-            if e.lastPathComponent.lowercased() == "maps" && f.deletingLastPathComponent().standardizedFileURL == e.standardizedFileURL { mine.append(f) }
+            rels.append(([e.lastPathComponent] + f.pathComponents.dropFirst(e.pathComponents.count)).joined(separator: "/"))
           }
         } else if !e.lastPathComponent.hasPrefix(".") {
-          guard let flatDirs else { return [] }
+          guard let flatDirs else { return nil }
           guard let to = flatDirs["." + e.pathExtension.lowercased()] else { continue }
-          files += 1
-          if to.lowercased() == "maps" { mine.append(e) }
+          rels.append(to + "/" + e.lastPathComponent)
         }
       }
-      if files == 0 { return [] }
-      for f in mine where f.pathExtension.lowercased() == "unr" && !shipped.contains(f.lastPathComponent.lowercased()) {
-        maps[f.lastPathComponent.lowercased()] = StartMap(mod: m.name, map: f.deletingPathExtension().lastPathComponent)
+      if rels.isEmpty { return nil }
+      placed.append((m.name, rels))
+    }
+    return placed
+  }
+
+  nonisolated static func addedMaps(game: URL) -> [StartMap] {
+    guard let placed = placedFiles(game: game) else { return [] }
+    let shipped = Set(entries(game).filter { isDir($0) && $0.lastPathComponent.lowercased() == "maps" }.flatMap(entries)
+      .filter { !isDir($0) }.map { $0.lastPathComponent.lowercased() })
+    var maps: [String: StartMap] = [:]
+    for (mod, rels) in placed {
+      for rel in rels {
+        let parts = rel.components(separatedBy: "/")
+        guard parts.count == 2, parts[0].lowercased() == "maps", parts[1].lowercased().hasSuffix(".unr"), !shipped.contains(parts[1].lowercased()) else { continue }
+        maps[parts[1].lowercased()] = StartMap(mod: mod, map: String(parts[1].dropLast(4)))
       }
     }
     return maps.values.sorted { $0.map.uppercased() < $1.map.uppercased() }   // as StringComparer.OrdinalIgnoreCase
   }
+
+  // Two enabled mods with a file at the same game path: the later mod's file is used. One line per (earlier, later) pair
+  // in mod order, the paths without case. MIRRORS ModOverlay.Conflicts (the owner) and launcher/Desktop/Logic.cs
+  // ModsIni.Conflicts (the texts).
+  nonisolated static func conflictLines(game: URL) -> [String] {
+    guard let placed = placedFiles(game: game), placed.count > 1 else { return [] }
+    var owner: [String: Int] = [:], pairs: [(earlier: Int, later: Int, files: [String])] = []
+    for (i, p) in placed.enumerated() {
+      for rel in p.rels {
+        let key = rel.lowercased()   // without case, as Prepare places it
+        if let j = owner[key], j != i {
+          if let at = pairs.firstIndex(where: { $0.earlier == j && $0.later == i }) { pairs[at].files.append(rel) } else { pairs.append((j, i, [rel])) }
+        }
+        owner[key] = i
+      }
+    }
+    return pairs.map { p in
+      let files = p.files.sorted { $0.uppercased() < $1.uppercased() }, later = placed[p.later].mod
+      return "\(later) and \(placed[p.earlier].mod) both have "
+        + (files.count == 1 ? files[0] : "\(files[0]) and \(files.count - 1) more file" + (files.count == 2 ? "" : "s"))
+        + ": the game uses \(later)'s (later in the order)"
+    }
+  }
+
+  // The apply order of an enabled mod (1 first; a higher number wins a file both have); nil for a disabled one.
+  // As launcher/Desktop/MainWindow.cs ModOrder_ and Logic.cs ModsIni.OrderHint.
+  nonisolated static let orderHint = "Enabled mods apply in number order: a higher number wins"
+  nonisolated static func orderNumber(_ mods: [Mod], _ m: Mod) -> Int? { mods.filter(\.enabled).firstIndex(of: m).map { $0 + 1 } }
 
   // Why Play cannot start: enabled mods whose folder is gone (the engine would stop with exit code 5); nil: none.
   // Same texts as launcher/Desktop/Logic.cs ModsIni.Missing.
@@ -483,7 +694,7 @@ final class LineReader: @unchecked Sendable {
       let v = Int32(bitPattern: UInt32(b[p]) | UInt32(b[p + 1]) << 8 | UInt32(b[p + 2]) << 16 | UInt32(b[p + 3]) << 24)
       p += 4; return Int(v)
     }
-    guard str() == "HP1SAV", let ver = i32(), (1...5).contains(ver) else { return nil }
+    guard str() == "HP1SAV", let ver = i32(), (1...6).contains(ver) else { return nil }
     if ver < 5 { return SlotMods(mods: [], legacy: true) }
     guard let count = i32(), (0...256).contains(count) else { return nil }
     var mods: [String] = []
@@ -522,7 +733,7 @@ final class LineReader: @unchecked Sendable {
   }
   func updateModsNotice() {
     modsNotice = Launcher.noticeLines(enabled: mods.filter(\.enabled).map(\.name), slots: Launcher.slotMods(game: Launcher.gameURL))
-      + Launcher.misplacedLines(game: Launcher.gameURL, mods: mods)
+      + Launcher.misplacedLines(game: Launcher.gameURL, mods: mods) + Launcher.conflictLines(game: Launcher.gameURL)
   }
 
   func saveMods() {
@@ -592,7 +803,8 @@ final class LineReader: @unchecked Sendable {
       .applicationName: "HPEngine Launcher",
       .credits: NSAttributedString(string:
         "HPEngine runs \(Launcher.gameTitle(edition)) (PC, 2001) from your own copy of the game. "
-        + "No game files are included. Game data: \(Launcher.gameURL.path)"),
+        + "No game files are included. Game data: \(Launcher.gameURL.path)"
+        + (Launcher.hp2Root.map { "\n\nHarry Potter and the Chamber of Secrets: \($0). Its menu's layout is HPEngine's own (not the original dialog's look); what it offers and starts is the original's." } ?? "")),
     ])
   }
 
@@ -646,6 +858,11 @@ final class LineReader: @unchecked Sendable {
   }
   @Published var newer: Release?
   @Published var updating = false
+  // The HP2 tab (extension below): the selected tab, the dialog page (Main | NewGame | LoadGame), the scanned slots.
+  @Published var hp2Tab = false
+  @Published var hp2Page = "Main"
+  @Published var hp2Slots: [Hp2FrontEnd.Slot] = []
+  @Published var hp2RootPath: String?
   static var releases: URL {  // HPENGINE_RELEASES_URL: a test feed (file:// works)
     URL(string: ProcessInfo.processInfo.environment["HPENGINE_RELEASES_URL"]
         ?? "https://api.github.com/repos/artemnikonov/hpengine/releases?per_page=30")!
@@ -671,14 +888,14 @@ final class LineReader: @unchecked Sendable {
   func updateLauncher() {
     guard let n = newer, !playing, !running else { return }
     guard let zip = n.zip, let sig = n.sig, let key = Launcher.updateKey else {
-      error = "This update can't be verified automatically. Download it from the release page."
+      launcherError = "This update can't be verified automatically. Download it from the release page."
       NSWorkspace.shared.open(n.page); return
     }
     let me = Bundle.main.bundleURL
     if me.path.contains("/AppTranslocation/") {
-      error = "Move HPEngine Launcher to the Applications folder, open it from there and try again."; return
+      launcherError = "Move HPEngine Launcher to the Applications folder, open it from there and try again."; return
     }
-    updating = true; error = nil
+    updating = true; launcherError = nil
     Task {
       let r: Result<URL, UpdateError>
       do {
@@ -699,7 +916,7 @@ final class LineReader: @unchecked Sendable {
         try? p.run()
         NSApp.terminate(nil)
       case .failure(let e):
-        updating = false; error = e.text
+        updating = false; launcherError = e.text
       }
     }
   }
@@ -739,124 +956,851 @@ final class LineReader: @unchecked Sendable {
   }
 }
 
-// ── Look (2026-11-12): dark warm background, content in cards, gold accent (the game's own gold), the burgundy header.
-// The same design is used by the Windows/Linux Launcher (launcher/Desktop/MainWindow.cs).
-enum Theme {
-  static let bg = Color(red: 0.090, green: 0.078, blue: 0.098)        // #17141A
-  static let card = Color(red: 0.133, green: 0.118, blue: 0.145)      // #221E25
-  static let stroke = Color.white.opacity(0.08)
-  static let gold = Color(red: 0.851, green: 0.663, blue: 0.333)      // #D9A955
-  static let goldDark = Color(red: 0.745, green: 0.565, blue: 0.259)  // #BE9042
-  static let text = Color(red: 0.933, green: 0.910, blue: 0.875)      // #EEE8DF
-  static let dim = Color(red: 0.639, green: 0.612, blue: 0.576)       // #A39C93
-  static let green = Color(red: 0.482, green: 0.769, blue: 0.498)     // #7BC47F
-  static let amber = Color(red: 0.878, green: 0.647, blue: 0.290)     // #E0A54A
-  static let red = Color(red: 0.902, green: 0.420, blue: 0.400)       // #E66B66
-  static let header = LinearGradient(colors: [Color(red: 0.42, green: 0.10, blue: 0.10), Color(red: 0.12, green: 0.05, blue: 0.08)],
-                                     startPoint: .topLeading, endPoint: .bottomTrailing)
-}
+// The HP2 tab (as launcher/Desktop/MainWindow.Hp2.cs): HP2's own front end — Main Menu, New Game, Load Game — its page
+// flow from Hp2FrontEnd, drawn in the launcher's look ("not original", DECISIONS "HP2 main menu in the launcher").
+extension Launcher {
+  static let hp2Title = "Harry Potter and the Chamber of Secrets"
+  static let hp2RootFile = dataURL.appendingPathComponent("hp2-root.txt")   // beside the HP1 data directory
+  static var hp2SaveDir: String { renderSaveDir ?? Hp2FrontEnd.saveDir(gameURL.path) }
+  static var renderSaveDir: String?   // --render-states only: a temporary folder with synthetic thumbnails
+  static func hp2Valid(_ r: String?) -> Bool {
+    guard let r else { return false }
+    return FileManager.default.fileExists(atPath: r + "/System/Engine.dll") && FileManager.default.fileExists(atPath: r + "/System/Startup.int")
+  }
+  static var hp2Root: String? {
+    guard Hp2Release.available else { return nil }   // the release switch off: the saved folder is ignored
+    let r = (try? String(contentsOf: hp2RootFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+    return hp2Valid(r) ? r : nil
+  }
 
-struct Card<Content: View>: View {
-  var title: String? = nil
-  @ViewBuilder var content: Content
-  var body: some View {
-    VStack(alignment: .leading, spacing: 10) {
-      if let title { Text(title.uppercased()).font(.system(size: 11, weight: .semibold)).tracking(0.8).foregroundStyle(Theme.dim) }
-      content
+  func chooseHp2() {
+    let p = NSOpenPanel()
+    p.canChooseDirectories = true; p.canChooseFiles = false
+    p.message = "Installed Harry Potter and the Chamber of Secrets"
+    if p.runModal() == .OK, let u = p.url {
+      if !Launcher.hp2Valid(u.path) { hp2Error = "Not an installed HP2 game folder (no System/Engine.dll and System/Startup.int): \(u.path)" }
+      else {
+        do { try FileManager.default.createDirectory(at: Launcher.dataURL, withIntermediateDirectories: true)
+             try u.path.write(to: Launcher.hp2RootFile, atomically: true, encoding: .utf8); hp2Error = nil }
+        catch { self.hp2Error = error.localizedDescription }
+      }
     }
-    .frame(maxWidth: .infinity, alignment: .leading).padding(14)
-    .background(RoundedRectangle(cornerRadius: 12).fill(Theme.card))
-    .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.stroke))
+    hp2Page = "Main"; hp2Scan()
+  }
+
+  // OnInitDialog's slot scan — each time the menu opens, as each start of Game.exe ran it.
+  func hp2Scan() {
+    hp2RootPath = Launcher.hp2Root
+    hp2Slots = hp2RootPath == nil ? [] : Hp2FrontEnd.scan("", Hp2FrontEnd.Files(Launcher.hp2SaveDir), saveFile: Hp2FrontEnd.portSave)
+  }
+
+  func hp2Click(_ s: Hp2FrontEnd.Slot) {
+    guard let root = hp2RootPath else { return }
+    if hp2Page == "NewGame" {
+      // MessageBoxW(MB_YESNO, HPMenu [All] Select_Game_0001, caption Select_Game_0002) for a used slot
+      let ask = {
+        let a = NSAlert()
+        a.messageText = Hp2FrontEnd.localize(root, "HPMenu", "All", "Select_Game_0002")
+        a.informativeText = Hp2FrontEnd.localize(root, "HPMenu", "All", "Select_Game_0001")
+        a.addButton(withTitle: "Yes"); a.addButton(withTitle: "No")
+        return a.runModal() == .alertFirstButtonReturn
+      }
+      if Hp2FrontEnd.newGame(s, confirmReplace: ask, Hp2FrontEnd.Files(Launcher.hp2SaveDir)) { hp2Play(root, Hp2FrontEnd.commandLine(.newGame, s.n, "")) }
+    } else if Hp2FrontEnd.loadGame(s) { hp2Play(root, Hp2FrontEnd.commandLine(.loadGame, s.n, "")) }
+  }
+
+  // The new Game.exe process the original starts, here HPEngine on the HP2 folder with the original's parameters.
+  func hp2Play(_ root: String, _ cmdline: String) {
+    guard !playing, unquarantine() else { return }
+    let fm = FileManager.default, logURL = Launcher.launchLog(hp2: true)
+    try? fm.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    fm.createFile(atPath: logURL.path, contents: nil)
+    let p = Process()
+    p.executableURL = Launcher.runtimeURL.appendingPathComponent("HPEngine")
+    p.arguments = Hp2FrontEnd.playArgs(root, Launcher.hp2SaveDir, cmdline)
+    p.currentDirectoryURL = URL(fileURLWithPath: root)
+    if let log = FileHandle(forWritingAtPath: logURL.path) { p.standardOutput = log; p.standardError = log }
+    p.standardInput = FileHandle.nullDevice
+    p.terminationHandler = { pr in
+      let status = pr.terminationStatus
+      DispatchQueue.main.async {
+        MainActor.assumeIsolated {
+          self.playing = false
+          if status != 0 {
+            let said = ((try? String(contentsOf: logURL, encoding: .utf8)) ?? "").components(separatedBy: "\n")
+            self.hp2Error = Launcher.errorBanner(said, code: status, log: "Open log, or \(logURL.path).")
+            self.hp2RunError = self.hp2Error
+          }
+          self.hp2Page = "Main"; self.hp2Scan()
+        }
+      }
+    }
+    do { try p.run(); playing = true; hp2Error = nil } catch { self.hp2Error = error.localizedDescription; return }
+    Launcher.handFocus(to: p.processIdentifier)
   }
 }
 
-struct GoldButtonStyle: ButtonStyle {
-  @Environment(\.isEnabled) var enabled
-  func makeBody(configuration c: Configuration) -> some View {
-    c.label.font(.system(size: 15, weight: .semibold)).foregroundStyle(Color(red: 0.16, green: 0.10, blue: 0.06))
-      .padding(.horizontal, 22).frame(height: 40)
-      .background(RoundedRectangle(cornerRadius: 10).fill(c.isPressed ? Theme.goldDark : Theme.gold))
-      .opacity(enabled ? 1 : 0.45)
+// ── HP2 in the launcher, the release switch (author 2026-11-16, release 0.4.0): a MIRROR of launcher/Desktop/Logic.cs
+// Hp2Release (compared through --game-scope). Off: the HP2 tab shown but disabled ("Coming soon", a tooltip; no click, Cmd+2
+// or pad RB), its saved state ignored. Build-time: Info.plist HPEngineHp2 = true (make_launcher.sh with HPENGINE_HP2=1, a
+// preview build); the release has no such key.
+enum Hp2Release {
+  nonisolated(unsafe) static var available = Bundle.main.infoDictionary?["HPEngineHp2"] as? Bool == true
+  static let soon = "Coming soon", soonTip = "Harry Potter 2 is coming soon. Wait for updates."
+  static func caption(_ available: Bool, folderSet: Bool) -> String? { !available ? soon : folderSet ? nil : "not set up" }
+  static func tip(_ available: Bool) -> String? { available ? nil : soonTip }
+}
+
+// ── Per game (author 2026-11-16): a MIRROR of launcher/Desktop/Logic.cs GameScope (launcher/test_update.sh compares the
+// answers, --game-scope): the banner of the selected tab, the folder and logs of each game's run, the console capture.
+enum GameScope {
+  static func error(hp2Tab: Bool, hp1: String?, hp2: String?, launcher: String?) -> String? { launcher ?? (hp2Tab ? hp2 : hp1) }
+  static func dataDir(_ hp1Game: String, hp2: Bool) -> String {
+    hp2 ? ((Hp2FrontEnd.saveDir(hp1Game) as NSString).deletingLastPathComponent as NSString).appendingPathComponent("HPEngineData")
+        : (hp1Game as NSString).appendingPathComponent("HPEngineData")
+  }
+  static func logsDir(_ hp1Game: String, hp2: Bool) -> String { (dataDir(hp1Game, hp2: hp2) as NSString).appendingPathComponent("logs") }
+  static func consoleLog(_ hp1Log: String, hp2: Bool) -> String { hp2 ? String(hp1Log.dropLast(4)) + "-HP2.log" : hp1Log }
+  static func table(_ game: String) -> [String] {
+    var t: [String] = []
+    for tab in [false, true] { for h1 in [nil, "e1"] { for h2 in [nil, "e2"] { for l in [nil, "eL"] {
+      t.append("error hp2Tab=\(tab ? 1 : 0) hp1=\(h1 ?? "-") hp2=\(h2 ?? "-") launcher=\(l ?? "-") -> \(error(hp2Tab: tab, hp1: h1, hp2: h2, launcher: l) ?? "-")") } } } }
+    for hp2 in [false, true] {
+      t.append("game hp2=\(hp2 ? 1 : 0) data=\(dataDir(game, hp2: hp2)) logs=\(logsDir(game, hp2: hp2)) console=\(consoleLog("/d/HPEngine.log", hp2: hp2))") }
+    for on in [false, true] { for folder in [false, true] {
+      t.append("hp2tab available=\(on ? 1 : 0) folder=\(folder ? 1 : 0) caption=\(Hp2Release.caption(on, folderSet: folder) ?? "-") tip=\(Hp2Release.tip(on) ?? "-")") } }
+    return t
   }
 }
 
-struct QuietButtonStyle: ButtonStyle {
+// ── The gamepad (proposal §6): a MIRROR of launcher/Desktop/Logic.cs PadMap, the one answer of both launchers
+// (launcher/test_update.sh compares the two tables, --pad-map). Buttons in SDL_GamepadButton numbers; Launcher.readPad maps
+// Apple's GameController buttons onto them (native, no library: the SDL3 HPEngine ships is per architecture inside the
+// bundle and would add a loader for what GameController gives). popup: a list or a dialog is open; hp2: the HP2 tab.
+enum PadAction: String { case none = "None", activate = "Activate", escape = "Escape", back = "Back", hp1 = "Hp1", hp2 = "Hp2",
+  menu = "Menu", play = "Play", keyUp = "KeyUp", keyDown = "KeyDown", previous = "Previous", next = "Next" }
+enum PadMap {
+  static let a = 0, b = 1, x = 2, y = 3, back = 4, start = 6, leftStick = 7, rightStick = 8, lb = 9, rb = 10, up = 11, down = 12, left = 13, right = 14
+  static func action(_ button: Int, popup: Bool, hp2: Bool) -> PadAction {
+    switch button {
+    case a: return .activate
+    case b: return popup ? .escape : .back
+    case lb: return popup || !hp2 ? .none : .hp1
+    case rb: return popup || hp2 ? .none : .hp2
+    case start: return popup ? .none : .menu
+    case y: return popup || hp2 ? .none : .play
+    case up, left: return popup ? .keyUp : .previous
+    case down, right: return popup ? .keyDown : .next
+    default: return .none
+    }
+  }
+  // The left stick past half way (16000 of SDL's 32767) as d-pad bits; x right, y down, each -1..1.
+  static func stick(_ x: Double, _ y: Double) -> UInt32 {
+    let half = 16000 / 32767.0
+    var bits: UInt32 = 0
+    if y < -half { bits |= 1 << up }; if y > half { bits |= 1 << down }
+    if x < -half { bits |= 1 << left }; if x > half { bits |= 1 << right }
+    return bits
+  }
+  // The buttons pressed since the last poll, in button order (one action per press).
+  static func pressed(_ now: UInt32, _ last: UInt32) -> [Int] { (0...right).filter { now & ~last & (1 << $0) != 0 } }
+  // The table launcher/Desktop.Tests --pad-map prints (Program.cs PadTable), line for line.
+  static func table() -> [String] {
+    var t: [String] = []
+    for b in 0...15 { for popup in [false, true] { for hp2 in [false, true] {
+      t.append("button \(b) popup=\(popup ? 1 : 0) hp2=\(hp2 ? 1 : 0) \(action(b, popup: popup, hp2: hp2).rawValue)") } } }
+    for (x, y) in [(0, 0), (16000, 0), (16001, 0), (-16000, 0), (-16001, 0), (0, 16001), (0, -16001), (0, 16000), (32767, 32767), (-32768, -32768), (-32768, 16001)] {
+      t.append("stick \(x) \(y) \(stick(Double(x) / 32767.0, Double(y) / 32767.0))") }
+    for (now, last): (UInt32, UInt32) in [(0, 0), (1, 0), (1, 1), (0b1011, 0b0001), (1 << 14 | 1 << 9, 1 << 14), (1 << 15, 0), (0x7FFF, 0)] {
+      t.append("pressed \(now) \(last) " + pressed(now, last).map(String.init).joined(separator: ",")) }
+    return t
+  }
+}
+
+// A control the pad (and the arrow keys in a list) can focus: its id, whether it is the screen's primary (focus starts
+// there, as Desktop's KeepFocus) and what A does. The window registers them in layout order (PadTargets preference); the
+// actions read the Launcher when run, so a target is equal by id.
+struct PadTarget: Equatable {
+  let id: String, primary: Bool, run: () -> Void
+  static func == (l: PadTarget, r: PadTarget) -> Bool { l.id == r.id && l.primary == r.primary }
+}
+struct PadTargets: PreferenceKey {
+  static let defaultValue: [PadTarget] = []
+  static func reduce(value: inout [PadTarget], nextValue: () -> [PadTarget]) { value += nextValue() }
+}
+// An in-window list (the Menu, Language, Start map), the one popup of mouse, keyboard and pad. A header with no title
+// is a separator.
+struct PopItem {
+  let title: String
+  var header = false, enabled = true, destructive = false, checked = false
+  var run: () -> Void = {}
+}
+struct Popup { let items: [PopItem]; let anchor: String }   // anchor: the id of the control that opened it; the list opens at it
+
+extension Launcher {
+  var targets: [PadTarget] {
+    guard let pop = popup else { return padTargets }
+    return pop.items.enumerated().compactMap { i, it in it.header || !it.enabled ? nil : PadTarget(id: "pop\(i)", primary: false) { self.pick(it) } }
+  }
+  func target(_ id: String) -> PadTarget? { targets.first { $0.id == id } }
+  // Focus gone (start, a rebuilt page, a list opened): the screen's primary, else its first target.
+  func keepFocus() {
+    let t = targets
+    if let f = padFocus, t.contains(where: { $0.id == f }) { return }
+    padFocus = t.first(where: \.primary)?.id ?? t.first?.id
+  }
+  func move(_ d: Int) {
+    let t = targets
+    guard !t.isEmpty else { return }
+    let i = t.firstIndex { $0.id == padFocus } ?? (d > 0 ? -1 : t.count)
+    padFocus = t[(i + d + t.count) % t.count].id   // wraps, as Tab order does on Windows/Linux
+  }
+  func openPopup(_ items: [PopItem], from anchor: String) {
+    focusBeforePopup = padFocus; popup = Popup(items: items, anchor: anchor)
+    padFocus = items.firstIndex { $0.checked && $0.enabled }.map { "pop\($0)" }; keepFocus()   // a choice list opens at its choice
+  }
+  // In an open list: to a position of its targets (clamped: Home, End, a page), and type-ahead (the next item whose title
+  // starts with the letter typed).
+  func moveTo(_ i: Int) {
+    let t = targets
+    if !t.isEmpty { padFocus = t[min(max(i, 0), t.count - 1)].id }
+  }
+  func moveBy(_ d: Int) { moveTo((targets.firstIndex { $0.id == padFocus } ?? 0) + d) }
+  // The list's indicator dragged (or its track clicked) to a fraction 0...1 of its travel: the list scrolls to that fraction.
+  func dragList(_ frac: CGFloat) {
+    guard let sv = listScroller, let doc = sv.documentView else { return }
+    let travel = max(doc.frame.height - sv.contentView.bounds.height, 0)
+    sv.contentView.scroll(to: NSPoint(x: 0, y: min(max(frac, 0), 1) * travel)); sv.reflectScrolledClipView(sv.contentView)
+  }
+  static func itemHeight(_ it: PopItem) -> CGFloat { it.header ? (it.title.isEmpty ? 9 : 28) : 40 }
+  static func popupHeight(_ pop: Popup) -> CGFloat { pop.items.reduce(0) { $0 + itemHeight($1) } }
+  func typeAhead(_ c: String) {
+    guard let pop = popup else { return }
+    let t = targets, at = t.firstIndex { $0.id == padFocus } ?? -1
+    let hits = t.indices.filter { Int(t[$0].id.dropFirst(3)).map { pop.items[$0].title.lowercased().hasPrefix(c.lowercased()) } ?? false }
+    if let i = hits.first(where: { $0 > at }) ?? hits.first { padFocus = t[i].id }
+  }
+  func closePopup() { popup = nil; padFocus = focusBeforePopup; keepFocus() }
+  func pick(_ it: PopItem) { closePopup(); it.run() }
+  // B / Escape: close the list, else the visible sub-page's Back. false: nothing to go back from.
+  func goBack() -> Bool {
+    if popup != nil { closePopup(); return true }
+    guard let t = target("back") else { return false }
+    t.run(); return true
+  }
+
+  // One gamepad button: what PadMap says, on the focused target, the open list or a dialog of AppKit (an alert, a file
+  // panel: keys posted to it, as Desktop sends them to its dialog windows).
+  func pad(_ button: Int) {
+    padUsed = true
+    let modal = NSApp?.modalWindow
+    keepFocus()
+    switch PadMap.action(button, popup: popup != nil || modal != nil, hp2: hp2Tab) {
+    case .activate: if modal != nil { postKey(36, "\r") } else { target(padFocus ?? "")?.run() }
+    case .escape: if modal != nil { postKey(53, "\u{1b}") } else { closePopup() }
+    case .back: _ = goBack()
+    case .hp1: target("tab1")?.run()
+    case .hp2: target("tab2")?.run()
+    case .menu: target("menu")?.run()
+    case .play: target("play")?.run()   // registered only while Play is shown and enabled
+    case .keyUp: if modal != nil { postKey(126, String(UnicodeScalar(NSUpArrowFunctionKey)!)) } else { move(-1) }
+    case .keyDown: if modal != nil { postKey(125, String(UnicodeScalar(NSDownArrowFunctionKey)!)) } else { move(1) }
+    case .previous: move(-1)
+    case .next: move(1)
+    case .none: break
+    }
+  }
+  func postKey(_ code: UInt16, _ ch: String) {
+    guard let w = NSApp.modalWindow else { return }
+    for t in [NSEvent.EventType.keyDown, .keyUp] {
+      if let e = NSEvent.keyEvent(with: t, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: w.windowNumber,
+                                  context: nil, characters: ch, charactersIgnoringModifiers: ch, isARepeat: false, keyCode: code) { NSApp.postEvent(e, atStart: false) }
+    }
+  }
+  // The first connected controller's buttons as PadMap bits; nil: no controller.
+  static func readPad() -> UInt32? {
+    guard let g = (GCController.current ?? GCController.controllers().first)?.extendedGamepad else { return nil }
+    var bits: UInt32 = 0
+    let buttons: [(GCControllerButtonInput?, Int)] = [(g.buttonA, PadMap.a), (g.buttonB, PadMap.b), (g.buttonX, PadMap.x), (g.buttonY, PadMap.y),
+      (g.buttonOptions, PadMap.back), (g.buttonMenu, PadMap.start), (g.leftThumbstickButton, PadMap.leftStick), (g.rightThumbstickButton, PadMap.rightStick),
+      (g.leftShoulder, PadMap.lb), (g.rightShoulder, PadMap.rb), (g.dpad.up, PadMap.up), (g.dpad.down, PadMap.down), (g.dpad.left, PadMap.left), (g.dpad.right, PadMap.right)]
+    for (b, n) in buttons where b?.isPressed == true { bits |= 1 << n }
+    return bits | PadMap.stick(Double(g.leftThumbstick.xAxis.value), Double(-g.leftThumbstick.yAxis.value))   // GameController's y is up
+  }
+  // Polls the pad every 50 ms (in every run loop mode: also while an alert or a file panel is open); acts while this app
+  // is in front and no game runs, as Desktop's StartGamepad.
+  func startPad() {
+    let t = Timer(timeInterval: 0.05, repeats: true) { _ in
+      MainActor.assumeIsolated {
+        let now = Launcher.readPad()
+        if self.padConnected != (now != nil) { self.padConnected = now != nil }
+        if let bits = now, NSApp.isActive, !self.playing { for b in PadMap.pressed(bits, self.padLast) { self.pad(b) } }
+        self.padLast = now ?? 0
+      }
+    }
+    RunLoop.main.add(t, forMode: .common)
+  }
+  // The keys of the window that SwiftUI shortcuts do not cover: Escape = Back (or closes the list); in an open list the
+  // arrows move and Return picks. Cmd+1 / Cmd+2 / Cmd+, are the tabs' and the Menu button's shortcuts.
+  func startKeys() {
+    NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
+      let code = e.keyCode, plain = e.modifierFlags.intersection([.command, .control, .option]).isEmpty
+      let used = MainActor.assumeIsolated { () -> Bool in
+        guard NSApp.modalWindow == nil, plain else { return false }
+        switch code {
+        case 53: return self.goBack()
+        case 125, 126: guard self.popup != nil else { return false }; self.padUsed = true; self.move(code == 126 ? -1 : 1); return true
+        case 36, 76: guard self.popup != nil else { return false }; self.target(self.padFocus ?? "")?.run(); return true
+        case 115, 119, 116, 121:   // Home, End, Page Up, Page Down
+          guard self.popup != nil else { return false }; self.padUsed = true
+          switch code { case 115: self.moveTo(0); case 119: self.moveTo(Int.max); case 116: self.moveBy(-Launcher.page); default: self.moveBy(Launcher.page) }
+          return true
+        default:
+          guard self.popup != nil, let c = e.charactersIgnoringModifiers, c.count == 1, c.first!.isLetter || c.first!.isNumber else { return false }
+          self.padUsed = true; self.typeAhead(c); return true
+        }
+      }
+      return used ? nil : e
+    }
+  }
+
+  // The Menu (proposal §2): "This game" per tab (Remove Game its last item, in red), "Launcher" — the items of launcher/Desktop.
+  func menuItems() -> [PopItem] {
+    var m = [PopItem(title: "This game", header: true)]
+    if hp2Tab {
+      m += [PopItem(title: "Open Saved Games Folder", enabled: hp2RootPath != nil) { self.open(URL(fileURLWithPath: Launcher.hp2SaveDir)) },
+            PopItem(title: "Open Logs Folder") { self.open(Launcher.logsDir(hp2: true)) },
+            PopItem(title: "Change Game Folder…", enabled: !playing) { self.chooseHp2() }]
+    } else {
+      m += [PopItem(title: "Open Saved Games Folder", enabled: installed) { self.open(Launcher.savesURL) },
+            PopItem(title: "Open Logs Folder") { self.open(Launcher.logsURL) },
+            PopItem(title: "Install Again from Other Files…", enabled: !running && !playing) { self.choose() },
+            PopItem(title: "Reset Settings…", enabled: installed) { self.resetSettings() },
+            PopItem(title: "Reset Gamepad Bindings…", enabled: installed && !playing && Launcher.padRebound(game: Launcher.gameURL) > 0) { self.resetPad() },
+            PopItem(title: "Remove Game…", enabled: installed && !running && !playing, destructive: true) { self.removeGame() }]
+    }
+    m += [PopItem(title: "Launcher", header: true),
+          PopItem(title: "Check for Updates") { self.checkForUpdate(manual: true) },
+          PopItem(title: "About HPEngine Launcher") { self.about() }]
+    return m
+  }
+}
+
+// ── HP2 front end: a MIRROR of launcher/Desktop/Logic.cs Hp2FrontEnd (the owner, judged against HP2 Game.exe by
+// tools/hp2/frontend_judge.sh). launcher/test_update.sh pins every rule here to the owner: the judge's cases
+// (--hp2-frontend, answers byte for byte) and the menu on real folders (--hp2-menu). Change the owner first.
+protocol Hp2Files {
+  func fileSize(_ p: String) -> Int64
+  func delete(_ p: String)
+  func makeDirectory(_ p: String)
+  func findFiles(_ pattern: String) -> [String]
+  func deleteCache(_ dir: String)   // not original: the port's <slot>/cache folder (clear)
+}
+
+enum Hp2FrontEnd {
+  static let slots = 6
+  static let originalSave = "Save0.usa", portSave = "save0.hp1sav"   // the slot's save file: the judge's / the port's
+  static func join(_ a: String, _ b: String) -> String { a.isEmpty || a.hasSuffix("\\") ? a + b : a + "\\" + b }
+  static func slotDir(_ savePath: String, _ n: Int) -> String { join(savePath, "Slot") + String(n) }
+  struct Slot { let n: Int; let dir: String; let used: Bool; let thumb: String? }
+
+  static func scan(_ savePath: String, _ fs: Hp2Files, saveFile: String = originalSave) -> [Slot] {
+    (1...slots).map { n in
+      let dir = slotDir(savePath, n)
+      fs.makeDirectory(dir)
+      let used = fs.fileSize(join(dir, saveFile)) >= 1
+      if !used { clear(dir, fs) }
+      return Slot(n: n, dir: dir, used: used, thumb: used ? join(dir, "Save0.bmp") : nil)
+    }
+  }
+  static func clear(_ dir: String, _ fs: Hp2Files) {
+    if dir.isEmpty { return }
+    for f in fs.findFiles(join(dir, "*.*")) where fs.fileSize(join(dir, f)) != 0 { fs.delete(join(dir, f)) }
+    fs.deleteCache(dir)
+  }
+
+  enum Launch { case newGame, loadGame }
+  static func asksToReplace(_ s: Slot) -> Bool { s.used }
+  static func newGame(_ s: Slot, confirmReplace: () -> Bool, _ fs: Hp2Files) -> Bool {
+    if asksToReplace(s) && !confirmReplace() { return false }
+    clear(s.dir, fs)
+    return true
+  }
+  static func loadGame(_ s: Slot) -> Bool { s.used }
+  static func commandLine(_ what: Launch, _ slot: Int, _ cmdline: String) -> String {
+    let s = " -SAVESLOT=\(slot)"
+    return what == .newGame ? "PrivetDr.unr " + s + cmdline : cmdline + " -LOADGAME=0 " + s
+  }
+  static func label(_ s: Slot, empty: String, used: String) -> String { "\(s.n) - \(s.used ? used : empty)" }
+
+  // Path.GetFullPath on Unix: absolute against the working directory, "." and ".." resolved textually (no symlinks;
+  // Foundation's standardizing would also drop a "/private" prefix, which .NET keeps).
+  static func fullPath(_ p: String) -> String {
+    var parts: [Substring] = []
+    for c in (p.hasPrefix("/") ? p : FileManager.default.currentDirectoryPath + "/" + p).split(separator: "/") {
+      if c == ".." { _ = parts.popLast() } else if c != "." { parts.append(c) }
+    }
+    return "/" + parts.joined(separator: "/")
+  }
+  // Path.GetDirectoryName(Path.GetFullPath(hp1DataDir)) + HP2Data/Save
+  static func saveDir(_ hp1DataDir: String) -> String { (fullPath(hp1DataDir) as NSString).deletingLastPathComponent + "/HP2Data/Save" }
+
+  // Files under one directory; a path resolving outside it is refused.
+  struct Files: Hp2Files {
+    let root: String
+    init(_ dir: String) { root = fullPath(dir) }
+    func host(_ p: String) -> String? {
+      let q = p.replacingOccurrences(of: "\\", with: "/")
+      let h = fullPath(q.hasPrefix("/") ? q : root + "/" + q)
+      return h == root || h.hasPrefix(root + "/") ? h : nil
+    }
+    func fileSize(_ p: String) -> Int64 {
+      var d: ObjCBool = false
+      guard let h = host(p), FileManager.default.fileExists(atPath: h, isDirectory: &d), !d.boolValue,
+            let s = (try? FileManager.default.attributesOfItem(atPath: h))?[.size] as? NSNumber else { return -1 }
+      return s.int64Value
+    }
+    func delete(_ p: String) { if let h = host(p) { try? FileManager.default.removeItem(atPath: h) } }
+    func deleteCache(_ dir: String) {
+      var d: ObjCBool = false
+      if let h = host(join(dir, "cache")), FileManager.default.fileExists(atPath: h, isDirectory: &d), d.boolValue { try? FileManager.default.removeItem(atPath: h) }
+    }
+    func makeDirectory(_ p: String) { if let h = host(p) { try? FileManager.default.createDirectory(atPath: h, withIntermediateDirectories: true) } }
+    func findFiles(_ pattern: String) -> [String] {
+      guard let h = host(pattern) else { return [] }
+      let dir = (h as NSString).deletingLastPathComponent
+      return ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).filter {
+        var d: ObjCBool = false
+        return FileManager.default.fileExists(atPath: dir + "/" + $0, isDirectory: &d) && !d.boolValue
+      }
+    }
+  }
+
+  static func localize(_ gameDir: String, _ package: String, _ section: String, _ key: String) -> String {
+    let lang = ini(gameDir, "Default.ini", "Engine.Engine", "Language") ?? "int"
+    return ini(gameDir, package + "." + lang, section, key) ?? ini(gameDir, package + ".int", section, key) ?? key
+  }
+  static func playArgs(_ gameDir: String, _ saveDir: String, _ cmdline: String) -> [String] {
+    ["--root", gameDir, "--launched-by-launcher", "--hp2-savedir", saveDir, "--hp2-cmdline", cmdline]
+  }
+  // A System/ file by name, any case; text as File.ReadAllLines reads it (BOM, else UTF-8).
+  static func ini(_ gameDir: String, _ name: String, _ section: String, _ key: String) -> String? {
+    let sys = gameDir + "/System"
+    guard let file = ((try? FileManager.default.contentsOfDirectory(atPath: sys)) ?? []).first(where: { $0.lowercased() == name.lowercased() }),
+          let d = FileManager.default.contents(atPath: sys + "/" + file) else { return nil }
+    let b = [UInt8](d)
+    let text: String = b.starts(with: [0xFF, 0xFE]) ? (String(data: d.dropFirst(2), encoding: .utf16LittleEndian) ?? "")
+      : b.starts(with: [0xEF, 0xBB, 0xBF]) ? String(decoding: d.dropFirst(3), as: UTF8.self) : String(decoding: d, as: UTF8.self)
+    var inSec = false
+    for raw in text.components(separatedBy: .newlines) {
+      let l = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+      if l.hasPrefix("[") { inSec = l.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased() == section.lowercased(); continue }
+      if inSec, let eq = l.firstIndex(of: "="), eq > l.startIndex, l[..<eq].lowercased() == key.lowercased() { return String(l[l.index(after: eq)...]) }
+    }
+    return nil
+  }
+
+  // The judge's case kinds (tools/hp2/frontend_judge.py), answered as launcher/Desktop.Tests --hp2-frontend does.
+  final class FakeFiles: Hp2Files {
+    var size: (String) -> Int64 = { _ in -1 }
+    var names: [String] = []
+    var finds: [String] = [], deletes: [String] = [], dirs: [String] = []
+    func fileSize(_ p: String) -> Int64 { size(p) }
+    func delete(_ p: String) { deletes.append(p) }
+    func makeDirectory(_ p: String) { dirs.append(p) }
+    func findFiles(_ pattern: String) -> [String] { finds.append(pattern); return names }
+    func deleteCache(_ dir: String) {}
+  }
+  // "...Slot<digit><tail>" -> the digit (the C# side's regex Slot(\d)<tail>$)
+  static func slotOf(_ p: String, _ tail: String) -> Int? {
+    guard p.hasSuffix(tail) else { return nil }
+    let head = p.dropLast(tail.count)
+    guard let d = head.last, d.isASCII, d.isNumber, head.dropLast().hasSuffix("Slot") else { return nil }
+    return Int(String(d))
+  }
+  static func answer(_ line: String) -> String {
+    let f = line.components(separatedBy: "\t")
+    switch f[0] {
+    case "launch":
+      return "open|" + commandLine(f[1] == "new" ? .newGame : .loadGame, Int(f[2])!, f.count > 3 ? f[3] : "")
+    case "click":
+      let n = Int(f[2])!, used = f[3] == "1", yes = f[4] == "1"
+      var asked = false
+      let fs = FakeFiles(), slot = Slot(n: n, dir: "S\(n)", used: used, thumb: nil)
+      let go = f[1] == "new" ? newGame(slot, confirmReplace: { asked = true; return yes }, fs) : loadGame(slot)
+      let code = f[1] == "new" ? "1" : "2"
+      return "ask=\(asked ? 1 : 0)|clear=\(fs.finds.isEmpty ? "" : String(n))|ini=\(go ? "LaunchCode=\(code),UseSaveSlot=\(n)" : "")|end=\(go ? "0" : "")"
+    case "clear":
+      let fs = FakeFiles()
+      let files: [(name: String, size: Int64)] = f[3] == "-" ? [] : f[3].split(separator: ",").map { x in
+        let p = x.split(separator: ":"); return (String(p[0]), Int64(p[1])!) }
+      fs.names = files.map(\.name)
+      fs.size = { p in files.first { join(f[2], $0.name) == p }?.size ?? -1 }
+      clear(f[2], fs)
+      return "find=\(fs.finds.joined(separator: ","))|delete=\(fs.deletes.joined(separator: ","))|used=0"
+    default:  // scan
+      let sz = f[2].components(separatedBy: ",")
+      let fs = FakeFiles()
+      fs.size = { p in slotOf(p, "\\Save0.usa").flatMap { sz[$0 - 1] == "-" ? nil : Int64(sz[$0 - 1]) } ?? -1 }
+      let slots = scan(f[1], fs)
+      let cleared = fs.finds.map { p in slotOf(p, "\\*.*").map(String.init) ?? "" }
+      return "slots=" + slots.map { s in "\(s.n):\(s.dir):\(s.used ? 1 : 0)" }.joined(separator: ";") + "|mkdir=" + fs.dirs.joined(separator: ",")
+        + "|clear=" + cleared.joined(separator: ",") + "|thumb=" + slots.compactMap(\.thumb).joined(separator: ",")
+    }
+  }
+
+  // The menu on real folders (launcher/test_update.sh against Desktop.Tests --hp2-menu): the save directory, the page
+  // texts, the slots after the scan, a click's outcome and engine arguments, then the files left in the save directory.
+  static func menuReport(hp1Data: String, root: String, click: (Launch, Int, Bool)?) -> [String] {
+    let sd = saveDir(hp1Data), fs = Files(sd)
+    func L(_ s: String, _ k: String) -> String { localize(root, "Startup", s, k) }
+    let slots = scan("", fs, saveFile: portSave)
+    var o = ["savedir=" + sd,
+             "main=" + ["IDC_Title", "IDC_Instructions", "IDC_NewGame", "IDC_LoadGame", "IDC_Options"].map { k in L("IDDIALOG_FrontEndPageMainMenu", k) }.joined(separator: "|")]
+    for p in ["NewGame", "LoadGame"] {
+      let s = "IDDIALOG_FrontEndPage" + p
+      o.append(p + "=" + L(s, "IDC_Title") + "|" + slots.map { x in label(x, empty: L(s, "IDC_SlotEmpty"), used: L(s, "IDC_SlotUsed")) }.joined(separator: "|"))
+    }
+    o.append("slots=" + slots.map { s in "\(s.n):\(s.used ? 1 : 0):\(s.thumb ?? "-")" }.joined(separator: ";"))
+    o.append("ask=" + localize(root, "HPMenu", "All", "Select_Game_0002") + "|" + localize(root, "HPMenu", "All", "Select_Game_0001"))
+    if let (what, n, yes) = click {
+      let s = slots[n - 1]
+      let go = what == .newGame ? newGame(s, confirmReplace: { yes }, fs) : loadGame(s)
+      o.append("go=\(go ? 1 : 0)" + (go ? " " + playArgs(root, sd, commandLine(what, n, "")).joined(separator: "|") : ""))
+    }
+    let files = (FileManager.default.subpaths(atPath: sd) ?? []).filter { r in
+      var d: ObjCBool = false
+      return FileManager.default.fileExists(atPath: sd + "/" + r, isDirectory: &d) && !d.boolValue }
+    o.append("files=" + files.sorted { a, b in Array(a.utf16).lexicographicallyPrecedes(Array(b.utf16)) }.joined(separator: ","))
+    return o
+  }
+}
+
+// ── Look (2026-11-16, design approved by the author; HP1_archive/launcher_design/proposal.md): a fixed 600×560 window; the
+// selected game owns the whole window — its palette, its title, its one primary button; everything rare is in the Menu.
+// The Windows/Linux Launcher (launcher/Desktop) has the same functions (author 2026-11-16). Gamepad A/B/LB/RB/Start/Y
+// (PadMap); Return = the primary button, Escape = Back, Cmd+1 / Cmd+2 = the game, Cmd+, = Menu; every target at least 44 pt.
+func hex(_ v: UInt32, _ a: Double = 1) -> Color {
+  Color(red: Double(v >> 16 & 255) / 255, green: Double(v >> 8 & 255) / 255, blue: Double(v & 255) / 255).opacity(a)
+}
+
+// The proposal's tokens (§4, contrast checked there): HP1 "Stone", HP2 "Chamber".
+struct Palette {
+  let top, mid, bottom, glow, glow2, text, dim, title, accent, accentHover, accentPress, onAccent, surface, surface2, stroke, ok, warn, err, popup: Color
+  let stripe: [(Color, CGFloat)], diagonal: Bool
+  // HP1 "Stone" in warm gold (author 2026-11-16): text >= 4.5:1 on the lightest point (#8C6224), the title (large) >= 3:1.
+  static let hp1 = Palette(top: hex(0x8C6224), mid: hex(0x5A3A17), bottom: hex(0x2B1D0E), glow: hex(0xF2C14E, 0), glow2: hex(0xC8323C, 0.10),
+    text: hex(0xFFF6E6), dim: hex(0xFAF0DD), title: hex(0xF2C14E), accent: hex(0xFFE7A3), accentHover: hex(0xFFF0C4), accentPress: hex(0xF2D27F),
+    onAccent: hex(0x2A1A08), surface: .black.opacity(0.20), surface2: .black.opacity(0.30), stroke: hex(0xFFE7A3, 0.35),
+    ok: hex(0xDBFAD6), warn: hex(0xFFEDBD), err: hex(0xFFDDD8), popup: hex(0x2A1C0D),
+    stripe: [(hex(0xC8323C), 8), (hex(0x2B4FA3), 8), (hex(0xE2AE4A), 2)], diagonal: true)
+  static let hp2 = Palette(top: hex(0x4A1216), mid: hex(0x2F0C10), bottom: hex(0x14050A), glow: hex(0x8E1A1F, 0.45), glow2: hex(0x3F6B3B, 0.16),
+    text: hex(0xF3EAE2), dim: hex(0xC9B29A), title: hex(0xE8C066), accent: hex(0xD4AE62), accentHover: hex(0xE0BE78), accentPress: hex(0xB8956A),
+    onAccent: hex(0x1E0A06), surface: hex(0xFFF0DC, 0.06), surface2: hex(0xFFF0DC, 0.11), stroke: hex(0xB8956A, 0.28),
+    ok: hex(0x86B97F), warn: hex(0xE8C066), err: hex(0xF0A3A0), popup: hex(0x22100F),
+    stripe: [(hex(0x3F6B3B), 10), (hex(0x2C4E29), 2)], diagonal: false)
+}
+struct PaletteKey: EnvironmentKey { static let defaultValue = Palette.hp1 }
+extension EnvironmentValues { var palette: Palette { get { self[PaletteKey.self] } set { self[PaletteKey.self] = newValue } } }
+// The pad-focused target's id while the ring shows (Launcher.padFocus once padUsed).
+struct PadFocusKey: EnvironmentKey { static let defaultValue: String? = nil }
+extension EnvironmentValues { var padFocus: String? { get { self[PadFocusKey.self] } set { self[PadFocusKey.self] = newValue } } }
+// What a target's button style shows besides the pointer: the ring (pad / keyboard focus) and a forced look (--render-states).
+struct TargetLook { var ring = false, force = 0 }   // force: 1 hover, 2 pressed
+struct TargetLookKey: EnvironmentKey { static let defaultValue = TargetLook() }
+struct ForcedLooksKey: EnvironmentKey { static let defaultValue: [String: Int] = [:] }
+extension EnvironmentValues {
+  var targetLook: TargetLook { get { self[TargetLookKey.self] } set { self[TargetLookKey.self] = newValue } }
+  var forcedLooks: [String: Int] { get { self[ForcedLooksKey.self] } set { self[ForcedLooksKey.self] = newValue } }
+}
+// The open list's NSScrollView, found from inside its content: SwiftUI on macOS does not re-run a GeometryReader when
+// AppKit scrolls (wheel, trackpad), so the indicator read a stale offset; the clip view's bounds notifications are live.
+struct ScrollProbe: NSViewRepresentable {
+  let b: Launcher
+  final class Probe: NSView {
+    var b: Launcher?; var watched: NSClipView?
+    override func viewDidMoveToWindow() {
+      super.viewDidMoveToWindow()
+      guard let sv = enclosingScrollView, watched !== sv.contentView else { return }
+      watched = sv.contentView; sv.contentView.postsBoundsChangedNotifications = true
+      NotificationCenter.default.addObserver(self, selector: #selector(moved), name: NSView.boundsDidChangeNotification, object: sv.contentView)
+      b?.listScroller = sv; DispatchQueue.main.async { self.moved() }
+    }
+    @objc func moved() { if let c = watched, b?.listOffset != c.bounds.minY { b?.listOffset = c.bounds.minY } }
+    deinit { NotificationCenter.default.removeObserver(self) }
+  }
+  func makeNSView(context: Context) -> Probe { let v = Probe(); v.b = b; return v }
+  func updateNSView(_ v: Probe, context: Context) {}
+}
+// The frames of the controls that open a list (Menu, Language, Start map): the list opens anchored to its control.
+struct PopupAnchors: PreferenceKey {
+  static let defaultValue: [String: Anchor<CGRect>] = [:]
+  static func reduce(value: inout [String: Anchor<CGRect>], nextValue: () -> [String: Anchor<CGRect>]) { value.merge(nextValue()) { $1 } }
+}
+
+// Registers a control as a pad target (only while enabled: apply before .disabled) and draws the focus ring on it.
+struct PadTargetModifier: ViewModifier {
+  let id: String, primary: Bool, radius: CGFloat, run: () -> Void
+  @Environment(\.isEnabled) var enabled
+  @Environment(\.padFocus) var focus
+  @Environment(\.forcedLooks) var forced
+  @Environment(\.palette) var p
+  func body(content: Content) -> some View {
+    content.environment(\.targetLook, TargetLook(ring: enabled && focus == id, force: forced[id] ?? 0))
+      .ring(enabled && focus == id, p, radius)
+      .preference(key: PadTargets.self, value: enabled ? [PadTarget(id: id, primary: primary, run: run)] : [])
+  }
+}
+
+// Titles: Cormorant Garamond Bold (SIL OFL 1.1, Contents/Resources with its OFL.txt; make_launcher.sh), else the system serif.
+let titleFontName = "CormorantGaramond-Bold"
+func registerTitleFont() {
+  if let u = Bundle.main.url(forResource: titleFontName, withExtension: "ttf") { CTFontManagerRegisterFontsForURL(u as CFURL, .process, nil) }
+}
+func titleFont(_ size: CGFloat) -> Font {
+  NSFont(name: titleFontName, size: size) != nil ? .custom(titleFontName, size: size) : .system(size: size - 4, weight: .bold, design: .serif)
+}
+
+extension View {
+  func padTarget(_ id: String, primary: Bool = false, radius: CGFloat = 10, _ run: @escaping () -> Void) -> some View {
+    modifier(PadTargetModifier(id: id, primary: primary, radius: radius, run: run))
+  }
+  // The focus ring: 3 pt in the title colour, outside the control.
+  func ring(_ on: Bool, _ p: Palette, _ r: CGFloat) -> some View {
+    overlay(RoundedRectangle(cornerRadius: r + 3).strokeBorder(p.title, lineWidth: on ? 3 : 0).padding(-4))
+  }
+  func panel(_ p: Palette) -> some View {
+    background(RoundedRectangle(cornerRadius: 12).fill(.black.opacity(0.22))).overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(p.stroke))
+  }
+}
+
+// The interaction layer every button style shares (both launchers): hover brightens, a press darkens and scales to 0.97,
+// pad / keyboard focus looks like hover plus the ring, the pointing-hand cursor; 150 ms ease-out (a press 80 ms), and with
+// Reduce Motion the colours change without movement or animation. Disabled: none of it.
+struct Interactive<Content: View>: View {
+  let pressed: Bool
+  @ViewBuilder let look: (_ hot: Bool, _ down: Bool) -> Content
+  @State var hover = false
+  @State var cursor = false
+  @Environment(\.isEnabled) var enabled
+  @Environment(\.isFocused) var focused
+  @Environment(\.targetLook) var t
+  @Environment(\.accessibilityReduceMotion) var still
+  var body: some View {
+    let down = enabled && (pressed || t.force == 2), hot = enabled && (hover || focused || t.ring || t.force >= 1)
+    look(hot, down).scaleEffect(down && !still ? 0.97 : 1)
+      .animation(still ? nil : .easeOut(duration: down ? 0.08 : 0.15), value: hot)
+      .animation(still ? nil : .easeOut(duration: down ? 0.08 : 0.15), value: down)
+      .onHover { h in
+        hover = h
+        if h && enabled && !cursor { NSCursor.pointingHand.push(); cursor = true } else if !h && cursor { NSCursor.pop(); cursor = false }
+      }
+      .onDisappear { if cursor { NSCursor.pop(); cursor = false } }
+  }
+}
+
+// One per screen: filled with the title gold, 52 pt; busy: a spinner before the label (Installing…, Playing…).
+struct PrimaryButtonStyle: ButtonStyle {
+  var busy = false
+  @Environment(\.accessibilityReduceMotion) var still
+  @Environment(\.isEnabled) var enabled
+  @Environment(\.isFocused) var focused
+  @Environment(\.palette) var p
+  func makeBody(configuration c: Configuration) -> some View {
+    Interactive(pressed: c.isPressed) { hot, down in
+      HStack(spacing: 10) {
+        if busy { ProgressView().controlSize(.small).tint(p.dim) }
+        c.label
+      }
+      .font(.system(size: 17, weight: .semibold)).foregroundStyle(enabled ? p.onAccent : p.dim)
+      .padding(.horizontal, 28).frame(minWidth: 168, minHeight: 52)
+      .background(RoundedRectangle(cornerRadius: 10).fill(enabled ? (down ? p.accentPress : hot ? p.accentHover : p.accent) : p.surface2))
+      .shadow(color: .black.opacity(enabled ? (hot && !down ? 0.45 : 0.35) : 0), radius: hot && !down ? 12 : 9, y: hot && !down ? 7 : 6)
+      .offset(y: hot && !down && !still ? -1 : 0)   // the primary lifts
+      .ring(focused, p, 10).contentShape(Rectangle())
+    }
+  }
+}
+
+// Secondary: a translucent surface with a border, 44 pt; small: 36 pt (inside banners only).
+struct SecondaryButtonStyle: ButtonStyle {
+  var small = false
+  var held = false   // shown pressed while what it opened is open (the Menu button)
+  @Environment(\.isEnabled) var enabled
+  @Environment(\.isFocused) var focused
+  @Environment(\.palette) var p
+  func makeBody(configuration c: Configuration) -> some View {
+    Interactive(pressed: c.isPressed) { hot, down in
+      c.label.font(.system(size: small ? 13 : 14, weight: .semibold)).foregroundStyle(p.text)
+        .padding(.horizontal, small ? 12 : 18).frame(minWidth: 44, minHeight: small ? 36 : 44)
+        .background(RoundedRectangle(cornerRadius: 10).fill(down || held || hot ? p.surface2 : p.surface))
+        .overlay(RoundedRectangle(cornerRadius: 10).fill(.black.opacity(down || held ? 0.15 : 0)))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(hot || held ? p.accent.opacity(0.6) : p.stroke))
+        .opacity(enabled ? 1 : 0.45).ring(focused, p, 10).contentShape(Rectangle())
+    }
+  }
+}
+
+// A row of the rows panel (Language, Mods, HP2 options): 52 pt, the whole row is the target.
+struct RowButtonStyle: ButtonStyle {
+  @Environment(\.isEnabled) var enabled
+  @Environment(\.isFocused) var focused
+  @Environment(\.palette) var p
+  func makeBody(configuration c: Configuration) -> some View {
+    Interactive(pressed: c.isPressed) { hot, down in
+      c.label.font(.system(size: 14)).foregroundStyle(p.text).padding(.horizontal, 16).frame(maxWidth: .infinity, minHeight: 52)
+        .background(RoundedRectangle(cornerRadius: 11).fill(down ? p.surface2 : hot ? p.surface : .clear).padding(1)).contentShape(Rectangle()).opacity(enabled ? 1 : 0.5).ring(focused, p, 0)
+    }
+  }
+}
+
+// No box of its own (What's new, the order chevrons, the save slots, the game switcher's segments): a tint over the label
+// on hover (light) and press (dark).
+struct FlatButtonStyle: ButtonStyle {
+  var radius: CGFloat = 8
   @Environment(\.isEnabled) var enabled
   func makeBody(configuration c: Configuration) -> some View {
-    c.label.font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text)
-      .padding(.horizontal, 12).frame(height: 30)
-      .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(c.isPressed ? 0.14 : 0.07)))
-      .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.stroke))
-      .opacity(enabled ? 1 : 0.45)
+    Interactive(pressed: c.isPressed) { hot, down in
+      c.label.overlay(RoundedRectangle(cornerRadius: radius).fill(down ? Color.black.opacity(0.18) : .white.opacity(hot ? 0.07 : 0)).allowsHitTesting(false))
+        .contentShape(Rectangle())
+    }
+  }
+}
+
+// An item of an open list: hover / focus in the title gold (light), pressed (stronger), a checked item marked and bold.
+struct ListItemStyle: ButtonStyle {
+  @Environment(\.palette) var p
+  func makeBody(configuration c: Configuration) -> some View {
+    Interactive(pressed: c.isPressed) { hot, down in
+      c.label.background(RoundedRectangle(cornerRadius: 6).fill(p.title.opacity(down ? 0.28 : hot ? 0.16 : 0))).contentShape(Rectangle())
+    }
   }
 }
 
 struct Banner: View {
   let icon: String, color: Color, text: String
-  var link: URL? = nil   // "Report": opens the prefilled new-issue page
+  var link: URL? = nil       // "Report…": opens the prefilled new-issue page
+  var log: URL? = nil        // "Open log": a failed game run's log (none yet: logDir, that game's run logs)
+  var logDir: URL? = nil
   @State var open = false
+  @Environment(\.palette) var p
   var body: some View {
-    VStack(alignment: .leading, spacing: 6) {
-      HStack(alignment: .firstTextBaseline, spacing: 8) {
-        Image(systemName: icon).foregroundStyle(color)
-        Text(text).lineLimit(open ? nil : 1).foregroundStyle(Theme.text).textSelection(.enabled)
-          .fixedSize(horizontal: false, vertical: open)
-        Spacer(minLength: 4)
-        Button(open ? "Less" : "More") { open.toggle() }.buttonStyle(.plain).foregroundStyle(color).font(.system(size: 12, weight: .medium))
-        if let l = link {
-          Button("Report") { NSWorkspace.shared.open(l) }.buttonStyle(.plain).foregroundStyle(color).font(.system(size: 12, weight: .medium))
+    HStack(alignment: .top, spacing: 10) {
+      Image(systemName: icon).foregroundStyle(color).padding(.top, 2)
+      VStack(alignment: .leading, spacing: 8) {
+        Text(text).lineLimit(open ? nil : 2).foregroundStyle(p.text).textSelection(.enabled)
+          .fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading)
+        HStack(spacing: 8) {
+          Button(open ? "Less" : "More") { open.toggle() }.buttonStyle(SecondaryButtonStyle(small: true)).padTarget("more:" + icon) { open.toggle() }
+          if let log { Button("Open log") { Banner.openLog(log, logDir) }.buttonStyle(SecondaryButtonStyle(small: true)).padTarget("openlog") { Banner.openLog(log, logDir) } }
+          if let link { Button("Report…") { NSWorkspace.shared.open(link) }.buttonStyle(SecondaryButtonStyle(small: true)).padTarget("report") { NSWorkspace.shared.open(link) } }
         }
       }
     }
-    .padding(.horizontal, 12).padding(.vertical, 9)
-    .background(RoundedRectangle(cornerRadius: 10).fill(color.opacity(0.12)))
-    .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(color.opacity(0.35)))
+    .font(.system(size: 13)).padding(10)
+    .background(RoundedRectangle(cornerRadius: 10).fill(.black.opacity(0.30)))
+    .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(color))
+    .accessibilityElement(children: .contain)
+  }
+  // The log file, else (none yet) the logs folder — as Desktop's Open log.
+  static func openLog(_ u: URL, _ dir: URL?) { NSWorkspace.shared.open(FileManager.default.fileExists(atPath: u.path) ? u : dir ?? Launcher.logsURL) }
+}
+
+// "US 1.53: exact" (HP1Setup EDITION line) -> a chip with the name and the tier; exact = verified against, others shown as they are.
+struct EditionChip: View {
+  let ed: String
+  @Environment(\.palette) var p
+  var body: some View {
+    let parts = ed.components(separatedBy: ": ")
+    let name = parts.dropLast().joined(separator: ": "), tier = parts.count > 1 ? parts.last! : ""
+    let (color, label): (Color, String) = switch tier {
+      case "exact": (p.ok, "verified")
+      case "supported": (p.accent, "supported")
+      default: (p.warn, tier.isEmpty ? "unknown" : tier)
+    }
+    HStack(spacing: 8) {
+      Text(name.isEmpty ? ed : name).font(.system(size: 12, weight: .semibold)).foregroundStyle(p.text)
+        .padding(.horizontal, 8).padding(.vertical, 2)
+        .background(Capsule().fill(p.surface)).overlay(Capsule().strokeBorder(p.stroke))
+      Text(label).font(.system(size: 13)).foregroundStyle(color)
+    }
   }
 }
 
-// "US 1.53: exact" (HP1Setup EDITION line) -> name and tier; exact = verified against, others shown as they are.
-func editionChip(_ ed: String) -> some View {
-  let parts = ed.components(separatedBy: ": ")
-  let name = parts.dropLast().joined(separator: ": "), tier = parts.count > 1 ? parts.last! : ""
-  let (color, label): (Color, String) = switch tier {
-    case "exact": (Theme.green, "verified")
-    case "supported": (Theme.gold, "supported")
-    default: (Theme.amber, tier.isEmpty ? "unknown" : tier)
-  }
-  return HStack(spacing: 8) {
-    Text(name.isEmpty ? ed : name).foregroundStyle(Theme.text).font(.system(size: 14, weight: .medium))
-    Text(label).font(.system(size: 11, weight: .semibold)).foregroundStyle(color)
-      .padding(.horizontal, 8).padding(.vertical, 3).background(Capsule().fill(color.opacity(0.15)))
+// The decorative 4 pt band at the bottom: harlequin (HP1), serpent green (HP2).
+struct Stripe: View {
+  @Environment(\.palette) var p
+  var body: some View {
+    Canvas { ctx, size in
+      let skew = p.diagonal ? size.height : 0
+      var x = -skew, i = 0
+      while x < size.width {
+        let (c, w) = p.stripe[i % p.stripe.count]
+        var path = Path()
+        path.addLines([CGPoint(x: x, y: size.height), CGPoint(x: x + w, y: size.height), CGPoint(x: x + w + skew, y: 0), CGPoint(x: x + skew, y: 0)])
+        ctx.fill(path, with: .color(c))
+        x += w; i += 1
+      }
+    }.frame(height: 4).opacity(0.85).accessibilityHidden(true)
   }
 }
 
 struct MainView: View {
-  @StateObject var b = Launcher()
+  @ObservedObject var b: Launcher
+  var live = true                  // false: an offscreen state picture (--render-states), no disk reads on appear
   @State var dropping = false
+  @Environment(\.accessibilityReduceMotion) var still
+  var p: Palette { b.hp2Tab ? .hp2 : .hp1 }
   var setup: Bool { !b.installed || b.running || !b.inputs.isEmpty }
-  var status: (String, Color) {
-    if b.running { return ("Installing…", Theme.gold) }
-    if b.playing { return ("Playing", Theme.green) }
-    return b.installed ? ("Ready to play", Theme.green) : ("Not installed", Theme.dim)
-  }
   var version: String { (Bundle.main.object(forInfoDictionaryKey: "HPEngineVersion") as? String).map { " " + $0 } ?? "" }
 
   var body: some View {
-    VStack(spacing: 0) {
-      header
+    VStack(alignment: .leading, spacing: 0) {
+      topBar
       if let n = b.newer { updateBar(n) }
-      VStack(alignment: .leading, spacing: 12) {
-        if setup { setupView } else { installedView }
-        if let w = b.warning { Banner(icon: "exclamationmark.triangle.fill", color: Theme.amber, text: w, link: b.report) }
-        if let e = b.error { Banner(icon: "xmark.octagon.fill", color: Theme.red, text: e) }
-        footer.padding(.top, 6)
+      ScrollView {   // the window's height is fixed: a crowded state (update + error + every row) scrolls, never clips
+        VStack(alignment: .leading, spacing: 0) {
+          if b.hp2Tab { hp2View } else if setup { setupView } else if b.modsOpen { modsView } else { installedView }
+          VStack(spacing: 8) {
+            if !b.hp2Tab, let w = b.warning { Banner(icon: "exclamationmark.triangle.fill", color: p.warn, text: w, link: b.report).transition(banner) }   // HP1Setup's: HP1's
+            if let e = GameScope.error(hp2Tab: b.hp2Tab, hp1: b.error, hp2: b.hp2Error, launcher: b.launcherError) {
+              Banner(icon: "xmark.octagon.fill", color: p.err, text: e, log: e == (b.hp2Tab ? b.hp2RunError : b.runError) ? Launcher.launchLog(hp2: b.hp2Tab) : nil,
+                     logDir: Launcher.logsDir(hp2: b.hp2Tab)).transition(banner)
+            }
+          }.padding(.horizontal, 24).padding(.top, 16)
+          // a new warning or error slides in (the failure's micro-feedback); with Reduce Motion it fades
+          .animation(live ? .easeOut(duration: 0.2) : nil, value: [b.warning ?? "", GameScope.error(hp2Tab: b.hp2Tab, hp1: b.error, hp2: b.hp2Error, launcher: b.launcherError) ?? ""])
+        }.padding(.bottom, 12)
       }
-      .padding(20)
+      Stripe()
+      HStack(spacing: 14) {
+        Text("HPEngine\(version)").foregroundStyle(p.dim)
+        Spacer()
+        if b.padConnected {   // the button hints: only while a pad is connected (proposal §6)
+          ForEach([("A", "Select"), ("B", "Back"), ("LB RB", "Game"), ("☰", "Menu")], id: \.0) { keys, what in
+            HStack(spacing: 6) {
+              HStack(spacing: 3) {
+                ForEach(keys.split(separator: " ").map(String.init), id: \.self) { k in
+                  Text(k).font(.system(size: 11, weight: .bold)).foregroundStyle(p.text).padding(.horizontal, 5).frame(minWidth: 22, minHeight: 22)
+                    .background(Capsule().fill(p.surface2)).overlay(Capsule().strokeBorder(p.stroke))
+                }
+              }
+              Text(what).foregroundStyle(p.dim)
+            }
+          }
+        }
+      }
+      .font(.system(size: 12)).padding(.horizontal, 24).padding(.vertical, 10).frame(minHeight: 44)
     }
-    .background(Theme.bg)
+    .frame(width: 600, height: 560)
+    .background(background)
+    .overlayPreferenceValue(PopupAnchors.self) { popupLayer($0) }
+    .environment(\.palette, p)
+    .environment(\.padFocus, b.padUsed ? b.padFocus : nil)
+    .environment(\.forcedLooks, b.forcedLooks)
     .environment(\.colorScheme, .dark)
-    .frame(width: 600).fixedSize(horizontal: false, vertical: true)
-    .onAppear { b.checkForUpdate(); b.loadMods() }
+    .onPreferenceChange(PadTargets.self) { t in b.padTargets = t; b.keepFocus() }
+    .onAppear { if live { b.checkForUpdate(); b.loadMods(); b.startPad(); b.startKeys() } }
     .onChange(of: b.installed) { _ in b.loadMods() }
     .onDrop(of: [.fileURL], isTargeted: $dropping) { items in
       for item in items {
@@ -868,174 +1812,663 @@ struct MainView: View {
     }
   }
 
-  var header: some View {
-    HStack(alignment: .bottom) {
-      VStack(alignment: .leading, spacing: 6) {
-        Text(Launcher.gameTitle(b.edition)).font(.system(size: 24, weight: .bold, design: .serif)).foregroundStyle(.white)
-        HStack(spacing: 8) {
-          Text("HPEngine\(version)").foregroundStyle(.white.opacity(0.7))
-          Circle().fill(status.1).frame(width: 7, height: 7)
-          Text(status.0).foregroundStyle(.white.opacity(0.85))
-        }.font(.system(size: 13))
-      }
-      Spacer()
+  var banner: AnyTransition { still ? .opacity : .opacity.combined(with: .move(edge: .top)) }
+
+  var background: some View {
+    ZStack {
+      LinearGradient(colors: [p.top, p.mid, p.bottom], startPoint: .top, endPoint: .bottom)
+      RadialGradient(colors: [p.glow, .clear], center: .topTrailing, startRadius: 0, endRadius: 560)
+      RadialGradient(colors: [p.glow2, .clear], center: .bottomLeading, startRadius: 0, endRadius: 420)
     }
-    .padding(.horizontal, 22).padding(.top, 26).padding(.bottom, 18)
-    .background(Theme.header)
   }
 
+  // The open list (Menu, Language, Start map): over the window, anchored to the control that opened it — under it (above
+  // when there is no room below), aligned to its nearer edge — growing out of it; a click outside or Escape / B closes it.
+  func popupLayer(_ anchors: [String: Anchor<CGRect>]) -> some View {
+    GeometryReader { g in
+      if let pop = b.popup, let a = anchors[pop.anchor] {
+        let r = g[a], W = g.size.width, H = g.size.height
+        let width: CGFloat = pop.anchor == "menu" ? 300 : max(r.width, 240)
+        let est = popupHeight(pop) + 12   // its height before layout (items + padding)
+        // under it when it fits there (or there is more room there than above); a list taller than its room scrolls
+        let floor = H - 52   // above the footer
+        let below = r.maxY + 6 + est <= floor || floor - r.maxY >= r.minY, right = r.midX > W / 2
+        let room = (below ? floor - r.maxY - 6 : r.minY - 14) - 4
+        let x = min(max(right ? r.maxX - width : r.minX, 12), W - width - 12)
+        ZStack(alignment: .topLeading) {
+          Color.black.opacity(0.25).contentShape(Rectangle()).onTapGesture { b.closePopup() }.transition(.opacity)
+          popupList(pop, height: est > room ? room : nil).frame(width: width)
+            .alignmentGuide(.leading) { _ in -x }
+            .alignmentGuide(.top) { d in -(below ? r.maxY + 6 : max(8, r.minY - 6 - d.height)) }
+            .transition(.asymmetric(insertion: still ? .opacity : .scale(scale: 0.94, anchor: UnitPoint(x: right ? 1 : 0, y: below ? 0 : 1)).combined(with: .opacity),
+                                    removal: .opacity))
+        }
+        .environment(\.palette, p)
+      }
+    }
+    .animation(live ? .easeOut(duration: b.popup == nil ? 0.1 : 0.16) : nil, value: b.popup?.anchor)
+  }
+
+  // height: the list's room when its items do not fit (then it scrolls: wheel / trackpad, and the focused item — keys, pad,
+  // type-ahead — kept in view, the choice in view when it opens), nil: as tall as its items.
+  func popupList(_ pop: Popup, height: CGFloat?) -> some View {
+    ScrollViewReader { proxy in
+      ScrollView(.vertical) {
+        popupItems(pop).background(ScrollProbe(b: b))
+      }
+        .scrollIndicators(.never).scrollDisabled(height == nil)   // .never: .hidden still shows the system scroller when scroll bars are set to always show (a mouse attached)
+        .frame(height: height ?? popupHeight(pop) + 8)
+        .overlay(alignment: .topTrailing) {
+          // the scroll indicator, always shown on a list that scrolls (the system's overlay scroller hides itself)
+          if let h = height {
+            let content = popupHeight(pop) + 8, thumb = max(24, h * h / content)
+            // drawn 4 pt wide on a 14 pt track that takes the drag (the system scroller is off: .never above)
+            Capsule().fill(p.text.opacity(0.45)).frame(width: 4, height: thumb)
+              .offset(x: -3, y: min(max(b.listOffset / (content - h), 0), 1) * (h - thumb))
+              .frame(width: 14, height: h, alignment: .topTrailing).contentShape(Rectangle())
+              .gesture(DragGesture(minimumDistance: 0).onChanged { g in b.dragList((g.location.y - thumb / 2) / (h - thumb)) })
+              .accessibilityHidden(true)
+          }
+        }
+        .onAppear { if let f = b.padFocus { proxy.scrollTo(f, anchor: .center) } }
+        .onChange(of: b.padFocus) { f in if let f, f.hasPrefix("pop") { proxy.scrollTo(f) } }
+    }
+    .padding(2)
+    .background(RoundedRectangle(cornerRadius: 10).fill(p.popup)).overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.white.opacity(0.14)))
+    .shadow(color: .black.opacity(0.4), radius: 12, y: 6)
+  }
+  func popupHeight(_ pop: Popup) -> CGFloat { Launcher.popupHeight(pop) }
+
+  func popupItems(_ pop: Popup) -> some View {
+    VStack(alignment: .leading, spacing: 0) {
+      ForEach(Array(pop.items.enumerated()), id: \.offset) { i, it in
+        if it.header && it.title.isEmpty { Divider().overlay(p.stroke).padding(.vertical, 4) }
+        else if it.header {
+          Text(it.title.uppercased()).font(.system(size: 11, weight: .semibold)).tracking(0.6).foregroundStyle(p.dim)
+            .padding(.horizontal, 12).padding(.bottom, 4).frame(height: 28, alignment: .bottomLeading)
+        } else {
+          let ring = b.padUsed && b.padFocus == "pop\(i)"
+          Button { b.pick(it) } label: {
+            HStack {
+              Text(it.title).fontWeight(it.checked ? .semibold : .regular).foregroundStyle(it.destructive ? p.err : p.text)
+              Spacer()
+              if it.checked { Image(systemName: "checkmark").foregroundStyle(p.title).accessibilityLabel("Selected") }
+            }
+            .font(.system(size: 14)).padding(.horizontal, 12).frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+          }
+          .buttonStyle(ListItemStyle()).environment(\.targetLook, TargetLook(ring: ring, force: b.forcedLooks["pop\(i)"] ?? 0))
+          .disabled(!it.enabled).opacity(it.enabled ? 1 : 0.45).ring(ring, p, 6)
+          .accessibilityAddTraits(it.checked ? .isSelected : []).id("pop\(i)")
+        }
+      }
+    }
+    .padding(4)   // room for the focus ring inside the scroller
+  }
+
+  // ── Top bar: the game switcher (one window, the game a branch on the tab, as launcher/Desktop/MainWindow.Hp2.cs) + Menu.
+  var topBar: some View {
+    let on = Hp2Release.available, hp2Set = on && (b.hp2Tab ? b.hp2RootPath != nil : Launcher.hp2Root != nil)
+    let hp1 = { b.hp2Tab = false; b.modsOpen = false }, hp2 = { guard Hp2Release.available else { return }; b.hp2Tab = true; b.hp2Page = "Main"; b.hp2Scan() }
+    return HStack(spacing: 8) {
+      HStack(spacing: 4) {
+        gameTab("Harry Potter 1", on: !b.hp2Tab, dot: b.running ? p.warn : (b.installed ? p.ok : nil),
+                note: b.running ? "installing" : (b.installed ? nil : "not set up"), hp1)
+          .padTarget("tab1", radius: 9, hp1).keyboardShortcut("1", modifiers: .command)
+        gameTab("Harry Potter 2", on: b.hp2Tab, dot: hp2Set ? p.ok : nil, note: Hp2Release.caption(on, folderSet: hp2Set), hp2)
+          .padTarget("tab2", radius: 9, hp2).keyboardShortcut("2", modifiers: .command).disabled(!on).opacity(on ? 1 : 0.45)
+          .help(Hp2Release.tip(on) ?? "")
+      }
+      .padding(4).background(RoundedRectangle(cornerRadius: 12).fill(.black.opacity(0.28)))
+      Button { b.openPopup(b.menuItems(), from: "menu") } label: { Label("Menu", systemImage: "line.3.horizontal") }
+        .buttonStyle(SecondaryButtonStyle(held: b.popup?.anchor == "menu")).padTarget("menu") { b.openPopup(b.menuItems(), from: "menu") }
+        .anchorPreference(key: PopupAnchors.self, value: .bounds) { ["menu": $0] }
+        .keyboardShortcut(",", modifiers: .command)
+    }
+    .padding(.horizontal, 16).padding(.top, 12)
+  }
+
+  func gameTab(_ name: String, on: Bool, dot: Color?, note: String?, _ go: @escaping () -> Void) -> some View {
+    Button(action: go) {
+      HStack(spacing: 8) {
+        if let dot { Circle().fill(dot).frame(width: 8, height: 8) }
+        Text(name).font(.system(size: 14, weight: on ? .semibold : .medium)).foregroundStyle(on ? p.text : p.dim)
+        if let note { Text("· " + note).font(.system(size: 12, weight: .medium)).foregroundStyle(p.dim) }
+      }
+      .frame(maxWidth: .infinity, minHeight: 44)
+      .background(RoundedRectangle(cornerRadius: 9).fill(on ? p.surface2 : .clear))
+      .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(on ? p.stroke : .clear))
+      .contentShape(Rectangle())
+    }
+    .buttonStyle(FlatButtonStyle(radius: 9)).accessibilityAddTraits(on ? .isSelected : [])
+  }
+
+  // "Update" only when this build can verify the download (as Desktop's SelfUpdate.Offered); else the release page alone.
   func updateBar(_ n: Launcher.Release) -> some View {
     HStack(spacing: 10) {
-      Image(systemName: "arrow.down.circle.fill").foregroundStyle(Theme.gold)
-      Text("HPEngine \(n.version) is available").foregroundStyle(Theme.text).font(.system(size: 13, weight: .medium))
+      Image(systemName: "arrow.down.circle.fill").foregroundStyle(p.title)
+      Text(b.updating ? "Downloading Launcher \(n.version)…" : "HPEngine \(n.version) is available.").foregroundStyle(p.text)
       Spacer()
       if b.updating { ProgressView().controlSize(.small) } else {
-        Link("What's new", destination: n.page).foregroundStyle(Theme.gold).font(.system(size: 13))
-        Button("Update") { b.updateLauncher() }.buttonStyle(QuietButtonStyle()).disabled(b.running || b.playing)
-          .help(b.playing ? "Quit the game first" : "")
+        Button { NSWorkspace.shared.open(n.page) } label: { Text("What's new").foregroundStyle(p.text).frame(minHeight: 36).padding(.horizontal, 8) }.buttonStyle(FlatButtonStyle(radius: 6))
+          .padTarget("whatsnew", radius: 6) { NSWorkspace.shared.open(n.page) }
+        if n.zip != nil && n.sig != nil && Launcher.updateKey != nil {
+          Button("Update") { b.updateLauncher() }.buttonStyle(SecondaryButtonStyle(small: true)).padTarget("update") { b.updateLauncher() }
+            .disabled(b.running || b.playing).help(b.playing ? "Quit the game first" : "")
+        }
       }
     }
-    .padding(.horizontal, 20).frame(height: 44).background(Theme.gold.opacity(0.08))
+    .font(.system(size: 13, weight: .medium)).padding(.leading, 14).padding(.trailing, 8).padding(.vertical, 6)
+    .background(RoundedRectangle(cornerRadius: 10).fill(.black.opacity(0.30))).overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(p.stroke))
+    .padding(.horizontal, 16).padding(.top, 12)
   }
 
-  var setupView: some View {
-    VStack(alignment: .leading, spacing: 12) {
-      VStack(spacing: 10) {
-        if b.inputs.isEmpty {
-          Image(systemName: "tray.and.arrow.down").font(.system(size: 30, weight: .light)).foregroundStyle(Theme.gold)
-          Text("Drop your copy of the game here").font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.text)
-          Text("Installed game folder, CD, disc image (.iso, .bin/.cue, .mdf), installer or .zip")
-            .font(.system(size: 12)).foregroundStyle(Theme.dim).multilineTextAlignment(.center)
-        } else {
-          ForEach(b.inputs, id: \.self) { u in
-            Label(u.lastPathComponent, systemImage: "doc.fill").foregroundStyle(Theme.text).lineLimit(1).truncationMode(.middle)
-          }
-        }
-        HStack {
-          Button(b.inputs.isEmpty ? "Choose…" : "Add more…") { b.choose() }.buttonStyle(QuietButtonStyle()).disabled(b.running)
-          if !b.inputs.isEmpty { Button("Clear") { b.inputs = [] }.buttonStyle(QuietButtonStyle()).disabled(b.running) }
-        }
-      }
-      .frame(maxWidth: .infinity, minHeight: 150).padding(14)
-      .background(RoundedRectangle(cornerRadius: 14).fill(dropping ? Theme.gold.opacity(0.08) : Theme.card))
-      .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(dropping ? Theme.gold : Theme.gold.opacity(0.35),
-                                                               style: StrokeStyle(lineWidth: 1.5, dash: [6, 5])))
-      if b.running || b.step >= 0 {
-        Card {
-          HStack(spacing: 0) {
-            ForEach(Array(steps.enumerated()), id: \.offset) { i, s in
-              HStack(spacing: 6) {
-                Image(systemName: i < b.step ? "checkmark.circle.fill" : (i == b.step && b.running ? "circle.dotted" : "circle"))
-                  .foregroundStyle(i < b.step ? Theme.green : (i == b.step ? Theme.gold : Theme.dim))
-                Text(s.text).font(.system(size: 12)).foregroundStyle(i <= b.step ? Theme.text : Theme.dim).lineLimit(1)
-              }
-              if i < steps.count - 1 { Spacer(minLength: 6) }
-            }
-          }
-          if steps.indices.contains(b.step) && !["find", "unpack"].contains(steps[b.step].key) && b.running {
-            ProgressView(value: b.progress).tint(Theme.gold)
-          }
-        }
-      } else {
-        Text("Supported: US 1.53 (exact) · UK 1.1 · Russian EA release. Game data is copied from your own copy; nothing of the game is included.")
-          .font(.system(size: 12)).foregroundStyle(Theme.dim).fixedSize(horizontal: false, vertical: true)
-      }
+  // The game's title, a line under it (sub), a meta line (status, edition) and a note under that (the edition's detail).
+  func hero<M: View>(_ title: String, sub: String? = nil, note: String? = nil, @ViewBuilder meta: () -> M) -> some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text(title).font(titleFont(36)).foregroundStyle(p.title).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+        .accessibilityAddTraits(.isHeader)
+      if let sub { Text(sub).font(.system(size: 13)).foregroundStyle(p.dim).fixedSize(horizontal: false, vertical: true) }
+      HStack(spacing: 10) { meta() }.font(.system(size: 13)).foregroundStyle(p.dim)
+      if let note { Text(note).font(.system(size: 12)).foregroundStyle(p.dim).fixedSize(horizontal: false, vertical: true) }
     }
+    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 24).padding(.top, 20)
   }
 
+  func status(_ text: String, _ icon: String, _ color: Color) -> some View {
+    HStack(spacing: 6) { Image(systemName: icon).foregroundStyle(color); Text(text).foregroundStyle(p.text) }
+  }
+
+  // A sub-page heading: Back (Escape, pad B: Launcher.goBack runs this target) and the page's title.
+  func pageHeader(_ title: String, primary: Bool = false, back: @escaping () -> Void) -> some View {
+    HStack(spacing: 14) {
+      Button(action: back) { Label("Back", systemImage: "chevron.left") }.buttonStyle(SecondaryButtonStyle()).padTarget("back", primary: primary, back)
+      Text(title).font(titleFont(30)).foregroundStyle(p.title).lineLimit(1).accessibilityAddTraits(.isHeader)
+    }
+    .padding(.horizontal, 24).padding(.top, 20)
+  }
+
+  // A drop-down: the current choice; the list opens in the window (Launcher.openPopup), for mouse, keys and pad alike.
+  func dropDown(_ id: String, _ label: String, _ items: @escaping () -> [PopItem]) -> some View {
+    Button { b.openPopup(items(), from: id) } label: {
+      HStack(spacing: 6) { Text(label).lineLimit(1); Image(systemName: "chevron.up.chevron.down").font(.system(size: 10, weight: .semibold)).foregroundStyle(p.dim) }
+    }
+    .buttonStyle(SecondaryButtonStyle(held: b.popup?.anchor == id)).padTarget(id) { b.openPopup(items(), from: id) }
+    .anchorPreference(key: PopupAnchors.self, value: .bounds) { [id: $0] }
+  }
+
+  // ── HP1: the game is set up
   var installedView: some View {
-    VStack(alignment: .leading, spacing: 12) {
-      Card(title: "Game") {
-        if let ed = b.edition { editionChip(ed) } else { Text("Installed").foregroundStyle(Theme.text) }
-        HStack(spacing: 8) {
-          Button { b.open(Launcher.savesURL) } label: { Label("Saved Games", systemImage: "folder") }.buttonStyle(QuietButtonStyle())
-          Button { b.open(Launcher.logsURL) } label: { Label("Logs", systemImage: "doc.text") }.buttonStyle(QuietButtonStyle())
-          Spacer()
-          Text("Drop other game files here to reinstall").font(.system(size: 11)).foregroundStyle(Theme.dim)
+    let d = b.edition.map { Launcher.editionDisplay($0, b.languageList) }
+    return VStack(alignment: .leading, spacing: 0) {
+      hero(Launcher.gameTitle(b.edition), note: d?.detail) {
+        if b.playing { status("Playing", "play.fill", p.ok) } else { status("Ready to play", "checkmark", p.ok) }
+        if let d {
+          EditionChip(ed: d.name + (d.tier.isEmpty ? "" : ": " + d.tier))
+            .help(d.tier == "different data" ? "These files differ from the engine family's reference manifest. This alone does not establish that your disc was modified." : "")
         }
       }
-      Card(title: "Mods") {
+      HStack(spacing: 12) {
+        Button { b.play() } label: { if b.playing { Text("Playing…") } else { Label("Play", systemImage: "play.fill") } }
+          .buttonStyle(PrimaryButtonStyle(busy: b.playing)).padTarget("play", primary: true) { b.play() }.keyboardShortcut(.defaultAction).disabled(b.playing)
+        if !b.startMaps.isEmpty {
+          HStack(spacing: 8) {
+            Text(Launcher.startMapTitle).font(.system(size: 12)).foregroundStyle(p.dim)
+            let labels = Launcher.startMapLabels(b.startMaps)
+            dropDown("startmap", b.startMaps.firstIndex { $0.map == b.startMap }.map { labels[$0] } ?? Launcher.startMapGame) {
+              [PopItem(title: Launcher.startMapGame, checked: b.startMap == nil) { b.startMap = nil }]
+                + zip(b.startMaps, Launcher.startMapLabels(b.startMaps)).map { m, l in PopItem(title: l, checked: b.startMap == m.map) { b.startMap = m.map } }
+            }.disabled(b.playing)
+          }
+        }
+      }
+      .padding(.horizontal, 24).padding(.top, 20)
+      VStack(spacing: 0) {
+        // Language: only with a choice to make (two or more languages, or a pick whose folder is gone).
+        let langs = Launcher.languageEntries(b.languageList, selected: b.language)
+        if langs.count > 2 {
+          HStack {
+            Text("Language").foregroundStyle(p.text)
+            Spacer()
+            dropDown("language", langs.first { $0.code == b.language }?.label ?? Launcher.languageDefault) {
+              Launcher.languageEntries(b.languageList, selected: b.language).map { e in PopItem(title: e.label, checked: e.code == b.language) { b.setLanguage(e.code) } }
+            }.disabled(b.playing || b.running)
+          }
+          .font(.system(size: 14)).padding(.leading, 16).padding(.trailing, 8).frame(minHeight: 52)
+          Divider().overlay(p.stroke)
+        }
+        Button { b.modsOpen = true } label: {
+          HStack(spacing: 8) {
+            Text("Mods")
+            Spacer()
+            if !b.modsNotice.isEmpty { Image(systemName: "exclamationmark.circle").foregroundStyle(p.warn).accessibilityLabel("Notes") }
+            Text(b.mods.isEmpty ? "None" : "\(b.mods.filter(\.enabled).count) of \(b.mods.count) on").foregroundStyle(p.dim).font(.system(size: 13))
+            Image(systemName: "chevron.right").foregroundStyle(p.dim)
+          }
+        }.buttonStyle(RowButtonStyle()).padTarget("mods", radius: 0) { b.modsOpen = true }
+      }
+      .panel(p).padding(.horizontal, 24).padding(.top, 24)
+    }
+  }
+
+  // ── HP1: the Mods panel (list, order, notes, Mods folder)
+  var modsView: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      pageHeader("Mods", primary: true) { b.modsOpen = false }
+      VStack(alignment: .leading, spacing: 8) {
         if b.mods.isEmpty {
           Text("No mods yet. Put a mod's folder into the Mods folder; it shows up here to switch on and off.")
-            .font(.system(size: 12)).foregroundStyle(Theme.dim).fixedSize(horizontal: false, vertical: true)
+            .font(.system(size: 13)).foregroundStyle(p.dim).fixedSize(horizontal: false, vertical: true).padding(16)
         } else {
-          ScrollView {
-            VStack(spacing: 2) {
-              ForEach(b.mods) { m in modRow(m) }
-            }
-          }.frame(maxHeight: 128)
+          ScrollView { VStack(spacing: 0) { ForEach(b.mods) { m in modRow(m) } } }.frame(maxHeight: 176).panel(p)
         }
         if !b.modsNotice.isEmpty {
-          HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Image(systemName: "info.circle").foregroundStyle(Theme.amber)
-            Text(b.modsNotice.joined(separator: "\n"))
-              .font(.system(size: 12)).foregroundStyle(Theme.dim).fixedSize(horizontal: false, vertical: true)
-          }
+          HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "info.circle").foregroundStyle(p.warn).padding(.top, 1)
+            ScrollView { Text(b.modsNotice.joined(separator: "\n")).frame(maxWidth: .infinity, alignment: .leading) }.frame(maxHeight: 64)
+          }.font(.system(size: 12)).foregroundStyle(p.dim)
         }
-        HStack {
-          Button { b.open(Launcher.modsURL) } label: { Label("Open Mods Folder", systemImage: "folder.badge.plus") }
-            .buttonStyle(QuietButtonStyle())
-          Button { b.loadMods() } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(QuietButtonStyle()).help("Refresh")
-          Spacer()
-          if b.mods.contains(where: \.enabled) {
-            Text("Lower in the list wins").font(.system(size: 11)).foregroundStyle(Theme.dim)
-          }
+        if b.mods.contains(where: \.enabled) { Text(Launcher.orderHint).font(.system(size: 12)).foregroundStyle(p.dim) }
+        HStack(spacing: 12) {
+          Button { b.open(Launcher.modsURL) } label: { Label("Open Mods Folder", systemImage: "folder.badge.plus") }.buttonStyle(SecondaryButtonStyle())
+            .padTarget("openmods") { b.open(Launcher.modsURL) }
+          Button { b.loadMods() } label: { Label("Refresh", systemImage: "arrow.clockwise") }.buttonStyle(SecondaryButtonStyle())
+            .padTarget("refresh") { b.loadMods() }
         }
       }
+      .padding(.horizontal, 24)
     }
   }
 
   func modRow(_ m: Launcher.Mod) -> some View {
     let on = b.mods.filter(\.enabled)
     let i = on.firstIndex(of: m)
+    let name = m.name, flip = { if let now = b.mods.first(where: { $0.name == name }) { b.setMod(name, !now.enabled) } }
     return HStack(spacing: 10) {
-      Toggle("", isOn: Binding(get: { m.enabled }, set: { b.setMod(m.name, $0) })).toggleStyle(.switch).labelsHidden()
-        .controlSize(.small).tint(Theme.gold).disabled(b.playing)
-      Text(m.name).foregroundStyle(m.enabled ? Theme.text : Theme.dim).lineLimit(1)
-      if m.missing { Text("folder missing").font(.system(size: 11)).foregroundStyle(Theme.amber) }
+      Toggle(m.name, isOn: Binding(get: { m.enabled }, set: { b.setMod(m.name, $0) })).toggleStyle(.switch).labelsHidden()
+        .tint(p.accent).padTarget("mod:" + name, radius: 8, flip).disabled(b.playing)
+      if let n = Launcher.orderNumber(b.mods, m) { Text("\(n)").font(.system(size: 12)).foregroundStyle(p.dim).frame(minWidth: 14) }
+      Text(m.name).foregroundStyle(m.enabled ? p.text : p.dim).lineLimit(1)
+      if m.missing { Text("folder missing").font(.system(size: 12)).foregroundStyle(p.warn) }
       Spacer()
       if let i {
-        Button { b.moveMod(m.name, by: -1) } label: { Image(systemName: "chevron.up") }.buttonStyle(.plain)
-          .foregroundStyle(i > 0 ? Theme.text : Theme.dim.opacity(0.4)).disabled(i == 0 || b.playing)
-        Button { b.moveMod(m.name, by: 1) } label: { Image(systemName: "chevron.down") }.buttonStyle(.plain)
-          .foregroundStyle(i < on.count - 1 ? Theme.text : Theme.dim.opacity(0.4)).disabled(i == on.count - 1 || b.playing)
+        Button { b.moveMod(m.name, by: -1) } label: { Image(systemName: "chevron.up").frame(width: 44, height: 44).contentShape(Rectangle()) }
+          .buttonStyle(FlatButtonStyle()).foregroundStyle(i > 0 ? p.text : p.dim.opacity(0.4)).padTarget("up:" + name, radius: 8) { b.moveMod(name, by: -1) }
+          .disabled(i == 0 || b.playing).accessibilityLabel("Move \(m.name) up")
+        Button { b.moveMod(m.name, by: 1) } label: { Image(systemName: "chevron.down").frame(width: 44, height: 44).contentShape(Rectangle()) }
+          .buttonStyle(FlatButtonStyle()).foregroundStyle(i < on.count - 1 ? p.text : p.dim.opacity(0.4)).padTarget("down:" + name, radius: 8) { b.moveMod(name, by: 1) }
+          .disabled(i == on.count - 1 || b.playing).accessibilityLabel("Move \(m.name) down")
       }
     }
-    .padding(.horizontal, 8).padding(.vertical, 5)
-    .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(m.enabled ? 0.04 : 0)))
+    .font(.system(size: 14)).padding(.horizontal, 12).frame(minHeight: 44)
   }
 
-  var footer: some View {
-    HStack {
-      Menu {
-        Button("Open Saved Games Folder") { b.open(Launcher.savesURL) }.disabled(!b.installed)
-        Button("Open Logs") { b.open(Launcher.logsURL) }
-        Button("Reset Settings…") { b.resetSettings() }.disabled(!b.installed)
-        Button("Reset Gamepad Bindings…") { b.resetPad() }.disabled(!b.installed || b.playing || Launcher.padRebound(game: Launcher.gameURL) == 0)
-        Button("Remove Game…") { b.removeGame() }.disabled(!b.installed || b.running || b.playing)
-        Divider()
-        Button("Check for Updates") { b.checkForUpdate(manual: true) }
-        Button("About HPEngine Launcher") { b.about() }
-      } label: { Label("More", systemImage: "ellipsis.circle") }
-        .menuStyle(.borderlessButton).fixedSize().foregroundStyle(Theme.dim)
-      Spacer()
-      if b.installed && !b.running && b.inputs.isEmpty {
-        if !b.startMaps.isEmpty {
-          Picker(Launcher.startMapTitle, selection: $b.startMap) {
-            Text(Launcher.startMapGame).tag(String?.none)
-            ForEach(Array(zip(b.startMaps, Launcher.startMapLabels(b.startMaps))), id: \.0.map) { m, label in Text(label).tag(String?.some(m.map)) }
-          }.pickerStyle(.menu).fixedSize().foregroundStyle(Theme.dim).disabled(b.playing)
+  // ── HP1: no game yet / files chosen / installing
+  var setupView: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      hero(Launcher.gameTitle(b.edition), sub: !b.installed && !b.running ? "Set up once from your own copy of the game. Nothing of the game is included." : nil) {
+        if b.running { status("Installing…", "sparkle", p.title) }
+        else if b.playing { status("Playing", "play.fill", p.ok) }
+        else if b.installed { status("Ready to play", "checkmark", p.ok) }
+        else { status("Not installed", "circle", p.dim) }
+        if b.running || b.step >= 0, let ed = b.edition { EditionChip(ed: ed) }
+      }
+      if b.running || b.step >= 0 { stepsPanel } else { dropZone }
+      HStack(spacing: 12) {
+        if b.running {
+          Button("Installing…") {}.buttonStyle(PrimaryButtonStyle(busy: true)).disabled(true)
+        } else if !b.inputs.isEmpty {
+          Button(b.installed ? "Install Again" : "Install") { b.install() }
+            .buttonStyle(PrimaryButtonStyle()).padTarget("install", primary: true) { b.install() }.keyboardShortcut(.defaultAction)
+            .disabled(b.inputs.isEmpty || b.running || b.playing || b.updating)
+            .help(b.playing ? "Quit the game first" : "")
+          Button("Add more…") { b.choose() }.buttonStyle(SecondaryButtonStyle()).padTarget("addmore") { b.choose() }
+          Button("Clear") { b.inputs = [] }.buttonStyle(SecondaryButtonStyle()).padTarget("clear") { b.inputs = [] }
+        } else if b.step >= 0 {
+          Button("Choose…") { b.choose() }.buttonStyle(SecondaryButtonStyle()).padTarget("choose", primary: true) { b.choose() }
         }
-        Button { b.play() } label: { Label(b.playing ? "Playing…" : "Play", systemImage: "play.fill").frame(minWidth: 110) }
-          .buttonStyle(GoldButtonStyle()).keyboardShortcut(.defaultAction).disabled(b.playing)
-      } else {
-        Button { b.install() } label: { Text(b.installed ? "Install Again" : "Install").frame(minWidth: 110) }
-          .buttonStyle(GoldButtonStyle()).keyboardShortcut(.defaultAction)
-          .disabled(b.inputs.isEmpty || b.running || b.playing || b.updating)
-          .help(b.playing ? "Quit the game first" : "")
+      }
+      .padding(.horizontal, 24).padding(.top, 16)
+      if b.running {
+        Text("You can close the window: the copy resumes next time.").font(.system(size: 12)).foregroundStyle(p.dim).padding(.horizontal, 24).padding(.top, 10)
+      } else if b.step < 0 {
+        Text("Supported: US 1.53 (exact) · UK 1.1 · Russian EA release.")
+          .font(.system(size: 12)).foregroundStyle(p.dim).padding(.horizontal, 24).padding(.top, b.inputs.isEmpty ? 0 : 12)
       }
     }
   }
+
+  var dropZone: some View {
+    VStack(spacing: 8) {
+      if b.inputs.isEmpty {
+        Image(systemName: "opticaldisc").font(.system(size: 26, weight: .light)).foregroundStyle(p.title)
+        Text("Drop your copy of the game here").font(.system(size: 16, weight: .semibold)).foregroundStyle(p.text)
+        Text("Installed game folder, game CD, disc image (.iso, .bin/.cue, .mdf), installer (Setup.exe) or .zip")
+          .font(.system(size: 13)).foregroundStyle(p.dim).multilineTextAlignment(.center).frame(maxWidth: 400)
+        Button("Choose…") { b.choose() }.buttonStyle(PrimaryButtonStyle()).padTarget("choose", primary: true) { b.choose() }
+          .keyboardShortcut(.defaultAction).padding(.top, 6)
+      } else {
+        ScrollView {
+          VStack(alignment: .leading, spacing: 6) {
+            ForEach(b.inputs, id: \.self) { u in
+              Label(u.lastPathComponent, systemImage: "doc.fill").foregroundStyle(p.text).lineLimit(1).truncationMode(.middle)
+            }
+          }.frame(maxWidth: .infinity, alignment: .leading)
+        }.frame(maxHeight: 140)
+      }
+    }
+    .frame(maxWidth: .infinity, minHeight: 208).padding(16)
+    .background(RoundedRectangle(cornerRadius: 14).fill(dropping ? p.accent.opacity(0.10) : .black.opacity(0.18)))
+    .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(dropping ? p.accent : p.stroke, style: StrokeStyle(lineWidth: 2, dash: [7, 5])))
+    .padding(.horizontal, 24).padding(.top, 20)
+  }
+
+  // The four HP1Setup steps: icon + text (not colour alone); the bar while copying/checking.
+  var stepsPanel: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      ForEach(Array(steps.enumerated()), id: \.offset) { i, s in
+        let done = i < b.step, now = i == b.step && b.running
+        HStack(spacing: 10) {
+          Image(systemName: done ? "checkmark" : (now ? "circle.dotted" : (i == b.step ? "xmark" : "circle")))
+            .foregroundStyle(done ? p.ok : (now ? p.title : (i == b.step ? p.err : p.dim))).frame(width: 16)
+          Text(s.text).font(.system(size: 14, weight: now ? .semibold : .regular)).foregroundStyle(now ? p.text : p.dim)
+        }
+        .frame(height: 34).accessibilityElement(children: .combine)
+      }
+      if steps.indices.contains(b.step) && !["find", "unpack"].contains(steps[b.step].key) && b.running {
+        ProgressView(value: b.progress).tint(p.accent).padding(.top, 10)
+        HStack { Spacer(); Text("\(Int(b.progress * 100))%") }.font(.system(size: 12)).foregroundStyle(p.dim).padding(.top, 4)
+      }
+    }
+    .padding(16).frame(maxWidth: .infinity, alignment: .leading).panel(p)
+    .padding(.horizontal, 24).padding(.top, 20)
+  }
+
+  // ── HP2: HP2's own front end (Main Menu, New Game, Load Game; its Options are the game's own menu, author 2026-11-16), its page flow from Hp2FrontEnd.
+  var hp2View: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      if let root = b.hp2RootPath {
+        let section = "IDDIALOG_FrontEndPage" + (b.hp2Page == "Main" ? "MainMenu" : b.hp2Page)
+        let L = { (k: String) in Hp2FrontEnd.localize(root, "Startup", section, k) }
+        if b.hp2Page == "Main" { hp2Main(L) } else { hp2Page(L) }
+      } else {
+        hero(Launcher.hp2Title, sub: "Point HPEngine at the folder where the game is installed.") { status("No game folder", "circle", p.dim) }
+        VStack(spacing: 8) {
+          Image(systemName: "folder").font(.system(size: 26, weight: .light)).foregroundStyle(p.title)
+          Text("Choose your installed game folder").font(.system(size: 16, weight: .semibold)).foregroundStyle(p.text)
+          Text("The folder that contains System/Engine.dll and System/Startup.int.")
+            .font(.system(size: 13)).foregroundStyle(p.dim).multilineTextAlignment(.center).frame(maxWidth: 400)
+          Button("Choose game folder…") { b.chooseHp2() }.buttonStyle(PrimaryButtonStyle()).padTarget("choosehp2", primary: true) { b.chooseHp2() }
+            .keyboardShortcut(.defaultAction).disabled(b.playing).padding(.top, 6)
+        }
+        .frame(maxWidth: .infinity, minHeight: 208).padding(16)
+        .background(RoundedRectangle(cornerRadius: 14).fill(.black.opacity(0.18)))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(p.stroke, style: StrokeStyle(lineWidth: 2, dash: [7, 5])))
+        .padding(.horizontal, 24).padding(.top, 20)
+      }
+    }
+  }
+
+  // The original's three choices in its order; the accent (the primary) is Load Game when a slot is used, else New Game.
+  func hp2Main(_ L: @escaping (String) -> String) -> some View {
+    let used = b.hp2Slots.filter(\.used).count
+    let loadFirst = used > 0
+    return VStack(alignment: .leading, spacing: 0) {
+      hero(Launcher.hp2Title) {
+        if b.playing { status("Playing", "play.fill", p.ok) } else { status("Ready to play", "checkmark", p.ok) }
+        Text(used == 1 ? "1 saved game" : "\(used) saved games")
+      }
+      // The original's IDC_Instructions is not shown here (both launchers): it sends the player to an Options button the launcher has not.
+      HStack(spacing: 12) {
+        hp2Choice("newgame", L("IDC_NewGame"), primary: !loadFirst) { b.hp2Page = "NewGame" }
+        hp2Choice("loadgame", L("IDC_LoadGame"), primary: loadFirst) { b.hp2Page = "LoadGame" }
+      }
+      .padding(.horizontal, 24).padding(.top, 20)
+    }
+  }
+
+  @ViewBuilder func hp2Choice(_ id: String, _ title: String, primary: Bool, _ go: @escaping () -> Void) -> some View {
+    if primary { Button(title, action: go).buttonStyle(PrimaryButtonStyle()).padTarget(id, primary: true, go).keyboardShortcut(.defaultAction).disabled(b.playing) }
+    else { Button(title, action: go).buttonStyle(SecondaryButtonStyle()).frame(minHeight: 52).padTarget(id, go).disabled(b.playing) }
+  }
+
+  func hp2Page(_ L: @escaping (String) -> String) -> some View {
+    let load = b.hp2Page == "LoadGame"
+    return VStack(alignment: .leading, spacing: 0) {
+      pageHeader(L("IDC_Title"), primary: !b.hp2Slots.contains { !b.playing && ($0.used || !load) }) { b.hp2Page = "Main" }
+      if !L("IDC_Instructions").isEmpty && L("IDC_Instructions") != "IDC_Instructions" {
+        Text(L("IDC_Instructions")).font(.system(size: 13)).foregroundStyle(p.dim).fixedSize(horizontal: false, vertical: true)
+          .padding(.horizontal, 24).padding(.top, 10)
+      }
+      hp2SlotsGrid(L)
+      .padding(.horizontal, 24).padding(.top, 16)
+    }
+  }
+
+  // 3×2 slots with the save's own thumbnail; empty ones dashed (inert for Load, selectable for New Game). Focus starts on
+  // the first slot that can be chosen, else on Back (as Desktop).
+  func hp2SlotsGrid(_ L: @escaping (String) -> String) -> some View {
+    let load = b.hp2Page == "LoadGame"
+    let first = b.hp2Slots.first { $0.used || !load }?.n
+    return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 12) {
+      ForEach(b.hp2Slots, id: \.n) { s in
+        // The card (author 2026-11-16, both launchers): the save's thumbnail fills it (aspect-fill, cropped, clipped to the
+        // rounded corners) and the label sits on it at the bottom over a dark scrim (text >= 4.5:1 on any picture).
+        Button { b.hp2Click(s) } label: {
+          ZStack(alignment: .bottomLeading) {
+            if s.used, let t = s.thumb, let h = Hp2FrontEnd.Files(Launcher.hp2SaveDir).host(t), let img = NSImage(contentsOfFile: h) {
+              Image(nsImage: img).resizable().aspectRatio(contentMode: .fill).frame(maxWidth: .infinity, maxHeight: .infinity).clipped()
+            } else if !s.used {
+              Text(L("IDC_SlotEmpty")).font(.system(size: 13)).foregroundStyle(p.dim).frame(maxWidth: .infinity, maxHeight: .infinity).padding(.bottom, 24)
+            }   // used, no readable thumbnail: the label alone, as the original's empty bitmap
+            if s.used {
+              LinearGradient(stops: [.init(color: .black.opacity(0), location: 0), .init(color: .black.opacity(0.8), location: 0.55), .init(color: .black.opacity(0.85), location: 1)],
+                             startPoint: .top, endPoint: .bottom).frame(height: 64)
+            }
+            Text(Hp2FrontEnd.label(s, empty: L("IDC_SlotEmpty"), used: L("IDC_SlotUsed")))
+              .font(.system(size: 13, weight: .semibold)).foregroundStyle(s.used ? p.text : p.dim).padding(.horizontal, 10).padding(.bottom, 9)
+          }
+          .frame(maxWidth: .infinity).frame(height: 132)
+          .background(RoundedRectangle(cornerRadius: 12).fill(s.used ? p.surface : .clear))
+          .clipShape(RoundedRectangle(cornerRadius: 12))
+          .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(p.stroke, style: StrokeStyle(lineWidth: 1, dash: s.used ? [] : [5, 4])))
+          .contentShape(Rectangle())
+        }
+        .buttonStyle(FlatButtonStyle(radius: 12)).padTarget("slot\(s.n)-\(s.used)", primary: s.n == first, radius: 12) { b.hp2Click(s) }
+        .disabled(b.playing || (load && !s.used))
+      }
+    }
+  }
+}
+
+// A Launcher in a fixed state for the offscreen checks (no disk is read for it).
+@MainActor func stateLauncher(_ hp2Root: String?) -> Launcher {
+  let b = Launcher()
+  b.installed = true; b.edition = "UK 1.1: exact"; b.newer = nil; b.error = nil; b.warning = nil; b.inputs = []; b.step = -1
+  b.mods = []; b.modsNotice = []; b.languageList = []; b.language = nil; b.startMaps = []; b.hp2RootPath = hp2Root
+  b.hp2Slots = (1...6).map { Hp2FrontEnd.Slot(n: $0, dir: "Slot\($0)", used: $0 <= 2, thumb: $0 <= 2 ? "Slot\($0)\\Save0.bmp" : nil) }
+  return b
+}
+// The window's view, laid out offscreen (no window): the pad targets it registers reach the Launcher (onPreferenceChange).
+@MainActor var offscreenWindows: [NSWindow] = []
+@MainActor func offscreen(_ b: Launcher) -> NSHostingView<MainView> {
+  let v = NSHostingView(rootView: MainView(b: b, live: false))
+  v.appearance = NSAppearance(named: .darkAqua)
+  v.frame = NSRect(x: 0, y: 0, width: 600, height: 560)
+  // In a borderless window that is never ordered on screen: a ScrollView scrolls (ScrollViewReader) only inside a window.
+  let w = NSWindow(contentRect: v.frame, styleMask: [.borderless], backing: .buffered, defer: true)
+  w.isReleasedWhenClosed = false; w.contentView = v; offscreenWindows.append(w)
+  settle(v)
+  return v
+}
+@MainActor func settle(_ v: NSView) {
+  for _ in 0..<4 { v.layoutSubtreeIfNeeded(); RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+}
+
+// The pad on the window's view, offscreen, through the same Launcher.pad the poller calls (Launcher --pad-check): which
+// target has focus after each press. No game starts and no folder is touched (the presses avoid Play and the tabs).
+@MainActor func padCheck() {
+  _ = NSApplication.shared
+  // the release switch off: the HP2 tab is no target (no pad RB, no click); then the preview build for the rest
+  Hp2Release.available = false
+  do { let b = stateLauncher(nil); _ = offscreen(b); b.pad(PadMap.rb); print("hp2_off: tab2_target=\(b.target("tab2") == nil ? 0 : 1) hp2Tab=\(b.hp2Tab ? 1 : 0)") }
+  Hp2Release.available = true
+  let b = stateLauncher("/nonexistent-hp2")
+  b.mods = [Launcher.Mod(name: "Alpha", enabled: true, missing: false), Launcher.Mod(name: "Beta", enabled: false, missing: false)]
+  let v = offscreen(b)
+  func say(_ what: String) { print("\(what): focus=\(b.padFocus ?? "-") ring=\(b.padUsed ? 1 : 0) mods=\(b.modsOpen ? 1 : 0) popup=\(b.popup == nil ? 0 : 1) page=\(b.hp2Page)") }
+  func press(_ n: String, _ button: Int) { b.pad(button); settle(v); say(n) }
+  say("start")
+  press("up", PadMap.up); press("down", PadMap.down); press("down", PadMap.down)
+  press("a_on_mods", PadMap.a); press("right", PadMap.right); press("b", PadMap.b)
+  press("start", PadMap.start); press("down", PadMap.down); press("b", PadMap.b)
+  b.hp2Tab = true; b.hp2Page = "Main"; settle(v); say("hp2")
+  press("y_on_hp2", PadMap.y); press("a_on_load", PadMap.a); press("right", PadMap.right); press("b", PadMap.b)
+  print("gamecontroller: \(GCController.controllers().count) controller(s), read \(Launcher.readPad().map { "\($0)" } ?? "none")")
+}
+
+// Offscreen pictures of the window's states (no window is opened): Launcher --render-states <out dir> [HP2 root].
+@MainActor func renderStates(to dir: String, hp2Root: String?) {
+  // Synthetic thumbnails (plain gradients, no game image) for the two used slots, in a temporary save folder.
+  let thumbs = FileManager.default.temporaryDirectory.appendingPathComponent("hpengine-render-\(UUID().uuidString)")
+  defer { try? FileManager.default.removeItem(at: thumbs) }
+  for n in 1...2 {
+    let img = NSImage(size: NSSize(width: 128, height: 96), flipped: false) { r in
+      NSGradient(colors: [NSColor(red: 0.54, green: 0.44, blue: 0.33, alpha: 1), NSColor(red: 0.17, green: 0.23, blue: 0.15, alpha: 1), NSColor(red: 0.08, green: 0.02, blue: 0.04, alpha: 1)])?.draw(in: r, angle: -35)
+      return true
+    }
+    let d = thumbs.appendingPathComponent("Slot\(n)")
+    try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+    if let t = img.tiffRepresentation, let png = NSBitmapImageRep(data: t)?.representation(using: .bmp, properties: [:]) { try? png.write(to: d.appendingPathComponent("Save0.bmp")) }
+  }
+  Launcher.renderSaveDir = thumbs.path
+  _ = NSApplication.shared
+  NSApp.appearance = NSAppearance(named: .darkAqua)
+  registerTitleFont()
+  func shot(_ name: String, modsOpen: Bool = false, _ set: (Launcher) -> Void, then: ((Launcher) -> Void)? = nil) {
+    Hp2Release.available = name.hasPrefix("hp2")   // the HP1 shots as released (HP2 "Coming soon"), the HP2 ones as a preview build
+    let b = stateLauncher(hp2Root)
+    b.modsOpen = modsOpen
+    set(b)
+    let v = offscreen(b)
+    if let then { then(b); settle(v) }
+    let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1200, pixelsHigh: 1120, bitsPerSample: 8, samplesPerPixel: 4,
+                               hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    rep.size = v.bounds.size
+    v.cacheDisplay(in: v.bounds, to: rep)
+    let out = URL(fileURLWithPath: dir).appendingPathComponent("mac_\(name).png")
+    do { try rep.representation(using: .png, properties: [:])!.write(to: out); print(out.path) } catch { print("FAIL \(out.path): \(error)") }
+  }
+  let mods = [Launcher.Mod(name: "HD Textures", enabled: true, missing: false), Launcher.Mod(name: "Map Pack", enabled: true, missing: false),
+              Launcher.Mod(name: "Classic HUD", enabled: false, missing: false), Launcher.Mod(name: "Fast Spells", enabled: false, missing: false),
+              Launcher.Mod(name: "Widescreen", enabled: false, missing: false)]
+  shot("hp1_ready_update") { b in
+    b.newer = (version: "0.4.1", page: URL(string: "https://example.invalid/release")!, zip: nil, sig: nil); b.mods = mods
+  }
+  shot("hp1_multilingual_error") { b in
+    b.edition = "UK 1.1: modified"
+    b.languageList = ["dan": "Danish", "eng": "English", "fin": "Finnish", "nor": "Norwegian", "swe": "Swedish"].sorted { $0.value < $1.value }
+      .map { Launcher.LanguageChoice(code: $0.key, label: $0.value, folder: $0.key == "eng" ? nil : "1") }
+    b.mods = mods; b.startMaps = [Launcher.StartMap(mod: "Map Pack", map: "Hogsmeade")]
+    b.modsNotice = ["Slot 2 was saved with other mods: loading it restarts its level with the progress you had when you entered it."]
+    b.error = Launcher.errorBanner(["[Crash] Missing package \"HP_Menu\"."], code: 1, log: "Open log, or \(Launcher.launchLogURL.path).")
+    b.runError = b.error
+  }
+  shot("hp1_crowded_scrolls") { b in
+    b.newer = (version: "0.4.1", page: URL(string: "https://example.invalid/release")!, zip: nil, sig: nil)
+    b.edition = "UK 1.1: modified"
+    b.languageList = [Launcher.LanguageChoice(code: "eng", label: "English", folder: nil), Launcher.LanguageChoice(code: "rus", label: "Russian", folder: "1")]
+    b.mods = mods; b.startMaps = [Launcher.StartMap(mod: "Map Pack", map: "Hogsmeade")]
+    b.warning = "This release is not one HPEngine was checked against; it is installed as it is."
+    b.report = URL(string: "https://example.invalid/issue")
+    b.error = Launcher.errorBanner(["[Crash] Missing package \"HP_Menu\"."], code: 1, log: "Open log, or \(Launcher.launchLogURL.path).")
+    b.runError = b.error
+  }
+  shot("hp1_mods", modsOpen: true) { b in
+    b.mods = [Launcher.Mod(name: "Old Mod", enabled: true, missing: true)] + mods
+    b.modsNotice = ["Slot 2 was saved with other mods: loading it restarts its level with the progress you had when you entered it.",
+                    "Map Pack and HD Textures both have Textures/Hogwarts.utx: the game uses Map Pack's (later in the order)"]
+  }
+  shot("hp1_no_game") { b in b.installed = false; b.edition = nil }
+  shot("hp1_files_chosen") { b in
+    b.installed = false; b.edition = nil
+    b.inputs = [URL(fileURLWithPath: "/Volumes/HARRY_POTTER"), URL(fileURLWithPath: "/Volumes/USB/HP1_Setup.exe")]
+  }
+  shot("hp1_installing") { b in
+    b.installed = false; b.running = true; b.step = 3; b.progress = 0.64; b.inputs = [URL(fileURLWithPath: "/Volumes/HARRY_POTTER")]
+  }
+  shot("hp1_install_failed") { b in
+    b.installed = false; b.edition = nil; b.step = 2; b.inputs = [URL(fileURLWithPath: "/Volumes/HARRY_POTTER")]
+    b.error = "Some game files are missing or damaged: Maps/Hogwarts_Grounds.unr."
+  }
+  shot("hp2_main") { b in b.hp2Tab = true }
+  shot("hp2_main_no_saves") { b in b.hp2Tab = true; b.hp2Slots = b.hp2Slots.map { Hp2FrontEnd.Slot(n: $0.n, dir: $0.dir, used: false, thumb: nil) } }
+  shot("hp2_load_game") { b in b.hp2Tab = true; b.hp2Page = "LoadGame" }
+  shot("hp2_no_folder") { b in b.hp2Tab = true; b.hp2RootPath = nil }
+  // the Menu open by the pad's Start (a pad connected: the hints in the footer); HP2 Load Game, focus moved by the d-pad
+  shot("hp1_menu", { b in b.padConnected = true }, then: { b in b.pad(PadMap.start) })
+  shot("hp2_load_pad", { b in b.hp2Tab = true; b.hp2Page = "LoadGame"; b.padConnected = true }, then: { b in b.pad(PadMap.right) })
+  // Interaction states (no pointer offscreen: forcedLooks gives a target the hover / pressed look): hover, press, pad
+  // focus, and each list open at its control with an item under the pointer.
+  let multi = [Launcher.LanguageChoice(code: "eng", label: "English", folder: nil), Launcher.LanguageChoice(code: "rus", label: "Russian", folder: "1"),
+               Launcher.LanguageChoice(code: "swe", label: "Swedish", folder: "2")]
+  shot("polish_hover") { b in b.mods = mods; b.forcedLooks = ["play": 1, "menu": 1, "mods": 1] }
+  shot("polish_pressed") { b in b.mods = mods; b.forcedLooks = ["play": 2, "mods": 2] }
+  shot("polish_focus", { b in b.mods = mods; b.padConnected = true }, then: { b in b.pad(PadMap.down) })
+  shot("polish_menu_open", { b in b.forcedLooks = ["pop2": 1] }, then: { b in b.target("menu")?.run() })
+  shot("polish_language_open", { b in b.languageList = multi; b.mods = mods; b.forcedLooks = ["pop2": 1] }, then: { b in b.target("language")?.run() })
+  shot("polish_startmap_open", { b in b.mods = mods; b.startMaps = [Launcher.StartMap(mod: "Map Pack", map: "Hogsmeade"), Launcher.StartMap(mod: "Map Pack", map: "Diagon")]; b.forcedLooks = ["pop1": 2] },
+       then: { b in b.target("startmap")?.run() })
+  shot("polish_startmap_scrolled", { b in b.startMaps = (1...30).map { Launcher.StartMap(mod: "Pack", map: String(format: "Map%02d", $0)) }; b.padConnected = true },
+       then: { b in b.target("startmap")?.run(); for _ in 0..<15 { b.pad(PadMap.down) } })
+  shot("polish_playing") { b in b.playing = true }
+  shot("polish_installing") { b in b.installed = false; b.running = true; b.step = 3; b.progress = 0.64; b.inputs = [URL(fileURLWithPath: "/Volumes/HARRY_POTTER")] }
+}
+
+// A long list offscreen (Launcher --popup-check): the Start map list of 30 maps opens at its choice, End / Home / a page /
+// type-ahead / the d-pad move the focus, and its scroller follows: where it stands (top, mid, end) after each step.
+@MainActor func popupCheck() {
+  _ = NSApplication.shared
+  Hp2Release.available = false
+  let b = stateLauncher(nil)
+  b.startMaps = (1...30).map { Launcher.StartMap(mod: "Pack", map: String(format: "Map%02d", $0)) }
+  let v = offscreen(b)
+  // ordered in, far off every screen and never key: real mouse and wheel events reach the list only in an ordered window
+  v.window?.setFrameOrigin(NSPoint(x: -30000, y: -30000)); v.window?.orderBack(nil); settle(v)
+  func scrollers(_ v: NSView) -> [NSScrollView] { ((v as? NSScrollView).map { [$0] } ?? []) + v.subviews.flatMap(scrollers) }
+  func line(_ step: String) {
+    settle(v)
+    // the list's scroller: the one whose content is taller than it
+    // the list's scroller (the second: the window's own page is the first); its offset, and whether the last item is in view
+    let sv = scrollers(v).dropFirst().first, total = CGFloat(b.popup?.items.count ?? 0) * 40 + 4   // the last item's bottom (under the 4 pt inset)
+    let at = sv.map { "\(Int($0.contentView.bounds.minY))+\(Int($0.contentView.bounds.height)) last_in_view=\($0.contentView.bounds.maxY >= total - 1 ? 1 : 0)" } ?? "-"
+    let title = b.padFocus.flatMap { Int($0.dropFirst(3)) }.flatMap { i in b.popup.map { $0.items[i].title } } ?? "-"
+    // the indicator's offset (what it is drawn from) against the list's: 1 when it stands where the list is
+    let ind = sv.map { Int(b.listOffset) == Int($0.contentView.bounds.minY) ? "1" : "0(\(Int(b.listOffset)))" } ?? "-"
+    print("\(step): focus=\(title) popup=\(b.popup == nil ? 0 : 1) scroll=\(at.isEmpty ? "-" : at) ind=\(ind)")
+  }
+  b.target("startmap")?.run(); line("open")
+  b.moveTo(Int.max); line("end")
+  b.moveTo(0); line("home")
+  b.moveBy(Launcher.page); line("page_down")
+  b.typeAhead("m"); line("type_m")
+  for _ in 0..<15 { b.pad(PadMap.down) }; line("pad_down_15")
+  // the indicator dragged: to the middle, the end, the top (the same Launcher.dragList the gesture calls)
+  for (name, f) in [("drag_mid", 0.5), ("drag_end", 1.0), ("drag_top", 0.0)] as [(String, CGFloat)] {
+    b.dragList(f); line(name)
+  }
+  // a real mouse drag on the indicator's track (the window's event path into the SwiftUI gesture): from its top to its bottom
+  if let sv = scrollers(v).dropFirst().first, let w = v.window {
+    let r = sv.convert(sv.bounds, to: nil), x = r.maxX - 5
+    func mouse(_ t: NSEvent.EventType, _ y: CGFloat) {
+      w.sendEvent(NSEvent.mouseEvent(with: t, location: NSPoint(x: x, y: y), modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                     windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+      settle(v)
+    }
+    mouse(.leftMouseDown, r.maxY - 2); for k in 1...8 { mouse(.leftMouseDragged, r.maxY - 2 - CGFloat(k) * (r.height - 4) / 8) }
+    mouse(.leftMouseUp, r.minY + 2); line("mouse_drag_down")
+  }
+  b.pad(PadMap.a); line("pad_a")
+  print("chosen=\(b.startMap ?? "-")")
 }
 
 // Command-line checks never start the app (and never open a window): any first argument starting with "--".
@@ -1094,6 +2527,29 @@ struct MainView: View {
       print(zip(maps, Launcher.startMapLabels(maps)).map { "\($0.map)@\($0.mod)=\($1)" }.joined(separator: "|"))
       print(Launcher.playArguments(game: URL(fileURLWithPath: "/g"), map: Launcher.keptStartMap(a.count == 4 ? a[3] : nil, maps)).joined(separator: " "))
       exit(0)
+    case "--mods-order" where a.count == 3:
+      // <game dir>: each listed mod as "<name>=<order number or ->", "|"-separated (launcher/test_update.sh).
+      let mods = Launcher.modList(game: URL(fileURLWithPath: a[2]))
+      print(mods.map { "\($0.name)=" + (Launcher.orderNumber(mods, $0).map(String.init) ?? "-") }.joined(separator: "|")); exit(0)
+    case "--mods-conflicts" where a.count == 3:
+      // <game dir>: the conflict lines of the Mods card, one per output line (launcher/test_update.sh).
+      for l in Launcher.conflictLines(game: URL(fileURLWithPath: a[2])) { print(l) }
+      exit(0)
+    case "--language-list" where a.count == 3:
+      // <game dir>: "<code>|<label>|<folder or ->" per language, then "selected=<code or ->" (launcher/test_update.sh, against
+      // the same mode of launcher/Desktop.Tests, which runs GameLanguage.cs).
+      let g = URL(fileURLWithPath: a[2])
+      for l in Launcher.languages(game: g) { print("\(l.code)|\(l.label)|\(l.folder ?? "-")") }
+      print("selected=" + (Launcher.selectedLanguage(game: g) ?? "-")); exit(0)
+    case "--language-select" where a.count == 4:
+      // <game dir> <code|default>: the chooser's write; "OK", or "FAIL <text>" and exit 1.
+      do { try Launcher.saveLanguage(game: URL(fileURLWithPath: a[2]), a[3] == "default" ? nil : a[3]); print("OK"); exit(0) }
+      catch let e as Launcher.LanguageError { print("FAIL " + e.text); exit(1) }
+      catch { print("FAIL \(error)"); exit(1) }
+    case "--edition-label" where a.count == 4:
+      // <edition text> <game dir>: the Game card's "name|tier|detail" with that game's languages.
+      let d = Launcher.editionDisplay(a[2], Launcher.languages(game: URL(fileURLWithPath: a[3])))
+      print("\(d.name)|\(d.tier)|\(d.detail ?? "-")"); exit(0)
     case "--pad-reset" where a.count == 3 || (a.count == 4 && a[3] == "reset"):
       // <game dir> [reset]: how many lines "Reset Gamepad Bindings" removes; with "reset" it removes them (launcher/test_update.sh).
       print(Launcher.padRebound(game: URL(fileURLWithPath: a[2]), reset: a.count == 4)); exit(0)
@@ -1104,10 +2560,35 @@ struct MainView: View {
     case "--game-title" where a.count == 2 || a.count == 3:
       // [<edition text>]: the header title (launcher/test_update.sh); no argument: no game identified.
       print(Launcher.gameTitle(a.count == 3 ? a[2] : nil)); exit(0)
+    case "--hp2-frontend" where a.count == 4:
+      // <cases> <answers>: tools/hp2/frontend_judge.py's cases answered as launcher/Desktop.Tests --hp2-frontend (test_update.sh).
+      guard let s = try? String(contentsOfFile: a[2], encoding: .utf8) else { print("FAIL no cases"); exit(1) }
+      let out = s.split(separator: "\n", omittingEmptySubsequences: true).map { l in String(l) + "\t=\t" + Hp2FrontEnd.answer(String(l)) }
+      do { try (out.joined(separator: "\n") + "\n").write(toFile: a[3], atomically: true, encoding: .utf8); exit(0) } catch { print("FAIL \(error)"); exit(1) }
+    case "--hp2-menu" where a.count == 4 || (a.count == 7 && ["new", "load"].contains(a[4])):
+      // <HP1 data dir> <HP2 root> [new|load <slot> <yes 0|1>]: the HP2 tab's menu on real folders (Hp2FrontEnd.menuReport).
+      let click = a.count == 7 ? (a[4] == "new" ? Hp2FrontEnd.Launch.newGame : .loadGame, Int(a[5]) ?? 1, a[6] == "1") : nil
+      for l in Hp2FrontEnd.menuReport(hp1Data: a[2], root: a[3], click: click) { print(l) }
+      exit(0)
+    case "--pad-map" where a.count == 2:
+      // The gamepad table, as launcher/Desktop.Tests --pad-map prints it from Logic.cs PadMap (launcher/test_update.sh compares).
+      for l in PadMap.table() { print(l) }
+      exit(0)
+    case "--game-scope" where a.count == 3:
+      // <HP1 game dir>: the per-game answers, as launcher/Desktop.Tests --game-scope prints them from Logic.cs GameScope.
+      for l in GameScope.table(a[2]) { print(l) }
+      exit(0)
+    case "--pad-check" where a.count == 2:
+      MainActor.assumeIsolated { padCheck() }; exit(0)
+    case "--popup-check" where a.count == 2:
+      MainActor.assumeIsolated { popupCheck() }; exit(0)
+    case "--render-states" where a.count == 3 || a.count == 4:
+      // <out dir> [HP2 root]: offscreen pictures of the window's states, mac_<state>.png (no window is opened).
+      MainActor.assumeIsolated { renderStates(to: a[2], hp2Root: a.count == 4 ? a[3] : nil) }; exit(0)
     case "--runtime-path" where a.count == 2:
       print(Launcher.runtimeURL.path); exit(0)
     default:
-      FileHandle.standardError.write(Data("usage: Launcher --verify-update <zip> <sig> <key> <version> | --pick-release <json> <version> | --mods-ini <file> [names...] | --mods-notice <game dir> | --mods-check <game dir> | --start-maps <game dir> [map] | --engine-error <code> <file> | --slot-mods <save file> | --game-title [edition] | --remove-game <root> <keep|all> [fail-after-marker] | --runtime-path\n".utf8))
+      FileHandle.standardError.write(Data("usage: Launcher --verify-update <zip> <sig> <key> <version> | --pick-release <json> <version> | --mods-ini <file> [names...] | --mods-notice <game dir> | --mods-check <game dir> | --start-maps <game dir> [map] | --mods-order <game dir> | --mods-conflicts <game dir> | --language-list <game dir> | --language-select <game dir> <code|default> | --edition-label <edition> <game dir> | --engine-error <code> <file> | --slot-mods <save file> | --game-title [edition] | --remove-game <root> <keep|all> [fail-after-marker] | --hp2-frontend <cases> <answers> | --hp2-menu <hp1 data> <hp2 root> [new|load <slot> <0|1>] | --render-states <out dir> [hp2 root] | --pad-map | --pad-check | --game-scope <game dir> | --runtime-path\n".utf8))
       exit(2)
     }
   }
@@ -1115,7 +2596,9 @@ struct MainView: View {
 
 struct LauncherApp: App {
   @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
+  @StateObject var b = Launcher()
+  init() { registerTitleFont() }
   var body: some Scene {
-    WindowGroup { MainView() }.windowResizability(.contentSize)
+    WindowGroup { MainView(b: b) }.windowResizability(.contentSize)
   }
 }

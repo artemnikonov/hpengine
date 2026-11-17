@@ -180,8 +180,23 @@ namespace HP1.UEScript
         // Taunt) MoveTimer=1.2 s and cuts the flight by timeout.
         // `interp` is needed by the Touch branch; without it the dispatch is not
         // swallowed silently but warned about.
+        // HP2 [HP2 0x103e6ed0]: the arrival test (MoveTowardNearHp2), the register reciprocal (MoveTowardUnitHp2),
+        // MoveTimer = Min(MoveTimer, 0.25f) for a pawn that did not move [0x103e73d4..0x103e73f3], and every completing
+        // return (eax = 1) first sets DesiredRotation.Yaw = Rotation.Yaw of a walking pawn [0x103e7032, 0x103e7468,
+        // 0x103e75bc] (Physics read at the return). Judge: tools/hp2/physics_tick_judge.py MoveToward / MoveTowardPort.
+        // Original: Engine.dll ?moveToward@APawn@@QAEHABVFVector@@@Z [HP1 0x103D96F0] [HP2 0x103E6ED0]
         public static bool MoveToward(UEObject pawn, Vector3 point, UEInterpreter interp = null)
         {
+            bool hp2 = UEGameProfile.Current.Game == UEEdition.Game.HP2;
+            bool Done()
+            {
+                if (hp2 && UEInterpreter.ToInt(pawn.GetProp(PK.Physics)) == 1)
+                {
+                    UERotator d = UEInterpreter.AsRotator(pawn.GetProp(PK.DesiredRotation));
+                    pawn.Props["DesiredRotation"] = new UERotator(d.Pitch, UEInterpreter.AsRotator(pawn.GetProp(PK.Rotation)).Yaw, d.Roll);
+                }
+                return true;
+            }
             int physics = UEInterpreter.ToInt(pawn.GetProp(PK.Physics));
             Vector3 loc = UEInterpreter.AsVector3(pawn.GetProp(PK.Location));
             Vector3 dir = point - loc;
@@ -211,7 +226,7 @@ namespace HP1.UEScript
                 float accelRate = UEInterpreter.AsFloat(pawn.GetProp(PK.AccelRate));
                 pawn.Props["Acceleration"] = new Vector3(flat.x * accelRate, flat.y * accelRate, flat.z * accelRate);
                 if (UEInterpreter.AsVector3(pawn.GetProp(PK.Velocity)).z >= 0f) return false;
-                return (double)loc.z + 100.0 < point.z;
+                return (double)loc.z + 100.0 < point.z && Done();
             }
             // INVENTORY target (139050-139075, disasm 0x103d9779): within the pawn's own
             // cylinder (|dz| < CollisionHeight, dx²+dy² < CollisionRadius²) shipped calls
@@ -231,13 +246,19 @@ namespace HP1.UEScript
             }
             bool fly3d = !UEInterpreter.ToBool(pawn.GetProp(PK.bCanStrafe))
                 && (physics == 4 || physics == 3);
-            if (MoveTowardNear2D(dir.x, dir.y))
+            // The speed: HP1 computes it after the Pawn-target test, HP2 before the arrival test; nothing in between writes
+            // Velocity.
+            Vector3 vel = UEInterpreter.AsVector3(pawn.GetProp(PK.Velocity));
+            float speed = vel.magnitude;
+            bool moved = false;
+            if (hp2 ? MoveTowardNearHp2(dir, point, loc, UEInterpreter.AsVector3(pawn.GetProp(PK.OldLocation)), speed, out moved)
+                    : MoveTowardNear2D(dir.x, dir.y))
             {
                 float vtol = Math.Max(UEInterpreter.AsFloat(pawn.GetProp(PK.CollisionHeight)), 48f);
                 if (Math.Abs(dir.z) < vtol)
                 {
                     if (!fly3d) pawn.Props["Acceleration"] = Vector3.zero;
-                    return true; // reached
+                    return Done(); // reached
                 }
             }
             float dist = dir.magnitude;
@@ -248,10 +269,13 @@ namespace HP1.UEScript
             // brings the nose around, it does not slide sideways at the goal.
             Vector3 unit = fly3d
                 ? GMathForward(UEInterpreter.AsRotator(pawn.GetProp(PK.Rotation)))
-                : MoveTowardUnit(dir, dist);
+                : hp2 ? MoveTowardUnitHp2(dir, dist) : MoveTowardUnit(dir, dist);
             Vector3 accel = unit * UEInterpreter.AsFloat(pawn.GetProp(PK.AccelRate));
             pawn.Props["Acceleration"] = accel;
-            if (UEInterpreter.AsFloat(pawn.GetProp(PK.MoveTimer)) < 0f) return true; // timed out
+            // HP2 [0x103e73d6..0x103e73f3]: fld MoveTimer; fld 0.25f; fcomp st(1); `test ah, 0x41; je` keeps MoveTimer only
+            // when 0.25 is above it (a NaN MoveTimer becomes 0.25).
+            if (hp2 && !moved && !(0.25f > UEInterpreter.AsFloat(pawn.GetProp(PK.MoveTimer)))) pawn.Props["MoveTimer"] = 0.25f;
+            if (UEInterpreter.AsFloat(pawn.GetProp(PK.MoveTimer)) < 0f) return Done(); // timed out
             // PAWN target (139166-139177, disasm 0x103d9ae7): completion by approach
             // distance, not by cylinder — MeleeRange·0.8 + MoveTarget.CollisionRadius +
             // CollisionRadius <= dist → keep going, else arrived. Placed BEFORE steering
@@ -261,10 +285,8 @@ namespace HP1.UEScript
             {
                 return MoveTowardPawnReached(dist, UEInterpreter.AsFloat(pawn.GetProp(PK.MeleeRange)),
                     UEInterpreter.AsFloat(pawnTarget.GetProp(PK.CollisionRadius)),
-                    UEInterpreter.AsFloat(pawn.GetProp(PK.CollisionRadius)));
+                    UEInterpreter.AsFloat(pawn.GetProp(PK.CollisionRadius))) && Done();
             }
-            Vector3 vel = UEInterpreter.AsVector3(pawn.GetProp(PK.Velocity));
-            float speed = vel.magnitude;
             if (!fly3d && speed > 100f)
             {
                 accel = MoveTowardSteer(accel, unit, vel, speed);
@@ -283,7 +305,7 @@ namespace HP1.UEScript
                     // quotient; for float operands that is the same value and decision (rounding at 64 bits, then at 24,
                     // is innocuous for a quotient of 24-bit numbers: 64 >= 2·24 + 2).
                     pawn.Props["DesiredSpeed"] = Math.Min(UEInterpreter.AsFloat(pawn.GetProp(PK.DesiredSpeed)), 200f / speed);
-                if (fly3d) return true;
+                if (fly3d) return Done();
             }
             return false;
         }
@@ -326,6 +348,39 @@ namespace HP1.UEScript
         {
             if (!float.IsFinite(dx) || !float.IsFinite(dy)) return dx * dx + dy * dy < 256f;
             return R64(X(dy) * X(dy) + X(dx) * X(dx)).CompareTo(X(256f)) < 0;
+        }
+
+        // HP2's arrival test [HP2 0x103e7181..0x103e7292]: m = Location − OldLocation (fsub, stored as float). `moved` unless
+        // every m component compares equal to 0 (`test ah, 0x40`: C3, unordered too) while the speed does not. A moved
+        // pawn arrives only by passing the point: (Point − OldLocation)·m > 0, m·d < 0 (d = Point − Location as stored,
+        // dZ 0 when walking) and (dY² + dX²)·(1/9f) below float(mX² + mY²); one that did not move but has a speed: dY² + dX²
+        // < 16 (HP1: 256). Everything in the register (PC64); the Z test after it is HP1's.
+        internal static bool MoveTowardNearHp2(Vector3 d, Vector3 point, Vector3 loc, Vector3 old, float speed, out bool moved)
+        {
+            const int C0 = HP1.Core.X87Ext.C0, C3 = HP1.Core.X87Ext.C3;
+            static int Fcom(HP1.Core.X87Ext a, HP1.Core.X87Ext b) => HP1.Core.X87Ext.Fcom(a, b);
+            float mx = loc.x - old.x, my = loc.y - old.y, mz = loc.z - old.z;
+            static bool Zero(float v) => (HP1.Core.X87Ext.Fcom(X(v), X(0f)) & HP1.Core.X87Ext.C3) != 0;
+            moved = !Zero(mx) || !Zero(my) || !Zero(mz) || Zero(speed);
+            HP1.Core.X87Ext d2 = R64(X(d.y) * X(d.y) + X(d.x) * X(d.x));
+            if (!moved) return (Fcom(d2, X(16f)) & C0) != 0;
+            HP1.Core.X87Ext dot1 = R64(R64(R64(R64(X(point.x) - X(old.x)) * X(mx)) + R64(R64(X(point.y) - X(old.y)) * X(my)))
+                + R64(R64(X(point.z) - X(old.z)) * X(mz)));
+            if ((Fcom(dot1, X(0f)) & (C0 | C3)) != 0) return false;
+            HP1.Core.X87Ext dot2 = R64(R64(X(my) * X(d.y) + X(mx) * X(d.x)) + X(mz) * X(d.z));
+            if ((Fcom(dot2, X(0f)) & C0) == 0) return false;
+            float m2 = R64(X(mx) * X(mx) + X(my) * X(my)).ToFloat();
+            return (Fcom(R64(d2 * X(1f / 9f)), X(m2)) & C0) != 0;
+        }
+
+        // HP2 [HP2 0x103e735e..0x103e739c]: only dist > 0 normalizes; r = 1.0f/dist in the register, every component r·d
+        // stored as float (HP1 multiplies X and Y by float(r)).
+        internal static Vector3 MoveTowardUnitHp2(Vector3 d, float dist)
+        {
+            if (!(dist > 0f)) return d;
+            if (!Finite(d) || !float.IsFinite(dist)) return d / dist;
+            var r = HP1.Core.X87Ext.Div64(X(1f), X(dist));
+            return new Vector3(MulF(d.x, r), MulF(d.y, r), MulF(d.z, r));
         }
 
         // 0x103d9a3e..0x103d9a81: only dist > 0 normalizes (otherwise the differences stay); r = 1.0f/dist in the
@@ -607,14 +662,13 @@ namespace HP1.UEScript
         }
 
         // APawn::execWaitForLanding (disasm 0x103d6eb0..0x103d6ed6): LatentFloat (+0xcc) = 2.5f (0x40200000)
-        // always; LatentAction 0x210 only when Physics == PHYS_Falling. The port keeps LatentFloat in the state
-        // frame's SleepTimeLeft (the same field execSleep/StopWaiting use).
+        // always; LatentAction 0x210 only when Physics == PHYS_Falling (UEFrame.SleepTimeLeft = the actor's LatentFloat).
         public static void EnterWaitForLanding(UEObject self)
         {
-            UEFrame sf = self.StateFrame ?? throw new NotSupportedException(
-                $"WaitForLanding on {self.GetProp(PK.Name)} without a state frame: LatentFloat lives on it in the port");
-            sf.SleepTimeLeft = 2.5f;
-            if (UEInterpreter.ToInt(self.GetProp(PK.Physics)) == 2) sf.LatentState = LatentRunState.WaitForLanding;
+            self.SetProp(PK.LatentFloat, 2.5f);
+            if (UEInterpreter.ToInt(self.GetProp(PK.Physics)) == 2)
+                (self.StateFrame ?? throw new NotSupportedException(
+                    $"WaitForLanding on {self.GetProp(PK.Name)} without a state frame")).LatentState = LatentRunState.WaitForLanding;
         }
 
         // execPollWaitForLanding (disasm 0x103d6ef0..0x103d6f46): Physics != PHYS_Falling completes. Otherwise
@@ -631,9 +685,14 @@ namespace HP1.UEScript
         // APawn::execTurnTo (Engine.dll.c:71393): fixed Focus point; the
         // initial rotateToward result is deliberately ignored — even an
         // already-facing pawn resumes only when the poll runs.
+        // HP2 adds, after the Focus store: if (Physics == PHYS_Walking) Focus.Z = Location.Z [HP2 0x103e6c09..0x103e6c19];
+        // its execPollTurnTo [HP2 0x103e6d10] has no such line (HP1's body but the layout).
+        // Original: Engine.dll ?execTurnTo@APawn@@QAEXAAUFFrame@@QAX@Z [HP1 0x103D93F0] [HP2 0x103E6B90]
         public static void EnterTurnTo(UEObject self, UEFrame frame, Vector3 focus)
         {
             self.SetDeclared("Pawn", "MoveTarget", null);
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2 && UEInterpreter.ToInt(self.GetProp(PK.Physics)) == 1)
+                focus.z = UEInterpreter.AsVector3(self.GetProp(PK.Location)).z;
             self.Props["Focus"] = focus;
             InstallLatent(self, frame, LatentRunState.TurnTo);
             SetTurnAcceleration(self);

@@ -198,3 +198,12 @@ SOFTWARE.
 "MS Sans Serif" that the game asks for and that no game install contains (not original). Reserved Font Names:
 "Liberation", "Arimo". The full license text is in `HP1.Core/Fonts/` next to the font.
 https://github.com/liberationfonts/liberation-fonts
+
+## Cormorant Garamond Bold (Cormorant v4.002) — SIL Open Font License 1.1
+
+`launcher/Desktop/Fonts/CormorantGaramond-Bold.otf`, unmodified, embedded in the Windows/Linux Launcher for the game titles.
+Copyright 2015 the Cormorant Project Authors. No Reserved Font Names. The full license text is in `launcher/Desktop/Fonts/`
+next to the font and is embedded in the Launcher with it. The macOS Launcher bundles the same family as
+`launcher/fonts/CormorantGaramond-Bold.ttf` (unmodified, license text `launcher/fonts/OFL.txt`, copied into the app's
+Resources with it).
+https://github.com/CatharsisFonts/Cormorant

@@ -138,6 +138,33 @@ namespace HPEngine.Packaging
             return maps.Values.OrderBy(m => m.Map, StringComparer.OrdinalIgnoreCase).ToList();
         }
 
+        // Files that two enabled mods both place at the same relative path (Prepare's placement and its case-insensitive
+        // Key): the later mod's file is the one in the working copy. One entry per (earlier, later) pair, in mod order,
+        // with the paths sorted without case; a file three mods carry is reported for each step (A
+        // then B, B then C). Reads only (the Launchers' Mods card; mirrored in launcher/Launcher.swift modConflicts).
+        public static List<(string Earlier, string Later, List<string> Files)> Conflicts(string install, string dataDir)
+        {
+            List<string> enabled = Enabled(dataDir);
+            var pairs = new List<(string Earlier, string Later, List<string> Files)>();
+            if (enabled.Count < 2) return pairs;
+            var mods = Collect(install, dataDir, enabled, new List<string>(), new List<string>());
+            var owner = new Dictionary<string, int>(StringComparer.Ordinal);
+            for (int i = 0; i < mods.Count; i++)
+                foreach (var (_, rel) in mods[i])
+                {
+                    string key = Key(rel);   // without case, as Prepare places it
+                    if (owner.TryGetValue(key, out int j) && j != i)
+                    {
+                        int at = pairs.FindIndex(p => p.Earlier == enabled[j] && p.Later == enabled[i]);
+                        if (at < 0) { pairs.Add((enabled[j], enabled[i], new List<string>())); at = pairs.Count - 1; }
+                        pairs[at].Files.Add(rel.Replace('\\', '/'));
+                    }
+                    owner[key] = i;
+                }
+            foreach (var p in pairs) p.Files.Sort(StringComparer.OrdinalIgnoreCase);
+            return pairs;
+        }
+
         // Every file of the install's game directories.
         static IEnumerable<string> GameFiles(string install) =>
             Directory.GetDirectories(install).Where(d => !NotGameData.Contains(Path.GetFileName(d), StringComparer.OrdinalIgnoreCase))

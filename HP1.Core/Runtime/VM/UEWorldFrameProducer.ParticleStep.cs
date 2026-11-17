@@ -13,16 +13,58 @@ namespace HP1.UEScript
     {
         // URender::BoundVisible of FDynamicSprite::Setup: Core FCoords::Inverse(box) runs at the depth of the emitter
         // slot (see above) and leaves its result's YAxis.Y/Z there.
-        internal void SetupBoundVisibleResidue(in BrushCoords box)
+        // HP2 (D-73 HP2 (7)): a Setup of a child frame runs at another stack depth (live: a second FDynamicSprite::Setup
+        // depth 0xac below SetupDynamics', its BoundVisible locals over the slot) — its residue there is not derived: the slot
+        // becomes unknown and a GetRenderBoundingBox-path read refuses until the next master-frame writer.
+        internal void SetupBoundVisibleResidue(in BrushCoords box, bool childFrame = false)
         {
-            BrushCoords inv = UERenderVisibility.Inverse(box);
-            _setupResidueKnown = true; _setupResY = inv.Y.y; _setupResZ = inv.Y.z;
+            _setupResidueKnown = !(childFrame && UEGameProfile.Current.Game == UEEdition.Game.HP2);
+            (_setupResY, _setupResZ) = SetupResidueOf(UERenderVisibility.Inverse(box));
         }
+
+        // HP2: a Setup whose box is degenerate (|X|² = 0) skips BoundVisible; what its GetRenderBoundingBox left at the slot
+        // is not derived (mesh boxes; an emitter's box after a failed Update) — unknown.
+        internal void Hp2SetupSlotUnknown()
+        {
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2) _setupResidueKnown = false;
+        }
+
+        // HP2 game code that leaves pointer bits on the GetRenderBoundingBox-path slot (behaviour-equal (0, 0), as (5)):
+        // SetupDynamics' shadow-branch BoundVisible (its FCoords::Inverse call's return address 0x10b20d03 and result
+        // pointer, live 34/34 [HP2 0x10b30b6b]).
+        // HP2: the GetRenderBoundingBox path's own writes stay at its slot until the Setup's BoundVisible (live Adv11aCorridor:
+        // the newborns' catch-up values, UParticle::Update at 0x103d096a).
+        internal void Hp2SetupSlotChain(float chaos, float spin)
+        {
+            if (UEGameProfile.Current.Game != UEEdition.Game.HP2) return;
+            _setupResidueKnown = true; _setupResY = chaos; _setupResZ = spin;
+        }
+
+        internal void Hp2SetupSlotGameWrite()
+        {
+            if (UEGameProfile.Current.Game != UEEdition.Game.HP2) return;
+            _setupResidueKnown = true; _setupResY = 0f; _setupResZ = 0f;
+        }
+
+        // Which dwords of BoundVisible's Inverse result (its ebp-0x24c in both builds: HP1 Render 0x10b213a1, HP2 0x10b20cf1)
+        // lie under the slot. HP1: the slot is BoundVisible's ebp-0x230 (Setup frame 0x8c, GetRenderBoundingBox frame 0xd0)
+        // = YAxis.Y/Z. HP2: FDynamicSprite::Setup's frame is 0x5c [HP2 0x10b31323] and GetRenderBoundingBox's 0xdc
+        // [HP2 0x103ce678], so the slot is BoundVisible's ebp-0x23c = XAxis.Y/Z (Core FCoords::Inverse: the same body up to
+        // commuted fmul operands [HP1 0x1014e700] [HP2 0x1014ffb0]).
+        internal static (float Chaos, float Spin) SetupResidueOf(in BrushCoords inv)
+            => UEGameProfile.Current.Game == UEEdition.Game.HP2 ? (inv.X.y, inv.X.z) : (inv.Y.y, inv.Y.z);
+
+        // The bSystemRelative branch's `GMath.UnitCoords *= Rotation` result copy under the slot. HP1: UParticle::Update's
+        // frame 0x10c, the copy at its ebp-0xac (0x103bffb2) = YAxis.Y/Z. HP2: frame 0x100 [HP2 0x103cd233], the copy at
+        // its ebp-0xa0 [HP2 0x103cd57d] = XAxis.Y/Z (Core FCoords::operator*=(FRotator) identical in both builds).
+        internal static (float Chaos, float Spin) SysRelResidue(UERotator r)
+            => UEGameProfile.Current.Game == UEEdition.Game.HP2 ? UnitCoordsMulRotXAxisYZPc24(r) : UnitCoordsMulRotYAxisYZPc24(r);
 
         // Damping factor of a substep (Engine 0x103c1ff4..0x103c200e, render window PC24): fld dword step; fmul dword
         // Damping (rounded to float); fchs; fstp qword; call appExp; fst qword; fstp dword.
         internal static float DampFactor(float step, float damping) => UEX87Transcendental.AppExp(-(step * damping), pc24: true).ToFloat();
 
+        // Original: Engine.dll ?UpdateParticles@AParticleFX@@QAEXM@Z [HP1 0x103C1D60]
         void UpdateFxParticles(UEObject fx, FxState s, float dt)
         {
             (_slotKind, _slotChaos, _slotSpin) = EntrySlot();
@@ -34,6 +76,21 @@ namespace HP1.UEScript
                     s.Particles.RemoveAt(i);
             if (s.Particles.Count == 0) return;
             FxStepCtx ctx = BuildStepCtx(fx);
+            // HP1: GetTotalWind's frames reach the slot (0x103c1f0e, once per call, after the empty-list return): every
+            // AWind::GetWind prologue pushes ebx/ebp/esi/edi [HP1 0x10431063..0x1043106c] and the last two land on it —
+            // saved esi, GetTotalWind's list index, at +0x7c SpinPos, saved edi, &Location, at +0x78 ChaosTimer. After
+            // the loop SpinPos holds the last index, count - 1 (unicorn, se_harness/bsp_diff/pfx_wind_slot_oracle.py).
+            // ChaosTimer, the emitter's heap address, is no game value: 0, NOT ORIGINAL in the bits (decided by the
+            // coordinator under the author's delegation, 2026-11-16, DECISIONS) — behaviour-equal for any address whose
+            // float is below every nonzero step (< ~0x2F000000; live heap pointers < 0x10000000), as D-73's session start.
+            // HP2's GetWind frame is 0x58 (line hp2/pfx-slots): other words reach its slot, not ported.
+            if (ctx.WindCalled && UEGameProfile.Current.Game == UEEdition.Game.HP1 && WindSourceCount() is int winds && winds > 0)
+            {
+                _slotSpin = BitConverter.Int32BitsToSingle(winds - 1);
+                _slotChaos = 0f;
+                _slotKind = SlotKind.Wind;
+                if (!_grbbPath) { RenderSlotSpin = _slotSpin; RenderSlotChaos = 0f; }
+            }
             // Engine.dll .rdata 0x10478410 = 0x3d888a48 = 0.06667f (fcomp at 0x103c400c) — NOT 1/15 (0x3d888889).
             const float SubstepMax = 0.06667f;
             for (float rem = dt; rem > 0f; )
@@ -54,9 +111,10 @@ namespace HP1.UEScript
                     // The bSystemRelative branch ran (DripTimer 0 after the drip hold, 93717).
                     if (ctx.SysRel && p.DripTimer == 0f && _slotKind != SlotKind.SysRel)
                     {
-                        (_slotChaos, _slotSpin) = UnitCoordsMulRotYAxisYZPc24(UEValue.AsRotator(fx.GetProp(PK.Rotation)));
+                        (_slotChaos, _slotSpin) = SysRelResidue(UEValue.AsRotator(fx.GetProp(PK.Rotation)));
                         _slotKind = SlotKind.SysRel;
                         if (!_grbbPath) { RenderSlotChaos = _slotChaos; RenderSlotSpin = _slotSpin; }
+                        else Hp2SetupSlotChain(_slotChaos, _slotSpin);
                     }
                 }
                 rem -= step;
@@ -87,6 +145,19 @@ namespace HP1.UEScript
             return ((p0 * 0f + p1 * cr) + p2 * -sr, (p0 * 0f + p1 * sr) + p2 * cr);
         }
 
+        // XAxis.Y, XAxis.Z of the same product, in the same order (HP2's slot, SysRelResidue).
+        // Original: Core.dll ??XFCoords@@QAEAAV0@ABVFRotator@@@Z [HP1 0x1011D780] [HP2 0x1011E050] (on GMath.UnitCoords)
+        internal static (float Y, float Z) UnitCoordsMulRotXAxisYZPc24(UERotator r)
+        {
+            float sy = BrushCoords.SinAngle(r.Yaw), cy = BrushCoords.CosAngle(r.Yaw);
+            float sp = BrushCoords.SinAngle(r.Pitch), cp = BrushCoords.CosAngle(r.Pitch);
+            float sr = BrushCoords.SinAngle(r.Roll), cr = BrushCoords.CosAngle(r.Roll);
+            // X = (1,0,0) after yaw: X=(cy,sy,0) Y=(-sy,cy,0) Z=(0,0,1).
+            float x0 = (1f * cy + 0f * sy) + 0f * 0f, x1 = (1f * -sy + 0f * cy) + 0f * 0f, x2 = (1f * 0f + 0f * 0f) + 0f * 1f;
+            float p0 = (x0 * cp + x1 * 0f) + x2 * sp, p1 = (x0 * 0f + x1 * 1f) + x2 * 0f, p2 = (x0 * -sp + x1 * 0f) + x2 * cp;
+            return ((p0 * 0f + p1 * cr) + p2 * -sr, (p0 * 0f + p1 * sr) + p2 * cr);
+        }
+
         // The per-step context of UParticle::Update — built once per
         // UpdateFxParticles/AdvanceNewborn call from the emitter's props.
         struct FxStepCtx
@@ -99,10 +170,12 @@ namespace HP1.UEScript
             public float Chaos, ChaosDelay;
             public float Elasticity;
             public float WindModifier; public bool WindPerParticle; public UEVector Wind;
+            public bool WindCalled;   // GetTotalWind ran at the emitter (Damping·WindModifier > 0)
             public int Prim;
             public bool HasPalette;
         }
 
+        // Original: Engine.dll ?UpdateParticles@AParticleFX@@QAEXM@Z [HP1 0x103C1D60] (its per-call context)
         FxStepCtx BuildStepCtx(UEObject fx)
         {
             var c = new FxStepCtx();
@@ -146,11 +219,13 @@ namespace HP1.UEScript
             c.Wind = default;
             if (c.Damping * c.WindModifier > 0f || c.WindPerParticle)
             {
-                if (TotalWind is null)
-                    throw new NotSupportedException(
-                        $"ParticleFX wind reached ({fx.Class?.Name}) — wind source (UELevelRuntime.TotalWind) not bound to the producer");
+                // Wiring guard: the level binds the wind source (UELevelRuntime.BindParticleLineChecks) before any frame.
+                if (TotalWind is null || WindSourceCount is null)
+                    throw new InvalidOperationException(
+                        $"ParticleFX {fx.Class?.Name}: wind source (UELevelRuntime.TotalWind) not bound to the producer");
                 if (c.Damping * c.WindModifier > 0f)
                 {
+                    c.WindCalled = true;
                     UEVector w = TotalWind(c.EmitterLoc);
                     c.Wind = new UEVector(c.WindModifier * w.x, c.WindModifier * w.y, c.WindModifier * w.z);
                 }
@@ -158,20 +233,18 @@ namespace HP1.UEScript
             // Elasticity (+0x320 per prop_offsets): shipped checks `0.0 < Elasticity`
             // on every particle step (93921) — read into the context once.
             c.Elasticity = PropF(fx, "Elasticity");
+            // Wiring guard, as for the wind source above.
             if (c.Elasticity > 0f && (ParticleFastLineCheckClear is null || ParticleSingleLineCheck is null))
-                throw new NotSupportedException(
-                    $"ParticleFX Elasticity reached ({fx.Class?.Name}) — level queries (FastLineCheck/SingleLineCheck) not bound to the producer");
+                throw new InvalidOperationException(
+                    $"ParticleFX {fx.Class?.Name}: level queries (FastLineCheck/SingleLineCheck) not bound to the producer");
             // Substep 0.06667 — Attraction != 0 OR 0.0001 < Elasticity (Engine.dll.c:77483-77484 and
             // 23654-23655, `this + 800` = +0x320).
             c.NeedSub |= c.Elasticity > 0.0001f;
             return c;
         }
 
-        // One UParticle::Update step (93564-93978) — the shipped body minus
-        // the DOCUMENTED STOP boundaries (Elasticity bounce, per-particle
-        // wind, ColorPalette ramp — loud in BuildStepCtx/emission, not
-        // silently skipped). Shared by the update pass and the newborn
-        // back-integration (23644).
+        // One UParticle::Update step (93564-93978) — the shipped body (the ColorPalette ramp stops loudly in Ramps).
+        // Shared by the update pass and the newborn back-integration (23644).
         // alphaColor = false — for the newborn catch-up (NOT ORIGINAL, D-54, AdvanceNewborn): it computes the alpha
         // and colour ramps itself in substeps; the size ramp stays shipped (size feeds the particle box -> visibility).
         void StepParticle(Particle p, float step, float dampF, in FxStepCtx c, UEObject fx, bool alphaColor = true)
@@ -181,6 +254,7 @@ namespace HP1.UEScript
             ParticleStepTap?.Invoke(fx, p, step, dampF, c.Accel, c.Wind, false);
         }
 
+        // Original: Engine.dll ?Update@UParticle@@QAE_NABVFVector@@M0PAVULevel@@MPAVAParticleFX@@@Z [HP1 0x103BFC30]
         void StepParticleBody(Particle p, float step, float dampF, in FxStepCtx c, UEObject fx, bool alphaColor)
         {
             float pdt = step;
@@ -277,6 +351,9 @@ namespace HP1.UEScript
                 // set and the timer spent, kick v by a normalized random
                 // vector (THREE appFrand, components 2f−1, normalized when
                 // len² ≥ 1e-8) times Chaos; timer reloads to ChaosDelay.
+                if (c.Chaos != 0f && p.NativeResidue)
+                    throw new NotSupportedException($"ParticleFX {fx.GetProp(PK.Name)}: Chaos on a particle born by AddParticle — "
+                        + "its ChaosTimer (+0x78) is the stack residue AddParticle never wrote, not a game value (STOP)");
                 if (p.ChaosTimer != 0f)
                     p.ChaosTimer = p.ChaosTimer <= pdt ? 0f : p.ChaosTimer - pdt;
                 if (c.Chaos != 0f && p.ChaosTimer <= 0f)
@@ -333,6 +410,7 @@ namespace HP1.UEScript
 
         // Alpha/colour/size ramps of UParticle::Update (93833-93920). age/drip — the particle's Age and DripTimer at
         // this step: in shipped the particle's own fields, in the newborn catch-up (NOT ORIGINAL, D-54) — substep counts.
+        // Original: Engine.dll ?Update@UParticle@@QAE_NABVFVector@@M0PAVULevel@@MPAVAParticleFX@@@Z [HP1 0x103BFC30] (its ramps)
         void Ramps(Particle p, float pdt, in FxStepCtx c, float age, float drip, bool alphaColor, bool size)
         {
             // Ramps — ALL gated on bUpdate (93833: bit0 of +0x2f8, ctor
@@ -356,8 +434,10 @@ namespace HP1.UEScript
                     p.Alpha += p.AlphaDelta * pdt;
                 if (p.Alpha < 0.001f) p.Alpha = 0f;
                 // Color (93853): the linear delta applies only after
-                // ColorDelay and only without a palette (palette STOPs at
-                // emission).
+                // ColorDelay and only without a palette. The palette ramp (0x103c03da..0x103c053a: Colors[0] up to
+                // ColorDelay, then Colors[trunc(Age / Lifetime · 255)]) is not ported: a particle stepping with one stops.
+                if (c.HasPalette)
+                    throw new NotSupportedException("ParticleFX ColorPalette: the UParticle::Update palette ramp (0x103c03da) is not ported (STOP)");
                 if (!c.HasPalette
                     && (p.ColorDelta.x != 0f || p.ColorDelta.y != 0f || p.ColorDelta.z != 0f)
                     && age > c.ColorDelay)
@@ -515,8 +595,21 @@ namespace HP1.UEScript
             if (fx.GetProp(PK.Textures) is not System.Collections.IList tl || tl.Count == 0 || tl[0] is null) return;
             ParticleDrawTap?.Invoke(this, fx, f, true);
             FxState s = FxStateOf(fx);
+            // The particle walk [HP1 FUN_10b15090, Render.dll.c:24598; Textures and a non-empty list gate it], before the
+            // drawer: bUnlit (+0x198 bit 0) writes LightColor (+0x3b4) = (1,1,1,1) (:24750-24756). The lit branch
+            // (SetupForActor + light-manager slot 0x1c [HP1 0x10b0a710]: LightColor = (0,0,0,1) + Σ s²·colour) is not
+            // ported: DECISIONS.md "SwARc findings: light tags".
+            if (s.Particles.Count != 0 && UEValue.ToBool(fx.GetProp("bUnlit")))
+                fx.Props["LightColor"] = new UEPlane(1f, 1f, 1f, 1f);
             var kept = new List<(Particle, float)>();
             int prim = UEValue.ToInt(fx.GetProp(PK.RenderPrimitive));
+            // DrawParticleSystem's switch ([HP1 0x10b15910] [HP2 0x10b15120]: `cmp eax, 4; ja` — no drawer above 4) gives
+            // RenderPrimitive 4 the three-face drawer FUN_10b194c0 [HP1 0x10b194c0] [HP2 0x10b18cb0], not ported. No shipped
+            // HP2 emitter has it (runtime_poc --hp2-prop-census RenderPrimitive: tags 1 (ParticleFX's default) and 2 only,
+            // no script write): loud for HP2.
+            if (prim == 4 && UEGameProfile.Current.Game == UEEdition.Game.HP2)
+                throw new NotSupportedException($"HP2 DrawParticleSystem: {fx.GetProp(PK.Name)} RenderPrimitive 4 "
+                    + "(FUN_10b18cb0, the three-face drawer) is not ported");
             bool billboard = prim <= 3 && !UEValue.ToBool(fx.GetProp(PK.bShellOnly));
             float budget = ((f.FY * f.FX) * 1f) * 0.5f;
             bool uk = UkParticleWalk;
@@ -540,6 +633,8 @@ namespace HP1.UEScript
 
         // fade: the US 1.53 density fade (below). The UK11 drawer FUN_10b18390 ends at the outcode return 0x10b18a7f: the
         // same culling, no budget, no Alpha write (its drawer object has no budget field: DrawParticleSystem 0x10b157c0).
+        // Original: Render.dll not exported: FUN_10b184d0 [HP1 0x10B184D0] — slot 1 of the FParticleDrawer vtable 0x10b388f8,
+        // DrawParticleSystem's billboard pass (switch 0x10b15919)
         internal static bool BillboardKeep(UESceneNode f, Particle p, float budget, bool fade = true)
         {
             BrushCoords c = f.Coords;
@@ -553,6 +648,9 @@ namespace HP1.UEScript
             float ex = hw, ey = hl;
             if (p.SpinRate < 0f || p.SpinRate > 0f)   // `fcomp 0.0; test ah, 0x40; jne` (0x10b18603..0x10b18614): equal or NaN unrotated
             {
+                if (p.NativeResidue)
+                    throw new NotSupportedException("particle drawer: a spinning particle born by AddParticle — its SpinPos (+0x7c) "
+                        + "is the stack residue AddParticle never wrote, not a game value (STOP)");
                 float t = p.SpinPos * 65536f * 0.15915494f;
                 int a = t >= -2147483648f && t < 2147483648f ? (int)MathF.Round(t, MidpointRounding.ToEven) : int.MinValue;
                 float co = BrushCoords.CosAngle(a), si = BrushCoords.SinAngle(a);

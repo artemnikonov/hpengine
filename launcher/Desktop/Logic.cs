@@ -1,6 +1,7 @@
 // Launcher logic without UI (checked by launcher/Desktop.Tests): HP1Setup's output protocol, Mods.ini, the data
 // directory per OS, the GitHub release choice (the same rules as Launcher.older/pick in launcher/Launcher.swift).
 using System.Globalization;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 
@@ -8,8 +9,8 @@ namespace HPEngine.Launcher;
 
 // The installed edition's name and tier as the Game card shows them. A matching engine family does not identify a disc's
 // region: the Nordic multilingual CD uses the same native/script hashes as the family called UK 1.1, and its language
-// files differ from that reference manifest. The title stays GameTitle.For(edition) (by the DLL set). Desktop only: the
-// macOS Launcher has no language chooser and shows the HP1Setup edition text as it is.
+// files differ from that reference manifest. The title stays GameTitle.For(edition) (by the DLL set). Mirrored by the
+// macOS Launcher (Launcher.swift editionDisplay).
 public static class EditionLabel
 {
     public sealed record Display(string Name, string Tier, string Detail);
@@ -96,6 +97,9 @@ public sealed record ModEntry(string Name, bool Enabled, bool Present);
 // starts a comment. Everything else (comments, other keys, other sections, line endings) is written back unchanged.
 public static class ModsIni
 {
+    // Under the list while a mod is on; the numbers are the apply order (Launcher.swift orderHint).
+    public const string OrderHint = "Enabled mods apply in number order: a higher number wins";
+
     static bool IsEnabledLine(string l, bool inMods, out string name)
     {
         name = null;
@@ -202,6 +206,18 @@ public static class ModsIni
         return lines;
     }
 
+    // One line per pair of enabled mods that both carry a file at the same game path (the engine's placement,
+    // ModOverlay.Conflicts): the later mod's file is used. None while the mods cannot be placed (Play reports that).
+    // Same texts in Launcher.swift conflictLines.
+    public static List<string> Conflicts(string gameDir)
+    {
+        List<(string Earlier, string Later, List<string> Files)> pairs;
+        try { pairs = HPEngine.Packaging.ModOverlay.Conflicts(gameDir, Path.Combine(gameDir, "HPEngineData")); }
+        catch (Exception e) when (e is HPEngine.Packaging.ModOverlayException or IOException or UnauthorizedAccessException) { return new(); }
+        return pairs.Select(p => $"{p.Later} and {p.Earlier} both have " + (p.Files.Count == 1 ? p.Files[0] : $"{p.Files[0]} and {p.Files.Count - 1} more file" + (p.Files.Count == 2 ? "" : "s"))
+            + $": the game uses {p.Later}'s (later in the order)").ToList();
+    }
+
     public static void Save(string gameDir, IEnumerable<ModEntry> mods)
     {
         var ini = IniPath(gameDir);
@@ -259,6 +275,74 @@ public static class EngineError
     // The banner: the engine's line when there is one, then where the whole log is.
     public static string Banner(IEnumerable<string> lines, int code, string log) =>
         $"The game stopped with an error (code {code})" + (Pick(lines, code) is string l ? ": " + l.Trim() : ".") + " See the log: " + log;
+}
+
+// The launcher's gamepad (proposal §6), the ONE answer of both launchers: launcher/Launcher.swift PadMap mirrors it and
+// launcher/test_update.sh compares the two tables (--pad-map). Buttons in SDL_GamepadButton numbers (Sdl.cs reads them;
+// the macOS Launcher maps GameController's buttons onto the same numbers). popup: a menu, a drop-down list or a dialog is
+// open and takes the pad; hp2: the HP2 tab is selected.
+public enum PadAction { None, Activate, Escape, Back, Hp1, Hp2, Menu, Play, KeyUp, KeyDown, Previous, Next }
+public static class PadMap
+{
+    public const int A = 0, B = 1, Y = 3, Start = 6, LB = 9, RB = 10, Up = 11, Down = 12, Left = 13, Right = 14;
+
+    public static PadAction For(int button, bool popup, bool hp2) => button switch
+    {
+        A => PadAction.Activate,
+        B => popup ? PadAction.Escape : PadAction.Back,
+        LB => popup || !hp2 ? PadAction.None : PadAction.Hp1,
+        RB => popup || hp2 ? PadAction.None : PadAction.Hp2,
+        Start => popup ? PadAction.None : PadAction.Menu,
+        Y => popup || hp2 ? PadAction.None : PadAction.Play,
+        Up or Left => popup ? PadAction.KeyUp : PadAction.Previous,
+        Down or Right => popup ? PadAction.KeyDown : PadAction.Next,
+        _ => PadAction.None,
+    };
+
+    // The left stick past half way (16000 of SDL's 32767) as d-pad bits; x right, y down, each -1..1.
+    public static uint Stick(double x, double y)
+    {
+        const double half = 16000 / 32767.0;
+        uint bits = 0;
+        if (y < -half) bits |= 1u << Up; if (y > half) bits |= 1u << Down;
+        if (x < -half) bits |= 1u << Left; if (x > half) bits |= 1u << Right;
+        return bits;
+    }
+
+    // The buttons pressed since the last poll, in button order (one action per press).
+    public static IEnumerable<int> Pressed(uint now, uint last)
+    {
+        for (int b = 0; b <= Right; b++) if ((now & ~last & (1u << b)) != 0) yield return b;
+    }
+}
+
+// HP2 in the launcher, the release switch (author 2026-11-16, release 0.4.0): off = the HP2 tab shown but disabled (no click,
+// Ctrl+2 or pad RB selects it; "Coming soon" under its name and a tooltip) and its saved state (folder, errors) ignored; on =
+// the HP2 tab works (a preview build). Build-time: make_launcher.sh passes -p:HPEngineHp2=true when HPENGINE_HP2=1 (assembly
+// metadata HPEngineHp2); the release build has none. MIRROR: launcher/Launcher.swift Hp2Release (Info.plist HPEngineHp2),
+// compared by launcher/test_update.sh (--game-scope).
+public static class Hp2Release
+{
+    public static bool Available = typeof(Hp2Release).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>().Any(m => m.Key == "HPEngineHp2" && m.Value == "true");
+    public const string Soon = "Coming soon", SoonTip = "Harry Potter 2 is coming soon. Wait for updates.";
+    // The caption under the tab's name (null: none) and its tooltip (null: none).
+    public static string Caption(bool available, bool folderSet) => !available ? Soon : folderSet ? null : "not set up";
+    public static string Tip(bool available) => available ? null : SoonTip;
+}
+
+// Per game (author 2026-11-16): what one game's run writes and shows belongs to that game's tab. MIRROR: launcher/Launcher.swift
+// GameScope; launcher/test_update.sh compares the answers (--game-scope).
+public static class GameScope
+{
+    // The error banner of the selected tab: the launcher's own error (its update, its location) on both tabs, else that game's.
+    public static string Error(bool hp2Tab, string hp1, string hp2, string launcher) => launcher ?? (hp2Tab ? hp2 : hp1);
+    // The folder HPEngine writes for the game's run (settings overlay, logs/): HP1 <game>/HPEngineData; HP2 <HP2Data>/HPEngineData
+    // beside the port's HP2 save dir <HP2Data>/Save (the engine's InstallRoot.Hp2DataDir of --hp2-savedir).
+    public static string DataDir(string hp1Game, bool hp2) =>
+        hp2 ? Path.Combine(Path.GetDirectoryName(Hp2FrontEnd.SaveDir(hp1Game)), "HPEngineData") : Path.Combine(hp1Game, "HPEngineData");
+    public static string LogsDir(string hp1Game, bool hp2) => Path.Combine(DataDir(hp1Game, hp2), "logs");
+    // The launcher's capture of a run's console output: HP1's file, HP2's beside it with "-HP2" (HPEngine.log, HPEngine-HP2.log).
+    public static string ConsoleLog(string hp1Log, bool hp2) => hp2 ? hp1Log[..^4] + "-HP2.log" : hp1Log;
 }
 
 // "Reset Gamepad Bindings". PAD RESET RULE (the same text in HP1.Core UEInput.Gamepad.cs and launcher/Launcher.swift
@@ -470,7 +554,7 @@ public static class ModsNotice
             p += n; return true;
         }
         bool I32(out int v) { v = 0; if (b.Length - p < 4) return false; v = BitConverter.ToInt32(b, p); p += 4; return true; }
-        if (b == null || !Str(out var magic) || magic != "HP1SAV" || !I32(out int ver) || ver < 1 || ver > 5) return null;
+        if (b == null || !Str(out var magic) || magic != "HP1SAV" || !I32(out int ver) || ver < 1 || ver > 6) return null;
         if (ver < 5) return new SlotMods(Array.Empty<string>(), true);
         if (!I32(out int count) || count < 0 || count > 256) return null;
         var mods = new List<string>(count);
@@ -518,4 +602,220 @@ public static class ModsNotice
         }
         return Lines(mods.Where(m => m.Enabled).Select(m => m.Name).ToList(), slots);
     }
+}
+
+// HP2's front end: the native dialog HP2's Game.exe shows before the engine boots (pages Main Menu / New Game / Load Game
+// / Options; Window.dll WFrontEndDialog). Its page flow is ported here; the launcher's HP2 tab draws it in the launcher's
+// own look ("not original", DECISIONS "HP2 main menu in the launcher"). Judge: tools/hp2/frontend_judge.py runs the
+// Game.exe bodies under unicorn against this class (Desktop.Tests --hp2-frontend). Paths are the original's strings
+// (Core's FString operator*, '\' separators); Files maps them onto the install.
+public static class Hp2FrontEnd
+{
+    public const int Slots = 6;                     // OnInitDialog's loop: slots 1..6 [HP2 Game.exe 0x109117f1, cmp 7]
+
+    // The file system the dialog touches (GFileManager): FileSize (-1 missing), Delete, MakeDirectory, FindFiles (files only).
+    public interface IFiles
+    {
+        long FileSize(string path);
+        void Delete(string path);
+        void MakeDirectory(string path);
+        List<string> FindFiles(string pattern);
+        void DeleteCache(string dir);   // not original: the port's <slot>/cache folder (Clear)
+    }
+
+    // The slot's save file. The original's is Save0.usa (the judge's cases); the port's is save0.hp1sav (the saves line's
+    // format, decided 2026-11-16: slot n holds save0.hp1sav, Save0.bmp, <Map>_pa.usa, cache/), "used" iff >= 1 byte as
+    // the original's test. Not original: the name only; the rule is the original's.
+    public const string OriginalSave = "Save0.usa", PortSave = "save0.hp1sav";
+
+    // FString::operator*(const TCHAR*) of HP2 Core: a '\' between the parts unless the left part is empty or ends with '\'
+    // ('/' gets one too; frontend_judge scan cases "../Save/", "..\Save\", "").
+    public static string Join(string a, string b) => a.Length == 0 || a[^1] == '\\' ? a + b : a + "\\" + b;
+
+    // Slot n's directory: GSys->SavePath * "Slot" + appSprintf("%d", n) [HP2 Game.exe 0x109117ff..0x1091184f].
+    public static string SlotDir(string savePath, int n) => Join(savePath, "Slot") + n.ToString(CultureInfo.InvariantCulture);
+
+    public sealed record Slot(int N, string Dir, bool Used, string Thumb);
+
+    // Original: not exported: FUN_10911320 (WFrontEndDialog::OnInitDialog of HP2's Game.exe) [HP2 Game.exe 0x10911320],
+    // its slot loop 0x109117f1..0x10911b5e: MakeDirectory(dir); used = FileSize(dir * "Save0.usa") >= 1; a used slot's
+    // button shows dir * "Save0.bmp", an unused one is cleared (Clear).
+    public static List<Slot> Scan(string savePath, IFiles fs, string saveFile = OriginalSave)
+    {
+        var slots = new List<Slot>();
+        for (int n = 1; n <= Slots; n++)
+        {
+            string dir = SlotDir(savePath, n);
+            fs.MakeDirectory(dir);
+            bool used = fs.FileSize(Join(dir, saveFile)) >= 1;
+            if (!used) Clear(dir, fs);
+            slots.Add(new Slot(n, dir, used, used ? Join(dir, "Save0.bmp") : null));
+        }
+        return slots;
+    }
+
+    // Original: not exported: FUN_109124f0 (clear a slot) [HP2 Game.exe 0x109124f0]: a non-empty directory's files
+    // (FindFiles(dir * "*.*", files, no directories)) are deleted, but a zero-length one (`FileSize != 0`), then the slot is
+    // unused. Not original: then the port's cache folder of the slot goes too (the original has none; saves line
+    // 2026-11-16: clearing slot n deletes its save0.hp1sav, Save0.bmp, <Map>_pa.usa and cache/).
+    public static void Clear(string dir, IFiles fs)
+    {
+        if (dir.Length == 0) return;
+        foreach (var f in fs.FindFiles(Join(dir, "*.*")))
+            if (fs.FileSize(Join(dir, f)) != 0) fs.Delete(Join(dir, f));
+        fs.DeleteCache(dir);
+    }
+
+    public enum Launch { NewGame = 1, LoadGame = 2 }   // [FrontEnd] LaunchCode "1" / "2"
+
+    // Original: not exported: the six New Game slot buttons [HP2 Game.exe 0x10913c10, 0x10913d70, 0x10913ed0, 0x10914030,
+    // 0x10914190, 0x109142f0] (WFrontEndPageNewGame's delegates): a used slot asks MessageBoxW(MB_YESNO,
+    // Select_Game_0001, Select_Game_0002) and IDNO does nothing; otherwise the slot is cleared and the dialog ends with
+    // LaunchCode 1, UseSaveSlot n. Returns false when nothing happens.
+    public static bool AsksToReplace(Slot slot) => slot.Used;
+    public static bool NewGame(Slot slot, Func<bool> confirmReplace, IFiles fs)
+    {
+        if (AsksToReplace(slot) && !confirmReplace()) return false;
+        Clear(slot.Dir, fs);
+        return true;
+    }
+
+    // Original: not exported: the six Load Game slot buttons [HP2 Game.exe 0x10915370, 0x10915450, 0x10915530, 0x10915610,
+    // 0x109156f0, 0x109157d0]: an unused slot does nothing; a used one ends the dialog with LaunchCode 2, UseSaveSlot n.
+    public static bool LoadGame(Slot slot) => slot.Used;
+
+    // What WinMain runs after the dialog for LaunchCode 1 / 2 (disasm 0x1090de16..0x1090df71) with UseSaveSlot (the slot as
+    // "%d"): a new Game.exe process with these parameters; cmdline is the menu process's own appCmdLine().
+    // Original: not exported: FUN_10902ba0 (New Game) [HP2 Game.exe 0x10902ba0]: "PrivetDr.unr " + " -SAVESLOT=%s" + cmdline.
+    // Original: not exported: FUN_10903290 (Load Game) [HP2 Game.exe 0x10903290]: cmdline + " -LOADGAME=0 " + " -SAVESLOT=%s".
+    public static string CommandLine(Launch what, int slot, string cmdline)
+    {
+        string s = " -SAVESLOT=" + slot.ToString(CultureInfo.InvariantCulture);
+        return what == Launch.NewGame ? "PrivetDr.unr " + s + cmdline : cmdline + " -LOADGAME=0 " + s;
+    }
+
+    // A slot button's text: appSprintf("%d - %s", n, Localize(<page>, IDC_SlotEmpty | IDC_SlotUsed, "Startup"))
+    // [HP2 Game.exe 0x109136b0 New Game, 0x10914ce0 Load Game].
+    public static string Label(Slot slot, string empty, string used) => $"{slot.N} - {(slot.Used ? used : empty)}";
+
+    // The port's HP2 save directory (D-01: the port keeps its own saves; the install's Save folder holds the player's real
+    // HP2 saves and is never read or changed): beside the HP1 data directory, a parameter until the saves line fixes it.
+    // The menu's SavePath maps onto it: slot n is <save dir>/Slot<n> (Scan with SavePath "").
+    public static string SaveDir(string hp1DataDir) => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(hp1DataDir)) ?? hp1DataDir, "HP2Data", "Save");
+
+    // The menu's files under one directory: an original path ('\' or '/') is relative to it; a path that resolves outside
+    // it is refused (nothing outside the port's save directory is read, made or deleted).
+    public sealed class Files : IFiles
+    {
+        readonly string root;
+        public Files(string dir) { root = Path.GetFullPath(dir); }
+        public string Host(string p)
+        {
+            var h = Path.GetFullPath(Path.Combine(root, p.Replace('\\', Path.DirectorySeparatorChar).Replace('/', Path.DirectorySeparatorChar)));
+            return h == root || h.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal) ? h : throw new UnauthorizedAccessException("outside the HP2 save directory: " + p);
+        }
+        public long FileSize(string p) { try { var f = new FileInfo(Host(p)); return f.Exists ? f.Length : -1; } catch (UnauthorizedAccessException) { return -1; } }
+        public void Delete(string p) { try { File.Delete(Host(p)); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
+        public void DeleteCache(string dir) { try { var c = Host(Join(dir, "cache")); if (Directory.Exists(c)) Directory.Delete(c, true); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
+        public void MakeDirectory(string p) { try { Directory.CreateDirectory(Host(p)); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
+        public List<string> FindFiles(string pattern)
+        {
+            try { string dir = Path.GetDirectoryName(Host(pattern)); return Directory.Exists(dir) ? Directory.GetFiles(dir).Select(Path.GetFileName).ToList() : new(); }
+            catch (IOException) { return new(); }
+            catch (UnauthorizedAccessException) { return new(); }
+        }
+    }
+
+    // Localize's text from System/<package>.<[Engine.Engine] Language> with <package>.int as the fallback (UE1 Localize).
+    public static string Localize(string gameDir, string package, string section, string key)
+    {
+        string lang = Ini(gameDir, "Default.ini", "Engine.Engine", "Language") ?? "int";
+        return Ini(gameDir, package + "." + lang, section, key) ?? Ini(gameDir, package + ".int", section, key) ?? key;
+    }
+
+    // HPEngine's arguments for the new process: the HP2 folder and the original's parameters, word for word
+    // (--hp2-cmdline; the engine side belongs to the HP2 boot/saves lines).
+    // --hp2-savedir: the port's HP2 save directory (SaveDir), where the slots are.
+    public static List<string> PlayArgs(string gameDir, string saveDir, string cmdline) => new() { "--root", gameDir, "--launched-by-launcher", "--hp2-savedir", saveDir, "--hp2-cmdline", cmdline };
+
+    // A System/ file by name, any case (the shipped installs spell default.ini in lower case).
+    static string Ini(string gameDir, string name, string section, string key)
+    {
+        string[] lines;
+        try
+        {
+            var file = Directory.GetFiles(Path.Combine(gameDir, "System")).FirstOrDefault(f => string.Equals(Path.GetFileName(f), name, StringComparison.OrdinalIgnoreCase));
+            if (file == null) return null;
+            lines = File.ReadAllLines(file);
+        } catch (IOException) { return null; } catch (UnauthorizedAccessException) { return null; }
+        bool inSec = false;
+        foreach (var raw in lines)
+        {
+            var l = raw.Trim();
+            if (l.StartsWith('[')) { inSec = string.Equals(l.Trim('[', ']'), section, StringComparison.OrdinalIgnoreCase); continue; }
+            int eq = l.IndexOf('=');
+            if (inSec && eq > 0 && string.Equals(l[..eq], key, StringComparison.OrdinalIgnoreCase)) return l[(eq + 1)..];
+        }
+        return null;
+    }
+}
+
+// The Options pages of HP2's front-end dialog (Config: Video / Sound / Joystick). The launcher has no Options page (author
+// 2026-11-16: these settings live in the game's own menu). Kept only for their checks: ReadSound / WriteSound are judged
+// against Game.exe by tools/hp2/frontend_judge.sh (soundinit / soundok) and, with ReadVideo / WriteVideo, pin the macOS
+// mirror in launcher/test_update.sh (--hp2-frontend); delete them together with those cases.
+public static class Hp2Options
+{
+    public const string Engine = "Engine.GameEngine", Audio = "ALAudio.ALAudioSubsystem";
+    public sealed record Sound(bool NoSound, int SoundPos, int MusicPos);
+
+    // Original: not exported: FUN_10919e40 (WFrontEndPageConfigSound::OnInitDialog) [HP2 Game.exe 0x10919e40]:
+    // "Disable all sound" checked unless appStricmp(GConfig [Engine.GameEngine] UseSound, "True") == 0 (a missing key
+    // reads ""); each slider (range 0..100) SetPos(ftol(appAtof(volume) * 100.0f)) — appAtof leaves atof's double on
+    // the FPU, the product is truncated (disasm 0x1091a204..0x1091a213: "0.29" -> 28).
+    public static Sound ReadSound(Func<string, string, string> get) => new(
+        !string.Equals(get(Engine, "UseSound") ?? "", "True", StringComparison.OrdinalIgnoreCase),
+        Pos(get(Audio, "SoundVolume")), Pos(get(Audio, "MusicVolume")));
+
+    // msvcrt _ftol: truncation to 64 bits, the low 32 kept; out of range (or NaN) the integer indefinite (low half 0).
+    static int Pos(string v)
+    {
+        double x = Atof(v ?? "") * 100.0;
+        return double.IsNaN(x) || Math.Abs(x) >= 9.2233720368547758e18 ? 0 : unchecked((int)(long)Math.Truncate(x));
+    }
+
+    // atof: leading white space, then the longest decimal prefix (sign, digits, point, exponent); none -> 0.
+    public static double Atof(string s)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(s, @"^[ \t\n\r\f\v]*([+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?)");
+        return m.Success ? double.Parse(m.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture) : 0.0;
+    }
+
+    // Original: not exported: FUN_1091a950 (WFrontEndPageConfigSound OK) [HP2 Game.exe 0x1091a950]: UseSound "False"
+    // when BM_GETCHECK == 1 else "True", then each volume appSprintf("%f", GetPos / 100.0f), in this order; then
+    // GConfig->Flush.
+    public static List<(string Section, string Key, string Value)> WriteSound(int check, int soundPos, int musicPos) => new()
+    {
+        (Engine, "UseSound", check == 1 ? "False" : "True"),
+        (Audio, "SoundVolume", (soundPos / 100.0).ToString("F6", CultureInfo.InvariantCulture)),
+        (Audio, "MusicVolume", (musicPos / 100.0).ToString("F6", CultureInfo.InvariantCulture)),
+    };
+
+    // NOT ORIGINAL (DECISIONS 2026-11-16, Video page, coordinator): the original's Video page [HP2 Game.exe init 0x10916810,
+    // OK 0x109187a0] chooses Direct3D / Software devices HPEngine does not have; this page shows HPEngine's own window
+    // settings instead, the keys its window opens with (UEViewportStartup): [WinDrv.WindowsClient] StartupFullscreen and
+    // WindowedViewportX/Y (fullscreen is always the desktop's size). Read as the engine does: "True" / "1" (any case,
+    // trimmed) is on; a size is a positive integer, else 0 (shown as the field's minimum).
+    public const string Client = "WinDrv.WindowsClient";
+    public sealed record Video(bool Fullscreen, int Width, int Height);
+    public static Video ReadVideo(Func<string, string, string> get) => new(
+        (get(Client, "StartupFullscreen") ?? "").Trim() is var f && (f.Equals("True", StringComparison.OrdinalIgnoreCase) || f == "1"),
+        Size(get(Client, "WindowedViewportX")), Size(get(Client, "WindowedViewportY")));
+    static int Size(string v) => int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out int n) && n > 0 ? n : 0;
+    public static List<(string Section, string Key, string Value)> WriteVideo(bool fullscreen, int width, int height) => new()
+    {
+        (Client, "StartupFullscreen", fullscreen ? "True" : "False"),
+        (Client, "WindowedViewportX", width.ToString(CultureInfo.InvariantCulture)),
+        (Client, "WindowedViewportY", height.ToString(CultureInfo.InvariantCulture)),
+    };
 }

@@ -3,9 +3,12 @@
 // (WinDrv UWindowsViewport::CreateNativeFont: CreateFont(-Height, 0,0,0, 400, 0,0,0, charset, 0,0,
 // NONANTIALIASED_QUALITY, 0, Face)), and UCanvas::WrappedPrint hands such a font to UViewport::DrawString, which
 // measures and draws with GDI DrawText (DT_WORDBREAK). The port has no GDI: "MS Sans Serif" is served by the bundled
-// Liberation Sans, rasterised here (unhinted outlines, aliased like NONANTIALIASED_QUALITY) into one glyph page that the
-// frontend draws as a runtime texture. Glyph shapes, advances, line height and therefore wrap points differ from the
-// Windows bitmap font sserife.fon. Any other face refuses loudly.
+// Liberation Sans. The layout (advances, line height, wrap points — what TextSize/StrLen give the script) is the
+// font at Height pixels with whole-pixel advances; glyph shapes, advances and therefore wrap points differ from the
+// Windows bitmap font sserife.fon. The glyph page is drawn antialiased (unhinted outlines, coverage), and the frontend
+// draws it from Coverage(scale) at the interface scale, so the drawn text is sharp at any window size (author
+// 2026-11-16, NOT ORIGINAL: the original draws aliased NONANTIALIASED_QUALITY pixels at the canvas resolution).
+// Every other face gets the same font (author 2026-11-15, see Create).
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -158,13 +161,16 @@ namespace HP1.UEScript
 
     public sealed class UENativeFont
     {
-        public const string SubstitutedFace = "MS Sans Serif";
         const int PageWidth = 512;
 
         public readonly string Name, Face, PagePath;
         public readonly int Height, Ascent, LineHeight;
         readonly Dictionary<int, UENativeGlyph> _glyphs = new();
         readonly UENativeGlyph _notdef;
+        readonly UETrueType _tt;
+        readonly double _s;
+        readonly int _pageH;
+        readonly List<(int G, UENativeGlyph Box)> _placed = new();
 
         // The characters rasterised into the page: Latin-1, Latin Extended-A, Cyrillic, general punctuation, № and ™.
         static IEnumerable<int> Repertoire()
@@ -177,16 +183,16 @@ namespace HP1.UEScript
 
         internal UENativeFont(string name, string face, int height, UETrueType tt)
         {
-            Name = name; Face = face; Height = height;
+            Name = name; Face = face; Height = height; _tt = tt;
             PagePath = "Transient." + name + "Page";
-            double s = (double)height / tt.UnitsPerEm;
+            double s = _s = (double)height / tt.UnitsPerEm;
             Ascent = (int)Math.Round(tt.WinAscent * s);
             LineHeight = Ascent + (int)Math.Round(tt.WinDescent * s);
-            var bitmaps = new List<(int Key, bool[] Px, int W, int H, int Ox, int Oy, int Adv)>();
+            var bitmaps = new List<(int Key, int G, int W, int H, int Ox, int Oy, int Adv)>();
             void Add(int key, int g)
             {
-                var (px, w, h, ox, oy) = Rasterize(tt.Outline(g), s);
-                bitmaps.Add((key, px, w, h, ox, oy + Ascent, (int)Math.Round(tt.Advance(g) * s)));
+                var (w, h, ox, oy) = Bounds(Edges(tt.Outline(g), s, 1));
+                bitmaps.Add((key, g, w, h, ox, oy + Ascent, (int)Math.Round(tt.Advance(g) * s)));
             }
             Add(-1, 0);
             foreach (int c in Repertoire())
@@ -206,20 +212,35 @@ namespace HP1.UEScript
             }
             int pageH = 1;
             while (pageH < y + shelf) pageH <<= 1;
-            var idx = new byte[PageWidth * pageH];
+            _pageH = pageH;
             for (int i = 0; i < bitmaps.Count; i++)
             {
                 var bm = bitmaps[i];
-                for (int r = 0; r < bm.H; r++)
-                    for (int c = 0; c < bm.W; c++)
-                        if (bm.Px[r * bm.W + c]) idx[(placed[i].V + r) * PageWidth + placed[i].U + c] = 1;
                 var gl = new UENativeGlyph(placed[i].U, placed[i].V, bm.W, bm.H, bm.Ox, bm.Oy, bm.Adv);
                 if (bm.Key < 0) _notdef = gl; else _glyphs[bm.Key] = gl;
+                _placed.Add((bm.G, gl));
             }
-            // Index 1 white, 0 black: the frontend's glyph rule takes alpha = max(R, G, B) of the palette entry.
+            // Index = coverage 0..255, palette entry i grey i: the frontend's glyph rule takes alpha = max(R, G, B).
             var pal = new byte[256 * 4];
-            pal[3] = 255; pal[4] = pal[5] = pal[6] = pal[7] = 255;
-            UERuntimeTextures.Publish(PagePath, PageWidth, pageH, idx, pal, masked: false);
+            for (int i = 0; i < 256; i++) { pal[i * 4] = pal[i * 4 + 1] = pal[i * 4 + 2] = (byte)i; pal[i * 4 + 3] = 255; }
+            UERuntimeTextures.Publish(PagePath, PageWidth, pageH, Coverage(1), pal, masked: false);
+        }
+
+        // The glyph page at `scale` times its size (PageWidth·scale × page height·scale, rows top-down): coverage 0..255
+        // of every glyph's outline drawn at Height·scale pixels into its box scaled by `scale`, so a glyph quad stretched
+        // by the interface scale samples it texel for pixel. Pure: computed on each call (the frontend keeps the texture).
+        public byte[] Coverage(int scale)
+        {
+            int pw = PageWidth * scale;
+            var page = new byte[pw * _pageH * scale];
+            foreach (var (g, b) in _placed)
+            {
+                if (b.W == 0) continue;
+                byte[] px = Fill(Edges(_tt.Outline(g), _s, scale), b.OffX * scale, (b.OffY - Ascent) * scale, b.W * scale, b.H * scale);
+                for (int r = 0; r < b.H * scale; r++)
+                    Array.Copy(px, r * b.W * scale, page, (b.V * scale + r) * pw + b.U * scale, b.W * scale);
+            }
+            return page;
         }
 
         // A character without a glyph draws the font's .notdef box, as GDI does with the default character.
@@ -261,9 +282,9 @@ namespace HP1.UEScript
             return lines;
         }
 
-        // Scanline fill at pixel centres, nonzero winding (aliased, NONANTIALIASED_QUALITY). Quadratic segments are
-        // flattened into 8 lines. Returns the bitmap and its offset from the pen (x) and from the baseline (y down).
-        static (bool[] Px, int W, int H, int Ox, int Oy) Rasterize(List<List<(double X, double Y, bool On)>> contours, double s)
+        // Outline edges in device space at `scale` times the font size: x right, y down from the baseline. Quadratic
+        // segments are flattened into 8 lines.
+        static List<(double X0, double Y0, double X1, double Y1)> Edges(List<List<(double X, double Y, bool On)>> contours, double s, int scale)
         {
             var edges = new List<(double X0, double Y0, double X1, double Y1)>();
             foreach (var ct in contours)
@@ -295,43 +316,67 @@ namespace HP1.UEScript
                 if (ctrl is { } last) Quad(edges, cur, last, start);
                 else if (cur != start) edges.Add((cur.X, cur.Y, start.X, start.Y));
             }
-            if (edges.Count == 0) return (Array.Empty<bool>(), 0, 0, 0, 0);
-            // Device space: x right, y down from the baseline.
-            double minX = double.MaxValue, maxX = double.MinValue, minY = double.MaxValue, maxY = double.MinValue;
+            double k = s * scale;
             for (int i = 0; i < edges.Count; i++)
             {
                 var e = edges[i];
-                e = (e.X0 * s, -e.Y0 * s, e.X1 * s, -e.Y1 * s);
-                edges[i] = e;
+                edges[i] = (e.X0 * k, -e.Y0 * k, e.X1 * k, -e.Y1 * k);
+            }
+            return edges;
+        }
+
+        // The whole-pixel box of the edges: size and offset from the pen (x) and from the baseline (y down).
+        static (int W, int H, int Ox, int Oy) Bounds(List<(double X0, double Y0, double X1, double Y1)> edges)
+        {
+            if (edges.Count == 0) return (0, 0, 0, 0);
+            double minX = double.MaxValue, maxX = double.MinValue, minY = double.MaxValue, maxY = double.MinValue;
+            foreach (var e in edges)
+            {
                 minX = Math.Min(minX, Math.Min(e.X0, e.X1)); maxX = Math.Max(maxX, Math.Max(e.X0, e.X1));
                 minY = Math.Min(minY, Math.Min(e.Y0, e.Y1)); maxY = Math.Max(maxY, Math.Max(e.Y0, e.Y1));
             }
             int ox = (int)Math.Floor(minX), oy = (int)Math.Floor(minY);
-            int w = (int)Math.Ceiling(maxX) - ox, h = (int)Math.Ceiling(maxY) - oy;
-            var px = new bool[w * h];
+            return ((int)Math.Ceiling(maxX) - ox, (int)Math.Ceiling(maxY) - oy, ox, oy);
+        }
+
+        // Coverage 0..255 of the w × h pixels whose top-left is (ox, oy), nonzero winding: SubRows scanlines per pixel
+        // row, each adding the exact horizontal extent of its inside spans.
+        static byte[] Fill(List<(double X0, double Y0, double X1, double Y1)> edges, int ox, int oy, int w, int h)
+        {
+            const int SubRows = 8;
+            var acc = new double[w];
+            var px = new byte[w * h];
             var cross = new List<(double X, int Dir)>();
             for (int r = 0; r < h; r++)
             {
-                double yc = oy + r + 0.5;
-                cross.Clear();
-                foreach (var e in edges)
+                Array.Clear(acc);
+                for (int j = 0; j < SubRows; j++)
                 {
-                    if (e.Y0 == e.Y1) continue;
-                    bool down = e.Y1 > e.Y0;
-                    double ya = down ? e.Y0 : e.Y1, yb = down ? e.Y1 : e.Y0;
-                    if (yc < ya || yc >= yb) continue;
-                    cross.Add((e.X0 + (yc - e.Y0) * (e.X1 - e.X0) / (e.Y1 - e.Y0), down ? 1 : -1));
+                    double yc = oy + r + (j + 0.5) / SubRows;
+                    cross.Clear();
+                    foreach (var e in edges)
+                    {
+                        if (e.Y0 == e.Y1) continue;
+                        bool down = e.Y1 > e.Y0;
+                        double ya = down ? e.Y0 : e.Y1, yb = down ? e.Y1 : e.Y0;
+                        if (yc < ya || yc >= yb) continue;
+                        cross.Add((e.X0 + (yc - e.Y0) * (e.X1 - e.X0) / (e.Y1 - e.Y0) - ox, down ? 1 : -1));
+                    }
+                    cross.Sort((p, q) => p.X.CompareTo(q.X));
+                    int wind = 0;
+                    for (int ci = 0; ci + 1 < cross.Count; ci++)
+                    {
+                        wind += cross[ci].Dir;
+                        if (wind == 0) continue;
+                        double a = Math.Max(0, cross[ci].X), b = Math.Min(w, cross[ci + 1].X);
+                        for (int c = (int)Math.Floor(a); c < b && c < w; c++)
+                            acc[c] += Math.Min(b, c + 1) - Math.Max(a, c);
+                    }
                 }
-                cross.Sort((p, q) => p.X.CompareTo(q.X));
-                int wind = 0, ci = 0;
                 for (int c = 0; c < w; c++)
-                {
-                    double xc = ox + c + 0.5;
-                    while (ci < cross.Count && cross[ci].X <= xc) wind += cross[ci++].Dir;
-                    if (wind != 0) px[r * w + c] = true;
-                }
+                    px[r * w + c] = (byte)Math.Min(255, (int)Math.Round(acc[c] * 255 / SubRows));
             }
-            return (px, w, h, ox, oy);
+            return px;
         }
 
         static void Quad(List<(double, double, double, double)> edges, (double X, double Y) a, (double X, double Y) b, (double X, double Y) c)
@@ -353,6 +398,7 @@ namespace HP1.UEScript
     public static class UENativeFonts
     {
         static readonly Dictionary<string, UENativeFont> _byName = new(StringComparer.OrdinalIgnoreCase);
+        static readonly HashSet<(string, int)> _logged = new();
         static UETrueType _tt;
 
         static UETrueType Substitute()
@@ -366,13 +412,14 @@ namespace HP1.UEScript
         }
 
         // UConsole.CreateNativeFont(FontName, Height). Every call makes a new font object (the original constructs a
-        // new UFont per call); the glyph page is built once per (face, height).
+        // new UFont per call); the glyph page is built once per height (every face is the same bundled font).
+        // Any face (author 2026-11-15, NOT ORIGINAL): the original hands the face to GDI CreateFontW (WinDrv
+        // UWindowsViewport::CreateNativeFont), whose font mapper substitutes a face that is not installed from the
+        // user's Windows (FontSubstitutes), not from any shipped binary. The port serves every face with the bundled
+        // Liberation Sans, as 'MS Sans Serif' (RU edition), and says so once per (face, height). Characters the font has
+        // no glyph for draw as its .notdef.
         public static UEResourceRef Create(string face, int height)
         {
-            if (!string.Equals(face, UENativeFont.SubstitutedFace, StringComparison.OrdinalIgnoreCase))
-                throw new NotSupportedException(
-                    $"CreateNativeFont('{face}', {height}): the port substitutes only '{UENativeFont.SubstitutedFace}' "
-                    + "(RU edition, bundled Liberation Sans, author decision 2026-11-03); other OS fonts are not supported");
             if (height <= 0)
                 throw new NotSupportedException($"CreateNativeFont('{face}', {height}): a non-positive height is not ported");
             string name = "NativeFont" + height;
@@ -383,8 +430,9 @@ namespace HP1.UEScript
                 {
                     font = new UENativeFont(name, face, height, Substitute());
                     _byName[name] = font;
-                    UETrace.Info($"[Font] CreateNativeFont('{face}', {height}) -> bundled Liberation Sans (NOT ORIGINAL), line {font.LineHeight}");
                 }
+                if (_logged.Add(((face ?? "").ToUpperInvariant(), height)))
+                    UETrace.Info($"[Font] CreateNativeFont('{face}', {height}) -> bundled Liberation Sans (NOT ORIGINAL), line {font.LineHeight}");
             }
             // A Font is a native class without script state: the VM carries it as a resource reference, the form a
             // Font literal has on the defaults path.
@@ -396,6 +444,15 @@ namespace HP1.UEScript
         {
             if (font is not UEResourceRef r || r.ObjectPath is null || !r.ObjectPath.StartsWith("Transient.", StringComparison.Ordinal)) return null;
             lock (_byName) return _byName.TryGetValue(r.Name, out var f) ? f : null;
+        }
+
+        // Frontend: the native font whose glyph page has this texture path, or null.
+        public static UENativeFont OfPage(string pagePath)
+        {
+            lock (_byName)
+                foreach (UENativeFont f in _byName.Values)
+                    if (string.Equals(f.PagePath, pagePath, StringComparison.Ordinal)) return f;
+            return null;
         }
 
         // Frontend: glyph pages of a font by its leaf name (HudCommand.FontPath), or null.

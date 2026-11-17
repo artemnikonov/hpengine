@@ -45,8 +45,6 @@ namespace HP1.UEScript
                 bool actorBrush = actorPrim == UEPrimitiveKind.Brush;
                 HeadlessBspModel brushModel = actorBrush ? BrushModelOf(actor) : null;
                 BrushCoords? coords = actorBrush ? BrushToWorldCoords(actor) : null;
-                float r = UEInterpreter.AsFloat(actor.GetProp(PK.CollisionRadius));
-                float h = UEInterpreter.AsFloat(actor.GetProp(PK.CollisionHeight));
                 // THE MOVING ACTOR'S WIDTH, NOT THE CANDIDATE'S — this follows from the call
                 // roles, which are inverted relative to intuition.
                 // Disasm of the call site (10365a88):
@@ -59,8 +57,7 @@ namespace HP1.UEScript
                 // So Owner (whose 0x1cc/0x1d0/0x1d4 and Location the body reads) is the moving
                 // actor, and the candidate comes in as a POINT. The same value is needed by both
                 // branches below (cylinder and box), so it is read once: two copies would drift
-                // silently.
-                float w = UEInterpreter.AsFloat(actor.GetProp(PK.CollisionWidth));
+                // silently (PrimitivePointHit reads them from its owner).
                 (Vector3 qmin, Vector3 qmax) = HashBoxOf(actor);
                 foreach (int handle in CollisionHash.EncroachmentCandidates(qmin, qmax))
                 {
@@ -80,62 +77,7 @@ namespace HP1.UEScript
                     // Probe extent — AActor::GetCylinderExtent(candidate)
                     // (Engine.dll.c:12591, call 0x10365a99), not (R, R, H).
                     Vector3 cext = GetCylinderExtent(candidate);
-                    bool hit;
-                    if (actorBrush)
-                    {
-                        hit = brushModel.PointCheck(cloc, cext, coords).Hit;
-                    }
-                    else if (actorPrim == UEPrimitiveKind.Cylinder)
-                    {
-                        // UPrimitive::PointCheck: z slab then XY circle, both with
-                        // the <= clear edges (Engine.dll.c:24204-24210).
-                        //
-                        // THE Z SLAB IS MEASURED FROM THE SHIFTED CENTRE. Disasm (24204), with its
-                        // operand order:
-                        //   fVar1 = (Owner+0x1d0 + Owner+0x104) - param_6
-                        // Owner is the moving actor (role analysis above), 0x1d0 its
-                        // CollisionWidth, 0x104 Location.Z, param_6 the probe point Z. So for a
-                        // PLAIN CYLINDER the width shifts the volume itself, not only the hash box:
-                        // the same `0x1d0 + 0x104` appears in UPrimitive::LineCheck (35190) and
-                        // UPrimitive::GetCollisionBoundingBox (92160).
-                        //
-                        // THIS IS A LIVE PATH: the only campaign actor with a non-zero width is the
-                        // player in state Mounting (Harry.uc:1482), and CheckEncroachment is called
-                        // exactly on its moves.
-                        float dz = (w + testLoc.z) - cloc.z;
-                        float hz = cext.z + h;
-                        float dx = testLoc.x - cloc.x, dy = testLoc.y - cloc.y;
-                        float rr = cext.x + r;
-                        hit = hz * hz > dz * dz && rr * rr > dx * dx + dy * dy;
-                    }
-                    else if (actorPrim == UEPrimitiveKind.Box || actorPrim == UEPrimitiveKind.Mesh)
-                    {
-                        // UBox::PointCheck (body 0x103FE590), validated against
-                        // the real shipped body under unicorn.
-                        //
-                        // MESH IS THE SAME BOX, BY VTABLE: slots +0x58/+0x5c of the vtables of
-                        // UMesh (0x10471ebc), ULodMesh and USkeletalMesh (0x1047b43c) point to the
-                        // bodies UBox::PointCheck 0x103fe590 and UBox::LineCheck 0x103fe620; the mesh
-                        // has only its own GetCollisionBoundingBox/GetCollisionExtent (+0x60/+0x64).
-                        // Verified against the original DLL under unicorn.
-                        if (actorPrim == UEPrimitiveKind.Mesh)
-                        {
-                            (Vector3 lo, Vector3 hi) = MeshPrimitiveLocalBox(actor);
-                            hit = ActorBoxTrace.PointCheck(cloc, cext, testLoc, lo, hi, testRot).Hit;
-                        }
-                        else
-                            hit = ActorBoxTrace.PointCheck(cloc, cext, testLoc, r, w, h,
-                                testRot).Hit;
-                    }
-                    else
-                    {
-                        // UOrientedCylinder::PointCheck (body 0x103FB7A0),
-                        // validated against the real shipped body under
-                        // unicorn. Only the hit decision is
-                        // claimed — which is all this call site consumes.
-                        hit = ActorOrientedCylinder.PointCheckHit(
-                            cloc, cext, testLoc, r, w, h, testRot);
-                    }
+                    bool hit = PrimitivePointHit(actor, actorPrim, brushModel, coords, testLoc, testRot, cloc, cext);
                     if (hit) result.Add(candidate);
                 }
             }
@@ -512,6 +454,8 @@ namespace HP1.UEScript
             bool actorMovingBrush = UEBlocking.IsBrush(actor)
                 && !UEInterpreter.ToBool(actor.GetProp(PK.bStatic));
             if (!hasBits && !actorMovingBrush) return false;
+            // HP2 [HP2 0x103b55c0]: HP1's body (tools/hp2/physics_judge.py CheckEncroachment: HP1 = HP2 for an encroacher
+            // that is not a moving brush) but the UnTouch test (IsOverlappingFor) and the moving brush's push below.
 
             List<UEObject> overlaps = ActorEncroachmentOverlaps(actor, testLoc, testRot);
             UEObject level = interp.GetLevelInfo();
@@ -535,12 +479,17 @@ namespace HP1.UEScript
                     // NEGATED delta while the brush sits at the test location
                     // (0x103ab99b), then fall through to the event.
                     Vector3 loc = UEInterpreter.AsVector3(actor.GetProp(PK.Location));
-                    var delta = new Vector3(testLoc.x - loc.x, testLoc.y - loc.y, testLoc.z - loc.z);
+                    var delta = UEGameProfile.Current.Game == UEEdition.Game.HP2
+                        ? Hp2EncroachPush(testLoc, testRot, loc, UEInterpreter.AsRotator(actor.GetProp(PK.Rotation)),
+                            UEInterpreter.AsVector3(other.GetProp(PK.Location)))
+                        : new Vector3(testLoc.x - loc.x, testLoc.y - loc.y, testLoc.z - loc.z);
                     MoveSmooth(interp, other, delta);
                     List<UEObject> again = ActorEncroachmentOverlaps(actor, testLoc, testRot);
                     if (!again.Contains(other)) continue; // pushed clear
                     actor.Props["Location"] = testLoc;
-                    MoveSmooth(interp, other, new Vector3(-delta.x, -delta.y, -delta.z));
+                    // `fmul -1.0` [HP1 0x103ab99e] [HP2 0x103b5aba]: a NaN component keeps its sign (the FPU returns the
+                    // NaN operand), every other value is negated
+                    MoveSmooth(interp, other, NegateX87(delta));
                     actor.Props["Location"] = loc;
                 }
                 // Actor.EncroachingOn(Other): a nonzero return blocks the move
@@ -554,7 +503,7 @@ namespace HP1.UEScript
 
             if (bTouchActors)
                 foreach (UEObject t in actor.TouchList())
-                    if (t is not null && !IsOverlapping(actor, t))
+                    if (t is not null && !IsOverlappingFor(actor, t))
                         UnTouchActor(interp, actor, t);
 
             // Second pass over the ORIGINAL overlap list (0x103abb30): the real
@@ -595,9 +544,14 @@ namespace HP1.UEScript
         internal static Vector3 MoveSweepEnd(Vector3 centre, Vector3 delta, Vector3 dir, float pad)
             => centre + (delta + dir * pad);
 
+        // A judge's world model for ULevel::MoveActor (runtime_poc --hp2-tickcase N answers the interpolation manager's moves
+        // as tools/hp2/physics_tick_judge.py's world does); null in the product.
+        internal Func<UEObject, Vector3, UERotator, bool> MoveActorForTest;
+
         public bool MoveActor(UEInterpreter interp, UEObject actor, Vector3 delta, UERotator newRot,
             bool bTest, bool bIgnorePawns, bool bIgnoreBases, bool bNoFail, MoveCheck callerHit = null)
         {
+            if (MoveActorForTest is not null) return MoveActorForTest(actor, delta, newRot);
             // A. Guard: bStatic || !bMovable → refuse (Engine.dll.c:123784;
             // shipped tests bMovable via 0x198&0x20000). The head does NOT check bDeleteMe
             // (disasm 0x103aa3ed/0x103aa3f3): a destroyed actor moves; the hash refuses it on
@@ -674,7 +628,11 @@ namespace HP1.UEScript
                 if (movingBrush)
                     extent = new Vector3(extent.x - 0.51f, extent.y - 0.51f, extent.z - 0.51f);
                 Vector3 to = MoveSweepEnd(centre, delta, dir, pad);
-                CollectMoveHits(actor, centre, to, extent, collideWorld, collideActors, hits);
+                // HP2: a Mover whose MoverEncroachType is none of ME_Stop/Return/Crush/IgnoreWhenEncroach (0..3: HP2's
+                // ME_Really* 4..7) sweeps nothing (Hits stays NULL) [HP2 0x103b4317..0x103b433c -> 0x103b442d].
+                if (!(UEGameProfile.Current.Game == UEEdition.Game.HP2 && UEInterpreter.ClassIsA(actor.Class, "Mover")
+                      && UEInterpreter.ToInt(actor.GetProp("MoverEncroachType")) is not (0 or 1 or 2 or 3)))
+                    CollectMoveHits(actor, centre, to, extent, collideWorld, collideActors, hits);
                 // ASCENDING SORT BY TIME — READ, NOT INFERRED.
                 // Shipped ULevel::MultiLineCheck (0x103ac620) collects candidates into an
                 // array of 0x2c-byte records capped at 0x40 and calls appQsort with comparator
@@ -762,9 +720,12 @@ namespace HP1.UEScript
             // D. Based riders move BEFORE the base commits (Engine.dll.c:124035-
             // 124105): translated by the committed delta, orbited around the base by
             // the masked yaw delta, rotated by the raw yaw delta; pawn riders also
-            // carry ViewRotation.Yaw. The shipped rider call's trailing flags are
-            // ambiguous in the decompile; bIgnoreBases=true matches both the skip
-            // semantics above and SurrealEngine's rider carry.
+            // carry ViewRotation.Yaw.
+            // Original: the rider call (vtable +0x8c, 0x103aae57) pushes, last argument first,
+            // `push 0` bNoFail (0x103aae14), `push 1` bIgnoreBases (0x103aae16), `push 0`
+            // bIgnorePawns (0x103aae18), `push 0` bTest (0x103aae20), then &Hit (ebp-0x9c);
+            // the decompile drops the first two pushes. bIgnoreBases lets the rider pass
+            // through its own base, which has not moved yet.
             if (standingCount > 0 && !bTest)
             {
                 int rawYawDelta = newRot.Yaw - curRot.Yaw;
@@ -840,6 +801,7 @@ namespace HP1.UEScript
                     foreach (MoveHit hit in hits)
                     {
                         if (blocked && hit.Fraction >= time) break;
+                        if (UEGameProfile.Current.Game == UEEdition.Game.HP2 && !Hp2TouchWithinMove(pad, dist, hit.Fraction)) continue;
                         if (hit.Actor is not null && !hit.Blocking
                             && !IsBasedOn(hit.Actor, actor)
                             && (!bIgnoreBases || !IsBasedOn(actor, hit.Actor)))
@@ -848,7 +810,7 @@ namespace HP1.UEScript
                 }
                 // UnTouch anything no longer overlapping (Engine.dll.c:124182-124188).
                 foreach (UEObject t in actor.TouchList())
-                    if (t is not null && !IsOverlapping(actor, t))
+                    if (t is not null && !IsOverlappingFor(actor, t))
                         UnTouchActor(interp, actor, t);
             }
 
@@ -920,6 +882,163 @@ namespace HP1.UEScript
                 }
             }
             return moved;
+        }
+
+        // One primitive PointCheck (GetPrimitive +0xa4 -> PointCheck +0x58): the owner's primitive (resolved by the caller:
+        // prim, its brush model and coords) at the owner's pose (loc, rot; its CollisionRadius/Width/Height) against a box
+        // `ext` centred at `point`. ActorEncroachmentOverlaps (the moving actor owns, each candidate the point) and HP2's
+        // IsOverlapping (the other actor owns, this one the point) — one copy.
+        bool PrimitivePointHit(UEObject owner, UEPrimitiveKind prim, HeadlessBspModel brushModel, BrushCoords? coords,
+            Vector3 loc, UERotator rot, Vector3 point, Vector3 ext)
+        {
+            float r = UEInterpreter.AsFloat(owner.GetProp(PK.CollisionRadius));
+            float h = UEInterpreter.AsFloat(owner.GetProp(PK.CollisionHeight));
+            float w = UEInterpreter.AsFloat(owner.GetProp(PK.CollisionWidth));
+            if (prim == UEPrimitiveKind.Brush)
+            {
+                return brushModel.PointCheck(point, ext, coords).Hit;
+            }
+            else if (prim == UEPrimitiveKind.Cylinder)
+            {
+                // UPrimitive::PointCheck: z slab then XY circle, both with
+                // the <= clear edges (Engine.dll.c:24204-24210).
+                //
+                // THE Z SLAB IS MEASURED FROM THE SHIFTED CENTRE. Disasm (24204), with its
+                // operand order:
+                //   fVar1 = (Owner+0x1d0 + Owner+0x104) - param_6
+                // Owner is the moving actor (role analysis above), 0x1d0 its
+                // CollisionWidth, 0x104 Location.Z, param_6 the probe point Z. So for a
+                // PLAIN CYLINDER the width shifts the volume itself, not only the hash box:
+                // the same `0x1d0 + 0x104` appears in UPrimitive::LineCheck (35190) and
+                // UPrimitive::GetCollisionBoundingBox (92160).
+                //
+                // THIS IS A LIVE PATH: the only campaign actor with a non-zero width is the
+                // player in state Mounting (Harry.uc:1482), and CheckEncroachment is called
+                // exactly on its moves.
+                float dz = (w + loc.z) - point.z;
+                float hz = ext.z + h;
+                float dx = loc.x - point.x, dy = loc.y - point.y;
+                float rr = ext.x + r;
+                return hz * hz > dz * dz && rr * rr > dx * dx + dy * dy;
+            }
+            else if (prim == UEPrimitiveKind.Box || prim == UEPrimitiveKind.Mesh)
+            {
+                // UBox::PointCheck (body 0x103FE590), validated against
+                // the real shipped body under unicorn.
+                //
+                // MESH IS THE SAME BOX, BY VTABLE: slots +0x58/+0x5c of the vtables of
+                // UMesh (0x10471ebc), ULodMesh and USkeletalMesh (0x1047b43c) point to the
+                // bodies UBox::PointCheck 0x103fe590 and UBox::LineCheck 0x103fe620; the mesh
+                // has only its own GetCollisionBoundingBox/GetCollisionExtent (+0x60/+0x64).
+                // Verified against the original DLL under unicorn.
+                if (prim == UEPrimitiveKind.Mesh)
+                {
+                    (Vector3 lo, Vector3 hi) = MeshPrimitiveLocalBox(owner);
+                    return ActorBoxTrace.PointCheck(point, ext, loc, lo, hi, rot).Hit;
+                }
+                else
+                    return ActorBoxTrace.PointCheck(point, ext, loc, r, w, h,
+                        rot).Hit;
+            }
+            else
+            {
+                // UOrientedCylinder::PointCheck (body 0x103FB7A0),
+                // validated against the real shipped body under
+                // unicorn. Only the hit decision is
+                // claimed — which is all this call site consumes.
+                return ActorOrientedCylinder.PointCheckHit(
+                    point, ext, loc, r, w, h, rot);
+            }
+        }
+
+        internal static Vector3 NegateX87(Vector3 v)
+        {
+            static float N(float c) => float.IsNaN(c) ? c : -c;
+            return new Vector3(N(v.x), N(v.y), N(v.z));
+        }
+
+        // HP2's push of an encroached actor by a moving brush [HP2 0x103b57b2..0x103b594a]: the other's Location turned
+        // about the brush's Location by the rotation delta (TestRotation − Rotation, int per component) — roll, pitch,
+        // then yaw — and push = f32(f32(T.x − L.x) + f32(10·(R.x − O.x))), likewise y, and for z the T.z − L.z difference
+        // kept in the register; the second push is its negation (`fmul -1.0` [HP2 0x103b5ab7..0x103b5ae2]).
+        internal static Vector3 Hp2EncroachPush(Vector3 testLoc, UERotator testRot, Vector3 loc, UERotator rot, Vector3 other)
+        {
+            static X87Ext X(float v) => X87Ext.From(v);
+            static X87Ext R(X87Ext v) => X87Ext.Round64(v);
+            Vector3 r1 = Hp2Turn(loc, other, -(testRot.Roll - rot.Roll), 1, 2);
+            Vector3 r2 = Hp2Turn(loc, r1, testRot.Pitch - rot.Pitch, 0, 2);
+            Vector3 r3 = Hp2Turn(loc, r2, testRot.Yaw - rot.Yaw, 0, 1);
+            float Ten(float a, float b) => R(R(X(a) - X(b)) * X(10f)).ToFloat();
+            float tx = R(X(testLoc.x) - X(loc.x)).ToFloat(), ty = R(X(testLoc.y) - X(loc.y)).ToFloat();
+            X87Ext tz = R(X(testLoc.z) - X(loc.z));
+            return new Vector3(R(X(tx) + X(Ten(r3.x, other.x))).ToFloat(), R(X(ty) + X(Ten(r3.y, other.y))).ToFloat(),
+                R(tz + X(Ten(r3.z, other.z))).ToFloat());
+        }
+
+        // Original: Engine.dll not exported: the planar turns of CheckEncroachment's push, roll [HP2 0x103b5210] (the (y, z)
+        //   plane; the caller negates the angle there: `neg eax` 0x103b5257), pitch [HP2 0x103b5340] (x, z), yaw
+        //   [HP2 0x103b50f0] (x, y) — HP2 only (callers 0x103b5849 / 0x103b5884 / 0x103b58bf through thunks)
+        // da = f32(P.a − C.a); db = P.b − C.b in the register (`fst` keeps it); dist = f32(appSqrt(double(db·f32(db) +
+        // da·da))); ua, ub = f32(da / dist), f32(db / dist); angle = double(int · 9.58738e-05f); s = f32(sin), c = cos in the
+        // register; R.a = f32((c·ua − s·ub)·dist + C.a), R.b = f32((c·ub + s·ua)·dist + C.b); the third component P's.
+        static Vector3 Hp2Turn(Vector3 c, Vector3 p, int angle, int ia, int ib)
+        {
+            static X87Ext X(float v) => X87Ext.From(v);
+            static X87Ext R(X87Ext v) => X87Ext.Round64(v);
+            static float At(Vector3 v, int i) => i == 0 ? v.x : i == 1 ? v.y : v.z;
+            float da = R(X(At(p, ia)) - X(At(c, ia))).ToFloat();
+            X87Ext dbx = R(X(At(p, ib)) - X(At(c, ib)));
+            float db = dbx.ToFloat();
+            double sum = R(R(dbx * X(db)) + X(da) * X(da)).ToDouble();
+            float dist = X87Ext.Sqrt64(X87Ext.From(sum)).ToFloat();
+            float ua = X87Ext.Div64(X(da), X(dist)).ToFloat(), ub = X87Ext.Div64(X(db), X(dist)).ToFloat();
+            X87Ext ang = X87Ext.From(R(X87Ext.From(angle) * X(9.58738019107841e-05f)).ToDouble());
+            float sn = HP1.Core.UEX87Transcendental.Fsin(ang).ToFloat();
+            X87Ext cs = HP1.Core.UEX87Transcendental.Fcos(ang);
+            float ra = R(R(R(R(cs * X(ua)) - X(sn) * X(ub)) * X(dist)) + X(At(c, ia))).ToFloat();
+            float rb = R(R(R(R(cs * X(ub)) + X(sn) * X(ua)) * X(dist)) + X(At(c, ib))).ToFloat();
+            return ia == 1 ? new Vector3(p.x, ra, rb) : ib == 2 ? new Vector3(ra, p.y, rb) : new Vector3(ra, rb, p.z);
+        }
+
+        // HP2 (touch pass): a hit actor is touched only when the unpadded move reaches it: (pad + dist)·Hit.Time < dist in
+        // the 64-bit register, `fcomp; test ah,1` — below or unordered (NaN) touches [HP2 0x103b4c2c..0x103b4c3d].
+        internal static bool Hp2TouchWithinMove(float pad, float dist, float time)
+            => (X87Ext.Fcom(X87Ext.Round64(X87Ext.Round64(X87Ext.From(pad) + X87Ext.From(dist)) * X87Ext.From(time)),
+                X87Ext.From(dist)) & X87Ext.C0) != 0;
+
+        // The UnTouch tests of MoveActor and CheckEncroachment: HP1's AActor::IsOverlapping, or HP2's with the 0.1
+        // tolerance both pass (`push 0x3dcccccd` [HP2 0x103b4c92], [HP2 0x103b5bc9..]).
+        bool IsOverlappingFor(UEObject a, UEObject b)
+            => UEGameProfile.Current.Game == UEEdition.Game.HP2 ? IsOverlappingHp2(a, b, 0.1f) : IsOverlapping(a, b);
+
+        // Original: Engine.dll ?IsOverlapping@AActor@@QAEHPAV1@M@Z [HP2 0x103809c0] (HP2 only; HP1's is
+        // ?IsOverlapping@AActor@@QBEHPBV1@@Z [HP1 0x10379d90]): Other->GetPrimitive()->PointCheck(Hit, Other, Location,
+        // GetPrimitive()->GetCollisionExtent(this) + Tolerance per component (float), 0) == 0 — no brush or Level test.
+        public bool IsOverlappingHp2(UEObject a, UEObject other, float tolerance)
+        {
+            Vector3 e = PrimitiveCollisionExtent(a);
+            e = new Vector3(e.x + tolerance, e.y + tolerance, e.z + tolerance);
+            UEPrimitiveKind prim = UEPrimitive.Resolve(other);
+            bool brush = prim == UEPrimitiveKind.Brush;
+            return PrimitivePointHit(other, prim, brush ? BrushModelOf(other) : null, brush ? BrushToWorldCoords(other) : null,
+                UEInterpreter.AsVector3(other.GetProp(PK.Location)), UEInterpreter.AsRotator(other.GetProp(PK.Rotation)),
+                UEInterpreter.AsVector3(a.GetProp(PK.Location)), e);
+        }
+
+        // UPrimitive::GetCollisionExtent (Owner) [HP2 0x10406600]: (R, R, H); UBox's [HP2 0x1040bb50]: (R, W != 0 ? W : R, H);
+        // a mesh its own (UMesh::GetCollisionExtent, the CollideType 3 path of GetCylinderExtent); a brush model (UModel)
+        // inherits UPrimitive's.
+        Vector3 PrimitiveCollisionExtent(UEObject a)
+        {
+            float r = UEInterpreter.AsFloat(a.GetProp(PK.CollisionRadius)), h = UEInterpreter.AsFloat(a.GetProp(PK.CollisionHeight));
+            switch (UEPrimitive.Resolve(a))
+            {
+                case UEPrimitiveKind.Box:
+                    float w = UEInterpreter.AsFloat(a.GetProp(PK.CollisionWidth));
+                    return new Vector3(r, w != 0f ? w : r, h);
+                case UEPrimitiveKind.Mesh: return GetCylinderExtent(a);
+                default: return new Vector3(r, r, h);
+            }
         }
 
         // AActor::IsOverlapping (Engine thunk 0x103029d7 -> 0x10379d90): cylinder-cylinder overlap; a brush on either

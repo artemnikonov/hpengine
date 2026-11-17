@@ -139,6 +139,11 @@ namespace HP1.UEScript
 
         public Hp1MeshHashFields GetHashFields(string name, string objectPath = null)
         {
+            lock (_gate) return GetHashFieldsLocked(name, objectPath);
+        }
+
+        Hp1MeshHashFields GetHashFieldsLocked(string name, string objectPath)
+        {
             string key = objectPath ?? name;
             if (_loadedHashFields.TryGetValue(key, out Hp1MeshHashFields cached)) return cached;
             var m = ResolveMeshExport(name, objectPath);
@@ -151,6 +156,11 @@ namespace HP1.UEScript
         private readonly Dictionary<string, List<Hp1AnimSequence>> _meshSeqs =
             new(UEPropNameComparer.Instance);
         public List<Hp1AnimSequence> GetMeshSequences(string name, string objectPath = null)
+        {
+            lock (_gate) return GetMeshSequencesLocked(name, objectPath);
+        }
+
+        List<Hp1AnimSequence> GetMeshSequencesLocked(string name, string objectPath)
         {
             string key = objectPath ?? name;
             if (_meshSeqs.TryGetValue(key, out List<Hp1AnimSequence> cached)) return cached;
@@ -165,6 +175,11 @@ namespace HP1.UEScript
         private readonly Dictionary<string, Hp1VertexMesh> _vertexMeshes = new(UEPropNameComparer.Instance);
         public Hp1VertexMesh GetVertexMesh(string name, string objectPath = null)
         {
+            lock (_gate) return GetVertexMeshLocked(name, objectPath);
+        }
+
+        Hp1VertexMesh GetVertexMeshLocked(string name, string objectPath)
+        {
             string key = objectPath ?? name;
             if (_vertexMeshes.TryGetValue(key, out Hp1VertexMesh cached)) return cached;
             var m = ResolveMeshExport(name, objectPath);
@@ -175,9 +190,10 @@ namespace HP1.UEScript
 
         // Sequences of an animation object by EXACT reference (the path disambiguates
         // the name, as for meshes). A miss is loud: the reference came from a package.
-        // Lazy loading is shared by the Core tick and the frontend (skinner), and
-        // the tick may run on its own thread: dictionaries and package reads are under one
-        // lock (nearly free without contention).
+        // Lazy loading is shared by the Core tick and the frontend (skinner, UEMeshSource), and
+        // the tick may run on its own thread: every lazily filled dictionary here (meshes, animations,
+        // vertex meshes, mesh sequences, hash fields) and its package read are under one lock
+        // (nearly free without contention). A value depends only on its key, so who fills first changes nothing.
         readonly object _gate = new object();
 
         public IReadOnlyDictionary<string, Hp1AnimSequence> GetAnimation(string name, string objectPath = null)
@@ -214,6 +230,9 @@ namespace HP1.UEScript
         internal void InjectForTest(string key, Hp1SkeletalMesh mesh) { lock (_gate) { _loaded[key] = mesh; _lastMesh = null; _epoch++; } }
         internal void InjectAnimationForTest(string key, IReadOnlyDictionary<string, Hp1AnimSequence> seqs)
         { lock (_gate) { _loadedAnims[key] = seqs; _epoch++; } }
+        // A vertex mesh (as a package reader read it) and its AnimSeqs under the reference path `key`.
+        internal void InjectVertexMeshForTest(string key, Hp1VertexMesh mesh, List<Hp1AnimSequence> seqs)
+        { lock (_gate) { _vertexMeshes[key] = mesh; _meshSeqs[key] = seqs; } }
 
         // RESOLUTION MEMO ON THE REFERENCE. A reference's Name/ObjectPath are readonly and the dictionaries only
         // grow (an entry is never replaced, except by the fixture seam above, which bumps the epoch), so the
@@ -301,6 +320,8 @@ namespace HP1.UEScript
                 m = byPkg[0];
             }
             mesh = m.Package.ReadSkeletalMesh(m.Export);
+            if (mesh.AnimObjectPath is not null)
+                mesh = mesh with { Sequences = GetAnimationLocked(mesh.AnimObject, mesh.AnimObjectPath) };
             _loaded.Add(key, mesh);
             return mesh;
         }
@@ -337,15 +358,14 @@ namespace HP1.UEScript
             // notifies for bAnimFinished + notify dispatch); vertex frames are
             // render-side and stay unread. Reached by stage-7 casts: the wand and
             // the spell FX are LodMesh actors playing anims.
+            // Original: Engine.dll ?Serialize@UMesh@@UAEXAAVFArchive@@@Z [HP1 0x103B7C50]
             public List<Hp1AnimSequence> ReadMeshAnimSeqs(PackageExport export)
             {
                 var r = new RawReader(_data) { Position = export.Offset };
                 SkipTaggedProperties(r);
-                if (_version <= 61)
-                    throw new NotSupportedException("mesh anim seqs: pre-62 package");
-                r.Skip(25 + 16);         // UPrimitive box + sphere
-                r.Position = r.Int32();  // verts (lazy, absolute skip offset)
-                r.Position = r.Int32();  // tris
+                r.Skip(25 + SphereSize); // UPrimitive box + sphere
+                SkipLazyArray(r, 4, "verts");
+                SkipLazyArray(r, 20, "tris");
                 int animSeqs = CheckedCount(r.CompactIndex(), "anim sequences");
                 var seqs = new List<Hp1AnimSequence>(animSeqs);
                 for (int i = 0; i < animSeqs; i++)
@@ -377,6 +397,8 @@ namespace HP1.UEScript
             //
             // VERTEX UNPACKING from source: the pool stores int32, three signed
             // fields of 11/11/10 bits (ULodMesh::GetFrame sar 0x15/0x15/0x16 at 0x1035e8b4/8c2/8d1).
+            // Original: Engine.dll ?Serialize@UMesh@@UAEXAAVFArchive@@@Z [HP1 0x103B7C50]
+            // Original: Engine.dll ?Serialize@ULodMesh@@UAEXAAVFArchive@@@Z [HP1 0x1035DAB0]
             public Hp1VertexMesh ReadVertexMesh(PackageExport export)
             {
                 var r = new RawReader(_data) { Position = export.Offset };
@@ -397,8 +419,26 @@ namespace HP1.UEScript
                     throw new InvalidDataException(
                         $"{export.Name}: the vertex pool ended where the lazy array did not promise");
 
-                if (_version > 61) r.Position = r.Int32();
-                else r.Skip(CheckedCount(r.CompactIndex(), "tris") * 20);
+                // UMesh::Tris (+0x6c, TLazyArray<FMeshTri>, FUN_103b9d30; element FUN_10362490, 0x14 bytes): iVertex[3]
+                // (uint16), Tex[3] (byte U, V), PolyFlags, TextureIndex — the triangles of URender::DrawMesh's UMesh branch
+                // (Render.dll.c:9161-9205, 9389-9411). A ULodMesh keeps its faces in its own tail; its Tris array is empty.
+                int trisEnd = _version > 61 ? r.Int32() : 0;
+                int triCount = CheckedCount(r.CompactIndex(), "tris");
+                var triVerts = new int[triCount * 3];
+                var triU = new byte[triCount * 3];
+                var triV = new byte[triCount * 3];
+                var triFlags = new int[triCount];
+                var triTex = new int[triCount];
+                for (int i = 0; i < triCount; i++)
+                {
+                    for (int k = 0; k < 3; k++) triVerts[i * 3 + k] = r.UInt16();
+                    for (int k = 0; k < 3; k++) { triU[i * 3 + k] = r.Byte(); triV[i * 3 + k] = r.Byte(); }
+                    triFlags[i] = r.Int32();
+                    triTex[i] = r.Int32();
+                }
+                if (_version > 61 && r.Position != trisEnd)
+                    throw new InvalidDataException(
+                        $"{export.Name}: the triangle list ended where the lazy array did not promise");
                 int animSeqs = CheckedCount(r.CompactIndex(), "anim sequences");
                 for (int i = 0; i < animSeqs; i++)
                 {
@@ -461,6 +501,39 @@ namespace HP1.UEScript
                 r.Skip(8);
                 if (_version == 65) r.Skip(4);
                 else if (_version >= 66) r.Skip(CheckedCount(r.CompactIndex(), "texture LOD") * 4);
+
+                // A plain UMesh (class Mesh) ends here: UMesh::Serialize is its last body (0x103b7e93..0x103b7eb4).
+                if (ClassName(export).Equals("Mesh", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (r.Position != export.Offset + export.Size)
+                        throw new InvalidDataException(
+                            $"{export.Name}: UMesh::Serialize ended at {r.Position}, the export ends at {export.Offset + export.Size}");
+                    // DrawMesh indexes its per-frame samples by iVertex (Render.dll.c:9162-9166) with no bound: an index at or
+                    // above FrameVerts reads outside the FMemStack array — undefined in the original.
+                    foreach (int v in triVerts)
+                        if (v >= frameVerts)
+                            throw new InvalidDataException($"{export.Name}: triangle vertex {v} >= FrameVerts {frameVerts}");
+                    return new Hp1VertexMesh(export.Name, verts, frameVerts, animFrames)
+                    {
+                        Plain = true,
+                        TriVerts = triVerts,
+                        TriU = triU,
+                        TriV = triV,
+                        TriPolyFlags = triFlags,
+                        TriTextureIndex = triTex,
+                        TexturePath = texPath,
+                        Scale = scale,
+                        Origin = origin,
+                        PrimitiveBox = primitiveBox,
+                        BoundingBoxes = boundingBoxes,
+                        RotPitch = rotPitch,
+                        RotYaw = rotYaw,
+                        RotRoll = rotRoll,
+                        ConnectNumTris = connectNumTris,
+                        ConnectOffset = connectOffset,
+                        VertLinks = vertLinks,
+                    };
+                }
 
                 // ULodMesh::Serialize (Engine.dll.c:138685-138689): CollapsePointThus (+0x12c), FaceLevel (+0x138),
                 // Faces, CollapseWedgeThus (+0x150), Wedges — read by URender::DrawLodMesh's LOD collapse (UEMeshLod).
@@ -533,22 +606,37 @@ namespace HP1.UEScript
                 int oldFrameVerts = r.Int32();
                 return new Hp1VertexMesh(export.Name, verts, frameVerts, animFrames)
                 {
-                    WedgePoint = wedgePoint, WedgeU = wedgeU, WedgeV = wedgeV,
-                    FaceWedges = faceWedges, FaceMaterial = faceMaterial,
-                    MaterialFlags = materialFlags, MaterialTextureIndex = materialTexIdx,
-                    TexturePath = texPath, Scale = scale, Origin = origin,
-                    PrimitiveBox = primitiveBox, BoundingBoxes = boundingBoxes,
-                    RotPitch = rotPitch, RotYaw = rotYaw, RotRoll = rotRoll,
-                    ConnectNumTris = connectNumTris, ConnectOffset = connectOffset,
+                    WedgePoint = wedgePoint,
+                    WedgeU = wedgeU,
+                    WedgeV = wedgeV,
+                    FaceWedges = faceWedges,
+                    FaceMaterial = faceMaterial,
+                    MaterialFlags = materialFlags,
+                    MaterialTextureIndex = materialTexIdx,
+                    TexturePath = texPath,
+                    Scale = scale,
+                    Origin = origin,
+                    PrimitiveBox = primitiveBox,
+                    BoundingBoxes = boundingBoxes,
+                    RotPitch = rotPitch,
+                    RotYaw = rotYaw,
+                    RotRoll = rotRoll,
+                    ConnectNumTris = connectNumTris,
+                    ConnectOffset = connectOffset,
                     VertLinks = vertLinks,
                     SpecialFaceWedges = specialFaceWedges,
                     SpecialFaceMaterial = specialFaceMaterial,
-                    ModelVerts = modelVerts, SpecialVerts = specialVerts,
+                    ModelVerts = modelVerts,
+                    SpecialVerts = specialVerts,
                     Lod = new Hp1MeshLod(collapsePoints.Length, faceLevel, collapseWedges, lodStrength, lodMinVerts, frameVerts),
-                    MeshScaleMax = meshScaleMax, LodHysteresis = lodHysteresis,
-                    LodStrength = lodStrength, LodMinVerts = lodMinVerts,
-                    LodMorph = lodMorph, LodZDisplace = lodZDisplace,
-                    RemapAnimVerts = remapAnimVerts, OldFrameVerts = oldFrameVerts,
+                    MeshScaleMax = meshScaleMax,
+                    LodHysteresis = lodHysteresis,
+                    LodStrength = lodStrength,
+                    LodMinVerts = lodMinVerts,
+                    LodMorph = lodMorph,
+                    LodZDisplace = lodZDisplace,
+                    RemapAnimVerts = remapAnimVerts,
+                    OldFrameVerts = oldFrameVerts,
                 };
             }
 
@@ -775,9 +863,16 @@ namespace HP1.UEScript
                     int numChildren = checked((int)r.UInt32());
                     int parent = checked((int)r.UInt32());
                     bones[i] = new Hp1Bone(name, parent, numChildren)
-                        { OrientX = qx, OrientY = qy, OrientZ = qz, OrientW = qw,
-                          Position = pos, Length = boneLength, Scale = boneScale,
-                          Flags = boneFlags };
+                    {
+                        OrientX = qx,
+                        OrientY = qy,
+                        OrientZ = qz,
+                        OrientW = qw,
+                        Position = pos,
+                        Length = boneLength,
+                        Scale = boneScale,
+                        Flags = boneFlags
+                    };
                 }
 
                 // ── BONE WEIGHTS ────────────────────────────────────────────
@@ -832,29 +927,53 @@ namespace HP1.UEScript
                     sequences = ReadAnimationSequences(animationExport);
                     animObject = animationExport.Name;
                 }
-                else if (defaultAnimation < 0)
-                    throw new NotSupportedException($"cross-package DefaultAnimation on {export.Name}");
+                string animObjectPath = null;
+                if (defaultAnimation < 0)
+                {
+                    // An import: USkeletalMesh::Serialize reads DefaultAnimation as an object reference, so the linker
+                    // loads it from its own package; the catalog resolves it by that exact path (GetLockedSlow).
+                    (string leaf, _) = ObjectLeafAndOuter(defaultAnimation);
+                    animObjectPath = ObjectFullPath(defaultAnimation)
+                        ?? throw new InvalidDataException($"invalid DefaultAnimation import {defaultAnimation} on {export.Name}");
+                    animObject = leaf;
+                }
                 return new Hp1SkeletalMesh(export.Name, bones, sequences,
                     meshScale, meshOrigin, meshRotPitch, meshRotYaw, meshRotRoll,
                     renderExtent)
-                    { AnimObject = animObject, Points = points, TriVerts = triVerts,
-                      WeightStart = weightStart, WeightNumber = weightNumber,
-                      WeightPoint = weightPoint, WeightValue = weightValue,
-                      LocalPoints = localPoints,
-                      WedgePoint = wedgePoint, WedgeU = wedgeU, WedgeV = wedgeV,
-                      FaceWedges = faceWedges, FaceMaterial = faceMaterial,
-                      MaterialFlags = materialFlags, MaterialTextureIndex = materialTexIdx,
-                      TextureLeaf = textureLeaf, TextureOuter = textureOuter,
-                      TexturePath = texturePath,
-                      RemapAnimVerts = remapAnimVerts,
-                      ExtWedgePoint = extWedgePoint, ExtWedgeU = extWedgeU,
-                      ExtWedgeV = extWedgeV,
-                      WeaponBoneIndex = weaponBone, WeaponAdjustOrigin = weaponOrigin,
-                      WeaponAdjustAxis = weaponAxis,
-                      SpecialFaceCount = skelSpecialFaces, SpecialVerts = skelSpecialVerts,
-                      ModelVerts = skelModelVerts,
-                      Lod = new Hp1MeshLod(collapsePoints.Length, faceLevel, collapseWedges, skelLodStrength, skelLodMinVerts, skelFrameVerts),
-                      PrimitiveBox = primitiveBox, BoundingBoxes = boundingBoxes };
+                {
+                    AnimObject = animObject,
+                    AnimObjectPath = animObjectPath,
+                    Points = points,
+                    TriVerts = triVerts,
+                    WeightStart = weightStart,
+                    WeightNumber = weightNumber,
+                    WeightPoint = weightPoint,
+                    WeightValue = weightValue,
+                    LocalPoints = localPoints,
+                    WedgePoint = wedgePoint,
+                    WedgeU = wedgeU,
+                    WedgeV = wedgeV,
+                    FaceWedges = faceWedges,
+                    FaceMaterial = faceMaterial,
+                    MaterialFlags = materialFlags,
+                    MaterialTextureIndex = materialTexIdx,
+                    TextureLeaf = textureLeaf,
+                    TextureOuter = textureOuter,
+                    TexturePath = texturePath,
+                    RemapAnimVerts = remapAnimVerts,
+                    ExtWedgePoint = extWedgePoint,
+                    ExtWedgeU = extWedgeU,
+                    ExtWedgeV = extWedgeV,
+                    WeaponBoneIndex = weaponBone,
+                    WeaponAdjustOrigin = weaponOrigin,
+                    WeaponAdjustAxis = weaponAxis,
+                    SpecialFaceCount = skelSpecialFaces,
+                    SpecialVerts = skelSpecialVerts,
+                    ModelVerts = skelModelVerts,
+                    Lod = new Hp1MeshLod(collapsePoints.Length, faceLevel, collapseWedges, skelLodStrength, skelLodMinVerts, skelFrameVerts),
+                    PrimitiveBox = primitiveBox,
+                    BoundingBoxes = boundingBoxes
+                };
             }
 
             // An animation object by itself: input of Actor.SkelAnim (see the catalog's
@@ -967,7 +1086,8 @@ namespace HP1.UEScript
                     var movement = new Hp1AnimMove(m.RootSpeed, m.TrackTime, m.StartBone,
                         m.Flags, m.BoneIndices, tracks, refBones);
                     if (!result.TryAdd(h.Name, new Hp1AnimSequence(
-                        h.Name, h.Group, h.StartFrame, h.NumFrames, h.Rate, h.Notifies, movement) { Index = i }))
+                        h.Name, h.Group, h.StartFrame, h.NumFrames, h.Rate, h.Notifies, movement)
+                    { Index = i }))
                         throw new InvalidDataException($"duplicate animation sequence {export.Name}.{h.Name}");
                 }
                 return result;
@@ -1031,6 +1151,14 @@ namespace HP1.UEScript
         // UPrimitive::BoundingBox (+0x28) and UMesh::BoundingBoxes (+0xa8): input of UMesh::GetRenderBoundingBox.
         public Hp1Box PrimitiveBox { get; init; }
         public Hp1Box[] BoundingBoxes { get; init; } = System.Array.Empty<Hp1Box>();
+        // A plain UMesh (class Mesh, not IsA ULodMesh): URender::DrawMesh draws it in its own branch (Render.dll.c:9030-9512)
+        // from UMesh::Tris (+0x6c): per triangle iVertex[3], Tex[3].U/V, PolyFlags, TextureIndex; no ULodMesh tail.
+        public bool Plain { get; init; }
+        public int[] TriVerts { get; init; } = System.Array.Empty<int>();
+        public byte[] TriU { get; init; } = System.Array.Empty<byte>();
+        public byte[] TriV { get; init; } = System.Array.Empty<byte>();
+        public int[] TriPolyFlags { get; init; } = System.Array.Empty<int>();
+        public int[] TriTextureIndex { get; init; } = System.Array.Empty<int>();
     }
     public sealed record Hp1Bone(string Name, int ParentIndex, int NumChildren)
     {
@@ -1074,6 +1202,8 @@ namespace HP1.UEScript
         // The DefaultAnimation export's object name (join key for the anim
         // metadata cross-validation); null when the mesh has no animation object.
         public string AnimObject { get; init; }
+        // Full path of a DefaultAnimation imported from another package; null when it is an export of the mesh's own.
+        public string AnimObjectPath { get; init; }
 
         // UPrimitive::BoundingBox (+0x28) and UMesh::BoundingBoxes (+0xa8):
         // input of USkeletalMesh::GetRenderBoundingBox.
@@ -1324,7 +1454,38 @@ namespace HP1.UEScript
         // Keys are immutable package data, so unpacking is done once per track
         // (the exact x87 chain via X87Ext cost ~0.8 ms per frame when unpacked on every call;
         // measured over 1000 headless Tut1 frames).
-        float[] _decoded, _decoded24;
+        float[] _decoded, _decoded24, _decodedHp2, _decoded24Hp2;
+
+        // FAnimVec::Quat — ApplyAnim's decode of a key of a track with more than one key (a single-key track takes the
+        // inline fsin and FQuat::FQuat(x, y, z), DecodeQuaternion, in both games). HP1: the FQuat(x, y, z) body inlined
+        // (DecodeQuaternion). HP2 squares the y and z sines still on the x87 stack, not their stored floats
+        // [HP2 0x10428ce1..0x10428d01]: w² = ((1 − x·x) − sy·sy) − sz·sz with x the stored float; then as HP1 (zero unless
+        // 0 < w², NaN passes; fstp qword, appSqrt, fstp dword). fsin is not rounded by the precision control, its operand is.
+        // Original: Engine.dll ?Quat@FAnimVec@@QBE?AVFQuat@@XZ [HP1 0x1041A120] [HP2 0x10428CA0]
+        public void DecodeKeyQuaternion(int key, out float x, out float y, out float z, out float w)
+        {
+            if (UEGameProfile.Current.Game != UEEdition.Game.HP2) { DecodeQuaternion(key, out x, out y, out z, out w); return; }
+            float[] d = UEWorldFrameProducer.FastMathWindow ? _decoded24Hp2 ??= DecodeAllHp2(QuaternionKeys, pc24: true)
+                : _decodedHp2 ??= DecodeAllHp2(QuaternionKeys, pc24: false);
+            int i = checked(key * 4);
+            x = d[i]; y = d[i + 1]; z = d[i + 2]; w = d[i + 3];
+        }
+
+        static float[] DecodeAllHp2(short[] keys, bool pc24)
+        {
+            var d = new float[keys.Length / 3 * 4];
+            X87Ext R(X87Ext v) => pc24 ? X87Ext.Round24(v) : X87Ext.Round64(v);
+            X87Ext Sin(short k) => UEX87Transcendental.Fsin(pc24 ? X87Ext.From(k * QuatKeyScale) : X87Ext.From(k * (double)QuatKeyScale));
+            for (int k = 0, o = 0; k + 2 < keys.Length; k += 3, o += 4)
+            {
+                X87Ext sx = Sin(keys[k]), sy = Sin(keys[k + 1]), sz = Sin(keys[k + 2]);
+                float x = sx.ToFloat();
+                X87Ext t = R(R(R(X87Ext.From(1f) - R(X87Ext.From(x) * X87Ext.From(x))) - R(sy * sy)) - R(sz * sz));
+                d[o] = x; d[o + 1] = sy.ToFloat(); d[o + 2] = sz.ToFloat();
+                d[o + 3] = pc24 ? MathF.Sqrt(t.Sign > 0 ? t.ToFloat() : 0f) : (float)Math.Sqrt(t.Sign > 0 ? t.ToDouble() : 0.0);
+            }
+            return d;
+        }
 
         // FAnimVec::Quat sets no control word: GetFrame's full ApplyAnim and GetRenderBoundingBox's root-only one run
         // inside the render window (UEWorldFrameProducer.FastMathWindow), where the chain is PC24 (DecodeAll24).

@@ -9,7 +9,8 @@ namespace HP1.UEScript
     // (the editor does not bake them) but from the LEAF it currently stands in (Model->Leaves[Region.iLeaf].iPermeating ->
     // Model->Lights), with the face in its CURRENT pose. Selection (MoverMode3.Select) and fill (MoverMode3.FillSurface)
     // are verified against shipped (checked against the real bodies); this only applies them:
-    //   * face: brush B/U/V/N (FPoly) through BrushToWorldCoords(mover) — same coordinates as the vertices;
+    //   * face: the tracker surface the caller hands SetupForSurf (UEMoverLightmaps.TrackerFace, Render.dll
+    //     0x10b25c84..0x10b25d42) — ABrush::BuildCoords + FPoly::Transform of the brush polygon, any MainScale/PostScale/sheer;
     //   * seed — ambient of the mover's CURRENT zone; no shadow mask (NoShadowMask, as in shipped);
     //   * tile — same format as level lightmaps (LevelSurfLightmapRuntime.Tile); tile zone = atlas slot zone.
     // A mover is recomputed only when its pose/leaf/zone/leaf lights or a light's per-frame effect changes.
@@ -19,7 +20,7 @@ namespace HP1.UEScript
     // after the leaf records, in list order. With no mover leaf (iLeaf == -1) the whole branch is skipped.
     public sealed class MoverMode3Lightmaps
     {
-        sealed class Face { public int LightMap, Zone, TrackerSurf; public UEVector B, U, V, N; public SurfLightmap.Map Map; }
+        sealed class Face { public int LightMap, Zone, TrackerSurf; public SurfLightmap.Map Map; }
         sealed class Entry { public UEObject Actor; public List<Face> Faces = new(); public ulong Key; }
 
         readonly UELevelRuntime _rt;
@@ -53,8 +54,6 @@ namespace HP1.UEScript
                     e.Faces.Add(new Face
                     {
                         LightMap = s.LightMap, Zone = zones[s.LightMap].Length > 0 ? zones[s.LightMap][0] : -1,
-                        B = geo.LocalOfPoint[s.PBase], U = geo.LocalOfVector[s.VTextureU],
-                        V = geo.LocalOfVector[s.VTextureV], N = geo.LocalOfVector[s.VNormal],
                         Map = LevelSurfLightmap.MapOf(in rec),
                         TrackerSurf = trackerSurfOf(m.Actor, geo.PolyOfSurf[g.Nodes[n].Surf]),
                     });
@@ -64,6 +63,7 @@ namespace HP1.UEScript
         }
 
         // Tiles of this frame (changed movers only). The list is owned by this object until the next call.
+        // Original: Render.dll not exported: FUN_10b077f0 FLightManager::SetupForSurf [HP1 0x10B077F0] — slot 3 of the FLightManager vtable 0x10b386d4 (unwind string "FLightManager::SetupForSurf") (the mover branch 0x10b07a52..0x10b07b4f)
         public IReadOnlyList<LevelSurfLightmapRuntime.Tile> Update(WorldFrame frame, SurfLightmap.FrameFx fx,
                                                                     IReadOnlyDictionary<int, int[]> surfDyn)
         {
@@ -118,16 +118,13 @@ namespace HP1.UEScript
                 ulong key = KeyOf(in me, fx, frame.Tick);
                 if (key == e.Key) continue;
                 e.Key = key;
-                BrushCoords c = _rt.BrushToWorldCoords(e.Actor);
                 (int h, int s, int b) amb = _rt.ZoneAmbientHSB(me.ZoneNumber);
                 UEVector seed = SurfLightmap.AmbientSeed(amb.h, amb.s, amb.b);
                 for (int fi = 0; fi < e.Faces.Count; fi++)
                 {
                     Face f = e.Faces[fi];
-                    var sf = new SurfLightmap.Surface
-                    {
-                        B = c.TransformPoint(f.B), U = c.TransformVector(f.U), V = c.TransformVector(f.V), N = c.TransformVector(f.N),
-                    };
+                    if (f.TrackerSurf < 0 || _rt.Bsp?.Tracker is null) continue;   // not in the level model: never drawn
+                    SurfLightmap.Surface sf = UEMoverLightmaps.TrackerFace(_rt.Bsp, f.TrackerSurf);
                     int rs = 0, rsp = 0, c3 = 0, rd = 0;
                     MoverMode3.Select(_leaf, in sf.B, in sf.N, specialLit,
                         (fx ?? throw new InvalidOperationException("mode-3 mover lightmap: no FrameFx (UClient.NoDynamicLights)")).NoDynamicLights,

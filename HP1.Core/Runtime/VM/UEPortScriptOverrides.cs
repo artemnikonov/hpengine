@@ -77,7 +77,10 @@ namespace HP1.UEScript
         // original — the original function body (bytecode), for before/after overrides.
         public delegate object Handler(UEInterpreter interp, UEObject self, object[] args, Func<object> original);
 
-        static readonly (string Class, string Function, Handler Body)[] Table =
+        // The overrides of HP1's scripts. They bind by owner name + function name, and HP2's hgame.u has classes of the
+        // same names (FEOptionsPage, FEBook, HPMenuOption*, ...) with different bytecode, so the table is the HP1 game
+        // profile's (UEGameProfile.Overrides); HP2's is HP2Table below.
+        internal static readonly (string Class, string Function, Handler Body)[] HP1Table =
         {
             ("FEOptionsPage", "IsSupportedResolution", (interp, self, args, original) => true),
             ("HPMenuOptionComboList", "BeforePaint", ComboListBeforePaint),
@@ -98,6 +101,49 @@ namespace HP1.UEScript
             ("FEBook", "KeyEvent", KeySkipsSplash),
             ("FEStoryBookPage", "KeyEvent", SpaceSkipsStoryPage),
         };
+
+        // The overrides of HP2's scripts (hgame.u), by author decision 2026-11-16 (NOT ORIGINAL): FESoundVideoPage's
+        // "Video" column as HP1's — the resolution list offers every device mode (rebuilt after the shipped body: its filter
+        // IsSupportedResolution keeps 640x480/800x600/1024x768, and its split loop adds only tokens followed by a space, so
+        // the last GetRes mode — the largest — never shows; GetRes ends without one [HP2 WinDrv: LeftChop of the trailing
+        // space], the windowed constant too) and Color Depth becomes Display Mode: Fullscreen / Windowed (the
+        // port's ToggleFullscreen + StartupFullscreen; Game.exe's launcher dialog had windowed and resolution, HPEngine's HP2
+        // launcher has no Video page). HP2's page differs from HP1's FEOptionsPage: its own label control (ColorDepthLabel)
+        // names the frame, it has no BeforePaint (UWindowWindow's is empty, and the interpreter skips empty bodies before overrides), no Object Detail combo (a slider that
+        // sends MLOD, shipped), and its LoadAvailableSettings shows the saved Windowed*/Fullscreen* size per IsFullscreen.
+        // HP2 (author decision 2026-11-16: every HP1 improvement applies to HP2; NOT ORIGINAL). The same handlers where
+        // HP2's hgame.u has the same function with the same defect (read side by side in the --hp2-script-text dump;
+        // inventory the maintainer's notes hp2_improvements_parity.md):
+        //   HPMenuOptionComboList.BeforePaint — HP1's body but MaxWidth 187 / small height 61 / hgame.Icons: no scrolling;
+        //   UWindowVScrollBar.Paint — the parchment bar of those lists (HP2's textures, ScrollBarPaint);
+        //   HPMenuOptionHSlider/CheckBox.BeforePaint — neither sets C.Font either (the foreign font);
+        //   FEInputPage.LocalizeStrings — HPMenu.int lacks Localized_kn_ 0, 91-93, 112-121 (F1-F10), 236/237; the Controls
+        //   page is FEInputPage (KEYBINDING for 255 keys into BoundKey1/2 as FEOptionsPage), so LoadExistingKeys, ProcessKey
+        //   and the device check of BeforePaint are D-75's;
+        //   harry.KeyDownEvent — the cheat matcher (ChrisMode, EliJump, GoyleMode, ...; D-77);
+        //   FEBook.KeyEvent — Shift+F7 toggles HPConsole.bDebugMode for every player in HP2 (D-77; Hp2KeyEventNoDebugToggle).
+        // Not taken (HP2 has no such defect or function): FEBook.ChangePage (HP2's FEInputPage/FESoundVideoPage.HideWindow
+        // close their lists: CloseUpWithNoSound), killbean (HProp.FlyToNewPosition clamps the divisor to 1),
+        // SneakNorris (no script class), FEStoryBookPage, the splash skip (HP2 FEBook.bShowSplash is never set). The
+        // Options/Video page's rows are the first comment's (line hp2/ingame-video).
+        internal static readonly (string Class, string Function, Handler Body)[] HP2Table =
+        {
+            ("FESoundVideoPage", "LoadAvailableSettings", Hp2VideoLoadSettings),
+            ("FESoundVideoPage", "SettingsChanged", OptionsSettingsChanged),
+            ("UWindowWindow", "PaintClients", Hp2VideoPaintClients),
+            ("HPMenuOptionComboList", "BeforePaint", ComboListBeforePaint),
+            ("UWindowVScrollBar", "Paint", ScrollBarPaint),
+            ("HPMenuOptionHSlider", "BeforePaint", OwnFontBeforePaint),
+            ("HPMenuOptionCheckBox", "BeforePaint", OwnFontBeforePaint),
+            ("FEInputPage", "LocalizeStrings", OptionsLocalizeKeyNames),
+            ("FEInputPage", "LoadExistingKeys", OptionsLoadKeys),
+            ("FEInputPage", "ProcessKey", OptionsProcessKey),
+            ("FEInputPage", "BeforePaint", OptionsBeforePaint),
+            ("harry", "KeyDownEvent", (interp, self, args, original) => null),
+            ("FEBook", "KeyEvent", Hp2KeyEventNoDebugToggle),
+        };
+
+        static (string Class, string Function, Handler Body)[] Table => UEGameProfile.Current.Overrides;
 
         // The replaced functions by name (owner class or state, function), for the binding census of a mod's scripts
         // (HP1_PROBE_OVERRIDES, audit/mods_saves_e2e.sh).
@@ -155,7 +201,7 @@ namespace HP1.UEScript
         static void Fill(UEInterpreter interp, UEObject combo, string text, params (string Show, string Value)[] items)
         {
             Call(interp, combo, "Clear");
-            Call(interp, combo, "SetText", text);
+            if (text is not null) Call(interp, combo, "SetText", text);   // null: the page labels the frame with its own control (HP2)
             foreach (var (show, value) in items) Call(interp, combo, "AddItem", show, value, 0);
         }
 
@@ -246,9 +292,9 @@ namespace HP1.UEScript
         // name, so when a mod's package brings its own body of a target, the override still replaces (or wraps) it and
         // the mod's change is lost without a word. Every function of the install's System/*.u an override binds to
         // (Lookup's rule: owner class or state name + function name, read from the export tables, so packages a level
-        // loads later are covered at start) is hashed — FNV-1a 64 of the function export's serialized bytes — and compared
-        // with the hashes of the supported shipped editions. The bytes hold name and object indices of the package, so
-        // a package recompiled with the function's source untouched is reported too: the line says "differs".
+        // loads later are covered at start) is hashed — FNV-1a 64 of its compared form (FunctionForm: the bytecode with
+        // references resolved to names, flags, parameters; not the source position) — and compared with the hashes of
+        // the supported shipped editions, so a package recompiled with the function untouched is not reported.
         // The table is printed by the tool (HP1_PROBE_OVERRIDES=1 on an unmodified install: `override_hash` lines);
         // one row per edition (UEEdition.DataSet name) and bound function. A recognised install is compared with ITS OWN
         // edition's rows only (UEEdition.OfSystem of the scripts directory); an unrecognised one (a mod's scripts, another
@@ -257,97 +303,139 @@ namespace HP1.UEScript
         // (ReleaseChangedTargets). No mod or package is named in the comparison.
         static readonly (string Edition, string Target, string Hash)[] ShippedScriptHashes =
         {
-            ("US153", "baseHarry.KeyDownEvent", "2dca573cf4247aa6"),
-            ("US153", "FEBook.ChangePage", "02faaf06b85f0bf3"),
-            ("US153", "FEBook.KeyEvent", "9451dcb62d05881b"),
-            ("US153", "FEStoryBookPage.KeyEvent", "98eda0779eaf2c47"),
-            ("US153", "HPMenuOptionHSlider.BeforePaint", "5aeaba619d63d417"),
-            ("US153", "HPMenuOptionComboList.BeforePaint", "7be99385862dd9e9"),
-            ("US153", "HPMenuOptionCheckBox.BeforePaint", "48854604846da0e2"),
-            ("US153", "FEOptionsPage.LocalizeStrings", "7b233e839d576d8c"),
-            ("US153", "FEOptionsPage.BeforePaint", "e7f3c9dd01980044"),
-            ("US153", "FEOptionsPage.IsSupportedResolution", "d42530f960ec36aa"),
-            ("US153", "FEOptionsPage.LoadAvailableSettings", "bf8419e535a3aeb7"),
-            ("US153", "FEOptionsPage.LoadExistingKeys", "fa03cc7c7f241c46"),
-            ("US153", "FEOptionsPage.SettingsChanged", "de4517f6baf72710"),
-            ("US153", "FEOptionsPage.ObjectDetailChanged", "cfd5d2ba5cb523e5"),
-            ("US153", "FEOptionsPage.ProcessKey", "c8951d00f721a0fd"),
-            ("US153", "killbean.Tick", "cca4cf592845b483"),
-            ("US153", "stateJump.HitWall", "a28aa1dbf5d1063e"),
-            ("US153", "UWindowVScrollBar.Paint", "56f44329c8cb3830"),
-            ("UK11", "baseHarry.KeyDownEvent", "5983754497e433dc"),
-            ("UK11", "FEBook.ChangePage", "d526a85646ab7006"),
-            ("UK11", "FEBook.KeyEvent", "c91de138349618ae"),
-            ("UK11", "FEStoryBookPage.KeyEvent", "0ee4c8c77d03e41b"),
-            ("UK11", "HPMenuOptionHSlider.BeforePaint", "212941ed235cc1ca"),
-            ("UK11", "HPMenuOptionComboList.BeforePaint", "00decb0f6932c6a3"),
-            ("UK11", "FEOptionsPage.LocalizeStrings", "bc1276c975b6ec1a"),
-            ("UK11", "FEOptionsPage.BeforePaint", "21bc3101db5545bd"),
-            ("UK11", "FEOptionsPage.LoadAvailableSettings", "27970778c0fc59f0"),
-            ("UK11", "FEOptionsPage.LoadExistingKeys", "9539e6dfb65776f3"),
-            ("UK11", "FEOptionsPage.SettingsChanged", "d8d437cc2f3aad3b"),
-            ("UK11", "FEOptionsPage.ObjectDetailChanged", "4cb56038da2ed519"),
-            ("UK11", "FEOptionsPage.ProcessKey", "f3d8fafd104c95ef"),
-            ("UK11", "HPMenuOptionCheckBox.BeforePaint", "b94757d1b2d43dbe"),
-            ("UK11", "killbean.Tick", "68d35a7ddb17c291"),
-            ("UK11", "stateJump.HitWall", "80d2e328157069a3"),
-            ("UK11", "UWindowVScrollBar.Paint", "327578661fd5e55d"),
-            ("RU_EA", "baseHarry.KeyDownEvent", "ed0bb342b3702181"),
-            ("RU_EA", "FEBook.ChangePage", "522e2a93103c1a70"),
-            ("RU_EA", "FEBook.KeyEvent", "df5fb25e8b5c4b9f"),
-            ("RU_EA", "FEStoryBookPage.KeyEvent", "9a3fd372e2a8b466"),
-            ("RU_EA", "HPMenuOptionHSlider.BeforePaint", "03cdfa6683bc9c33"),
-            ("RU_EA", "HPMenuOptionComboList.BeforePaint", "82f66de799409bda"),
-            ("RU_EA", "HPMenuOptionCheckBox.BeforePaint", "7215f48695050439"),
-            ("RU_EA", "FEOptionsPage.LocalizeStrings", "bceb6a75b6686442"),
-            ("RU_EA", "FEOptionsPage.BeforePaint", "33895efc572bbb61"),
-            ("RU_EA", "FEOptionsPage.IsSupportedResolution", "fd2aa08b42009dc6"),
-            ("RU_EA", "FEOptionsPage.LoadAvailableSettings", "96073468ff6cd97d"),
-            ("RU_EA", "FEOptionsPage.LoadExistingKeys", "91b81bb226fc8f93"),
-            ("RU_EA", "FEOptionsPage.SettingsChanged", "adedfabd4cd41d47"),
-            ("RU_EA", "FEOptionsPage.ObjectDetailChanged", "754f558bd12ac42f"),
-            ("RU_EA", "FEOptionsPage.ProcessKey", "51f31751bceed617"),
-            ("RU_EA", "killbean.Tick", "cca4cf592845b483"),
-            ("RU_EA", "stateJump.HitWall", "a28aa1dbf5d1063e"),
-            ("RU_EA", "UWindowVScrollBar.Paint", "685ff3a4215700b7"),
-            // R4 modded EN re-release (its v3 and v4 share the .u files)
-            ("MODDED_EN", "baseHarry.KeyDownEvent", "810ed15275c339ff"),
-            ("MODDED_EN", "HPMenuOptionCheckBox.BeforePaint", "a3293db5ea044f29"),
-            ("MODDED_EN", "FEBook.ChangePage", "50566f0e2f564ee8"),
-            ("MODDED_EN", "FEBook.KeyEvent", "a878bfe5037d9a81"),
-            ("MODDED_EN", "FEStoryBookPage.KeyEvent", "f31bbb9eba6aa361"),
-            ("MODDED_EN", "HPMenuOptionComboList.BeforePaint", "1036c158180952d1"),
-            ("MODDED_EN", "HPMenuOptionHSlider.BeforePaint", "b5c8247745630e4e"),
-            ("MODDED_EN", "FEOptionsPage.LocalizeStrings", "07e3be4e5d0a7ccd"),
-            ("MODDED_EN", "FEOptionsPage.BeforePaint", "b3d9090834f627b8"),
-            ("MODDED_EN", "FEOptionsPage.IsSupportedResolution", "18ffb3bc1646f699"),
-            ("MODDED_EN", "FEOptionsPage.LoadAvailableSettings", "98c2bdc778968f46"),
-            ("MODDED_EN", "FEOptionsPage.LoadExistingKeys", "26427865ac02bc03"),
-            ("MODDED_EN", "FEOptionsPage.SettingsChanged", "3d12840bd036d800"),
-            ("MODDED_EN", "FEOptionsPage.ObjectDetailChanged", "1b96a3dd49ee7bde"),
-            ("MODDED_EN", "FEOptionsPage.ProcessKey", "f4144a7b7b308684"),
-            ("MODDED_EN", "killbean.Tick", "cca4cf592845b483"),
-            ("MODDED_EN", "stateJump.HitWall", "1523a8efa493168f"),
-            ("MODDED_EN", "UWindowVScrollBar.Paint", "56f44329c8cb3830"),
+            ("US153", "baseHarry.KeyDownEvent", "bea2b0e874257aae"),
+            ("US153", "FEBook.ChangePage", "347c82b260c97a42"),
+            ("US153", "FEBook.KeyEvent", "96a7f23e710f65e8"),
+            ("US153", "FEStoryBookPage.KeyEvent", "85aa17df40b5f021"),
+            ("US153", "HPMenuOptionHSlider.BeforePaint", "b9d30f390599db05"),
+            ("US153", "HPMenuOptionComboList.BeforePaint", "fe6e3e900e8a42bb"),
+            ("US153", "HPMenuOptionCheckBox.BeforePaint", "640ad1d86e3e9c29"),
+            ("US153", "FEOptionsPage.LocalizeStrings", "fbdf0776c4750f3d"),
+            ("US153", "FEOptionsPage.BeforePaint", "a2f2c84cee974ed3"),
+            ("US153", "FEOptionsPage.IsSupportedResolution", "9e78cc9cd320187d"),
+            ("US153", "FEOptionsPage.LoadAvailableSettings", "6face598af5e3fab"),
+            ("US153", "FEOptionsPage.LoadExistingKeys", "abf07bb1b46e42b5"),
+            ("US153", "FEOptionsPage.SettingsChanged", "7004e9f5fc323487"),
+            ("US153", "FEOptionsPage.ObjectDetailChanged", "80b85efbe1882f29"),
+            ("US153", "FEOptionsPage.ProcessKey", "c3c6be9e2d597dfe"),
+            ("US153", "killbean.Tick", "7705e1c7b0f236c0"),
+            ("US153", "stateJump.HitWall", "2658214266400307"),
+            ("US153", "UWindowVScrollBar.Paint", "81d8b2a37bc6ba69"),
+            ("UK11", "baseHarry.KeyDownEvent", "bea2b0e874257aae"),
+            ("UK11", "FEBook.ChangePage", "347c82b260c97a42"),
+            ("UK11", "FEBook.KeyEvent", "96a7f23e710f65e8"),
+            ("UK11", "FEStoryBookPage.KeyEvent", "85aa17df40b5f021"),
+            ("UK11", "HPMenuOptionHSlider.BeforePaint", "b9d30f390599db05"),
+            ("UK11", "HPMenuOptionComboList.BeforePaint", "fe6e3e900e8a42bb"),
+            ("UK11", "FEOptionsPage.LocalizeStrings", "fbdf0776c4750f3d"),
+            ("UK11", "FEOptionsPage.BeforePaint", "a2f2c84cee974ed3"),
+            ("UK11", "FEOptionsPage.LoadAvailableSettings", "5f995447666786fa"),
+            ("UK11", "FEOptionsPage.LoadExistingKeys", "abf07bb1b46e42b5"),
+            ("UK11", "FEOptionsPage.SettingsChanged", "7004e9f5fc323487"),
+            ("UK11", "FEOptionsPage.ObjectDetailChanged", "80b85efbe1882f29"),
+            ("UK11", "FEOptionsPage.ProcessKey", "c3c6be9e2d597dfe"),
+            ("UK11", "HPMenuOptionCheckBox.BeforePaint", "640ad1d86e3e9c29"),
+            ("UK11", "killbean.Tick", "7705e1c7b0f236c0"),
+            ("UK11", "stateJump.HitWall", "2658214266400307"),
+            ("UK11", "UWindowVScrollBar.Paint", "81d8b2a37bc6ba69"),
+            ("RU_EA", "baseHarry.KeyDownEvent", "bea2b0e874257aae"),
+            ("RU_EA", "FEBook.ChangePage", "347c82b260c97a42"),
+            ("RU_EA", "FEBook.KeyEvent", "96a7f23e710f65e8"),
+            ("RU_EA", "FEStoryBookPage.KeyEvent", "85aa17df40b5f021"),
+            ("RU_EA", "HPMenuOptionHSlider.BeforePaint", "b9d30f390599db05"),
+            ("RU_EA", "HPMenuOptionComboList.BeforePaint", "fe6e3e900e8a42bb"),
+            ("RU_EA", "HPMenuOptionCheckBox.BeforePaint", "640ad1d86e3e9c29"),
+            ("RU_EA", "FEOptionsPage.LocalizeStrings", "fbdf0776c4750f3d"),
+            ("RU_EA", "FEOptionsPage.BeforePaint", "a2f2c84cee974ed3"),
+            ("RU_EA", "FEOptionsPage.IsSupportedResolution", "9e78cc9cd320187d"),
+            ("RU_EA", "FEOptionsPage.LoadAvailableSettings", "6face598af5e3fab"),
+            ("RU_EA", "FEOptionsPage.LoadExistingKeys", "abf07bb1b46e42b5"),
+            ("RU_EA", "FEOptionsPage.SettingsChanged", "7004e9f5fc323487"),
+            ("RU_EA", "FEOptionsPage.ObjectDetailChanged", "80b85efbe1882f29"),
+            ("RU_EA", "FEOptionsPage.ProcessKey", "c3c6be9e2d597dfe"),
+            ("RU_EA", "killbean.Tick", "7705e1c7b0f236c0"),
+            ("RU_EA", "stateJump.HitWall", "2658214266400307"),
+            ("RU_EA", "UWindowVScrollBar.Paint", "81d8b2a37bc6ba69"),
+            // R4 modded EN re-release (its v3 and v4 share the .u files): its bound functions are the US ones recompiled, so
+            // the compared form gives the US153 hashes (its raw export bytes differed for 16 of them)
+            ("MODDED_EN", "baseHarry.KeyDownEvent", "bea2b0e874257aae"),
+            ("MODDED_EN", "HPMenuOptionCheckBox.BeforePaint", "640ad1d86e3e9c29"),
+            ("MODDED_EN", "FEBook.ChangePage", "347c82b260c97a42"),
+            ("MODDED_EN", "FEBook.KeyEvent", "96a7f23e710f65e8"),
+            ("MODDED_EN", "FEStoryBookPage.KeyEvent", "85aa17df40b5f021"),
+            ("MODDED_EN", "HPMenuOptionComboList.BeforePaint", "fe6e3e900e8a42bb"),
+            ("MODDED_EN", "HPMenuOptionHSlider.BeforePaint", "b9d30f390599db05"),
+            ("MODDED_EN", "FEOptionsPage.LocalizeStrings", "fbdf0776c4750f3d"),
+            ("MODDED_EN", "FEOptionsPage.BeforePaint", "a2f2c84cee974ed3"),
+            ("MODDED_EN", "FEOptionsPage.IsSupportedResolution", "9e78cc9cd320187d"),
+            ("MODDED_EN", "FEOptionsPage.LoadAvailableSettings", "6face598af5e3fab"),
+            ("MODDED_EN", "FEOptionsPage.LoadExistingKeys", "abf07bb1b46e42b5"),
+            ("MODDED_EN", "FEOptionsPage.SettingsChanged", "7004e9f5fc323487"),
+            ("MODDED_EN", "FEOptionsPage.ObjectDetailChanged", "80b85efbe1882f29"),
+            ("MODDED_EN", "FEOptionsPage.ProcessKey", "c3c6be9e2d597dfe"),
+            ("MODDED_EN", "killbean.Tick", "7705e1c7b0f236c0"),
+            ("MODDED_EN", "stateJump.HitWall", "2658214266400307"),
+            ("MODDED_EN", "UWindowVScrollBar.Paint", "81d8b2a37bc6ba69"),
             // R5 City disc: only HPBase.u of its scripts differs from US 1.53, and none of the bound functions in it
-            ("CITY_PL", "baseHarry.KeyDownEvent", "2dca573cf4247aa6"),
-            ("CITY_PL", "FEBook.ChangePage", "02faaf06b85f0bf3"),
-            ("CITY_PL", "FEBook.KeyEvent", "9451dcb62d05881b"),
-            ("CITY_PL", "FEStoryBookPage.KeyEvent", "98eda0779eaf2c47"),   // HPMenu.u byte-identical to US (sha1 3d9aa801)
-            ("CITY_PL", "HPMenuOptionHSlider.BeforePaint", "5aeaba619d63d417"),
-            ("CITY_PL", "HPMenuOptionComboList.BeforePaint", "7be99385862dd9e9"),
-            ("CITY_PL", "HPMenuOptionCheckBox.BeforePaint", "48854604846da0e2"),
-            ("CITY_PL", "FEOptionsPage.LocalizeStrings", "7b233e839d576d8c"),
-            ("CITY_PL", "FEOptionsPage.BeforePaint", "e7f3c9dd01980044"),
-            ("CITY_PL", "FEOptionsPage.IsSupportedResolution", "d42530f960ec36aa"),
-            ("CITY_PL", "FEOptionsPage.LoadAvailableSettings", "bf8419e535a3aeb7"),
-            ("CITY_PL", "FEOptionsPage.LoadExistingKeys", "fa03cc7c7f241c46"),
-            ("CITY_PL", "FEOptionsPage.SettingsChanged", "de4517f6baf72710"),
-            ("CITY_PL", "FEOptionsPage.ObjectDetailChanged", "cfd5d2ba5cb523e5"),
-            ("CITY_PL", "FEOptionsPage.ProcessKey", "c8951d00f721a0fd"),
-            ("CITY_PL", "killbean.Tick", "cca4cf592845b483"),
-            ("CITY_PL", "stateJump.HitWall", "a28aa1dbf5d1063e"),
-            ("CITY_PL", "UWindowVScrollBar.Paint", "56f44329c8cb3830"),
+            ("CITY_PL", "baseHarry.KeyDownEvent", "bea2b0e874257aae"),
+            ("CITY_PL", "FEBook.ChangePage", "347c82b260c97a42"),
+            ("CITY_PL", "FEBook.KeyEvent", "96a7f23e710f65e8"),
+            ("CITY_PL", "FEStoryBookPage.KeyEvent", "85aa17df40b5f021"),   // HPMenu.u byte-identical to US (sha1 3d9aa801)
+            ("CITY_PL", "HPMenuOptionHSlider.BeforePaint", "b9d30f390599db05"),
+            ("CITY_PL", "HPMenuOptionComboList.BeforePaint", "fe6e3e900e8a42bb"),
+            ("CITY_PL", "HPMenuOptionCheckBox.BeforePaint", "640ad1d86e3e9c29"),
+            ("CITY_PL", "FEOptionsPage.LocalizeStrings", "fbdf0776c4750f3d"),
+            ("CITY_PL", "FEOptionsPage.BeforePaint", "a2f2c84cee974ed3"),
+            ("CITY_PL", "FEOptionsPage.IsSupportedResolution", "9e78cc9cd320187d"),
+            ("CITY_PL", "FEOptionsPage.LoadAvailableSettings", "6face598af5e3fab"),
+            ("CITY_PL", "FEOptionsPage.LoadExistingKeys", "abf07bb1b46e42b5"),
+            ("CITY_PL", "FEOptionsPage.SettingsChanged", "7004e9f5fc323487"),
+            ("CITY_PL", "FEOptionsPage.ObjectDetailChanged", "80b85efbe1882f29"),
+            ("CITY_PL", "FEOptionsPage.ProcessKey", "c3c6be9e2d597dfe"),
+            ("CITY_PL", "killbean.Tick", "7705e1c7b0f236c0"),
+            ("CITY_PL", "stateJump.HitWall", "2658214266400307"),
+            ("CITY_PL", "UWindowVScrollBar.Paint", "81d8b2a37bc6ba69"),
+            // HP2 (the HP2Table targets; every HP2 release has the same functions: `override_hash` lines of
+            // --hp2-improvements with HP2IMPR_OTHER_SYSTEM).
+            ("HP2_EN", "FEBook.KeyEvent", "4938db64bbcd5172"),
+            ("HP2_EN", "FEInputPage.BeforePaint", "355070a3b24bc824"),
+            ("HP2_EN", "FEInputPage.LoadExistingKeys", "b4778f4a3cfdd758"),
+            ("HP2_EN", "FEInputPage.LocalizeStrings", "735bb7b13e5f428b"),
+            ("HP2_EN", "FEInputPage.ProcessKey", "6508a442387d311d"),
+            ("HP2_EN", "HPMenuOptionCheckBox.BeforePaint", "634f695fbf467320"),
+            ("HP2_EN", "HPMenuOptionComboList.BeforePaint", "090ab08587f244e2"),
+            ("HP2_EN", "HPMenuOptionHSlider.BeforePaint", "78a32b08095ea006"),
+            ("HP2_EN", "UWindowVScrollBar.Paint", "81d8b2a37bc6ba69"),
+            ("HP2_EN", "harry.KeyDownEvent", "d18c80144eeb7831"),
+            ("HP2_EN", "FESoundVideoPage.LoadAvailableSettings", "c6660162f025d6fe"),
+            ("HP2_EN", "FESoundVideoPage.SettingsChanged", "64b6d4f7b0eac176"),
+            ("HP2_EN", "UWindowWindow.PaintClients", "16a84e55917cbaf8"),
+            ("HP2_RU_EA", "FEBook.KeyEvent", "4938db64bbcd5172"),
+            ("HP2_RU_EA", "FEInputPage.BeforePaint", "355070a3b24bc824"),
+            ("HP2_RU_EA", "FEInputPage.LoadExistingKeys", "b4778f4a3cfdd758"),
+            ("HP2_RU_EA", "FEInputPage.LocalizeStrings", "735bb7b13e5f428b"),
+            ("HP2_RU_EA", "FEInputPage.ProcessKey", "6508a442387d311d"),
+            ("HP2_RU_EA", "HPMenuOptionCheckBox.BeforePaint", "634f695fbf467320"),
+            ("HP2_RU_EA", "HPMenuOptionComboList.BeforePaint", "090ab08587f244e2"),
+            ("HP2_RU_EA", "HPMenuOptionHSlider.BeforePaint", "78a32b08095ea006"),
+            ("HP2_RU_EA", "UWindowVScrollBar.Paint", "81d8b2a37bc6ba69"),
+            ("HP2_RU_EA", "harry.KeyDownEvent", "d18c80144eeb7831"),
+            ("HP2_RU_EA", "FESoundVideoPage.LoadAvailableSettings", "c6660162f025d6fe"),
+            ("HP2_RU_EA", "FESoundVideoPage.SettingsChanged", "64b6d4f7b0eac176"),
+            ("HP2_RU_EA", "UWindowWindow.PaintClients", "16a84e55917cbaf8"),
+            ("HP2_MODIFIED", "FEBook.KeyEvent", "4938db64bbcd5172"),
+            ("HP2_MODIFIED", "FEInputPage.BeforePaint", "355070a3b24bc824"),
+            ("HP2_MODIFIED", "FEInputPage.LoadExistingKeys", "b4778f4a3cfdd758"),
+            ("HP2_MODIFIED", "FEInputPage.LocalizeStrings", "735bb7b13e5f428b"),
+            ("HP2_MODIFIED", "FEInputPage.ProcessKey", "6508a442387d311d"),
+            ("HP2_MODIFIED", "HPMenuOptionCheckBox.BeforePaint", "634f695fbf467320"),
+            ("HP2_MODIFIED", "HPMenuOptionComboList.BeforePaint", "090ab08587f244e2"),
+            ("HP2_MODIFIED", "HPMenuOptionHSlider.BeforePaint", "78a32b08095ea006"),
+            ("HP2_MODIFIED", "UWindowVScrollBar.Paint", "81d8b2a37bc6ba69"),
+            ("HP2_MODIFIED", "harry.KeyDownEvent", "d18c80144eeb7831"),
+            ("HP2_MODIFIED", "FESoundVideoPage.LoadAvailableSettings", "c6660162f025d6fe"),
+            ("HP2_MODIFIED", "FESoundVideoPage.SettingsChanged", "64b6d4f7b0eac176"),
+            ("HP2_MODIFIED", "UWindowWindow.PaintClients", "16a84e55917cbaf8"),
         };
 
         // systemDir: the scripts to read; null = the directory of the loaded scripts (the game). A package that cannot be
@@ -367,7 +455,7 @@ namespace HP1.UEScript
                     if (string.Equals(l.FullPackageName, path, StringComparison.OrdinalIgnoreCase)) pkg = l;
                 try
                 {
-                    pkg ??= own = UnrealLoader.LoadPackage(path, System.IO.FileAccess.Read);
+                    pkg ??= own = HP1.UEScript.UEPackageOpen.Load(path, System.IO.FileAccess.Read);
                     System.IO.FileStream file = null;   // an own handle: the package's stream may be in use by a reader
                     try
                     {
@@ -381,8 +469,12 @@ namespace HP1.UEScript
                             file ??= System.IO.File.OpenRead(path);
                             file.Seek(e.SerialOffset, System.IO.SeekOrigin.Begin);
                             file.ReadExactly(bytes);
+                            byte[] form;
+                            try { form = System.Text.Encoding.UTF8.GetBytes(FunctionForm.Of(pkg, e, bytes, file)); }
+                            catch (Exception x) when (x is System.IO.InvalidDataException or IndexOutOfRangeException or ArgumentException)
+                            { form = bytes; }   // not decodable: the raw bytes match no pinned row, so the function is reported
                             ulong h = 14695981039346656037UL;                 // FNV-1a 64: change detection, not identity
-                            foreach (byte x in bytes) h = (h ^ x) * 1099511628211UL;
+                            foreach (byte x in form) h = (h ^ x) * 1099511628211UL;
                             hashes.Add((cls, function, h.ToString("x16")));
                         }
                     }
@@ -392,6 +484,122 @@ namespace HP1.UEScript
                 finally { own?.Dispose(); }
             }
             return hashes;
+        }
+
+        // The compared form of a function export (0.4.0, author 2026-11-15: a package recompiled with the function
+        // untouched is not reported). The export's bytes hold the package's own name and object indices and the source
+        // position, so the raw bytes differed for every recompiled function (9 of the Unofficial Widescreen Patch's 14
+        // HPMenu targets). The form: SuperField, ScriptSize, the bytecode token by token (UE1 token set, package version
+        // 64-99) with every object reference as its full path and every name as its text, the function's iNative /
+        // OperPrecedence / FunctionFlags (/ RepOffset), and each parameter and local in its Children/Next order (class,
+        // name, ArrayDim, PropertyFlags, Category (/ RepOffset), its type's references). Left out: the function's own
+        // Next, ScriptText, FriendlyName, Line, TextPos (not behaviour). Same rule, written separately, in
+        // audit/mod_compat_override_expect.py (the judge of audit/mod_compat_e2e.sh O). A token stream that does not end
+        // exactly at ScriptSize (references count 4 bytes in memory) throws: the caller hashes the raw bytes instead, which
+        // match no pinned row, so such a function is reported.
+        sealed class FunctionForm
+        {
+            readonly UnrealPackage _pkg; readonly byte[] _b; int _p, _mem; readonly System.Text.StringBuilder _s = new();
+            FunctionForm(UnrealPackage pkg, byte[] bytes) { _pkg = pkg; _b = bytes; }
+
+            int Index()
+            {
+                byte x = _b[_p++]; bool neg = (x & 0x80) != 0; int v = x & 0x3f;
+                if ((x & 0x40) != 0)
+                    for (int shift = 6; ; shift += 7) { x = _b[_p++]; v |= (x & 0x7f) << shift; if ((x & 0x80) == 0) break; }
+                return neg ? -v : v;
+            }
+            string Path(int r)
+            {
+                if (r == 0) return "none";
+                UObjectTableItem item = _pkg.IndexToObjectResource(r);
+                var parts = new List<string>();
+                for (UObjectTableItem t = item; t != null; t = t.Outer) parts.Add(t.ObjectName.ToString());
+                if (r > 0) parts.Add(_pkg.PackageName);
+                parts.Reverse();
+                string cls = item is UImportTableItem imp ? imp.ClassName.ToString() : ((UExportTableItem)item).Class?.ObjectName.ToString() ?? "Class";
+                return (cls + "'" + string.Join(".", parts) + "'").ToLowerInvariant();
+            }
+            void Put(object v) => _s.Append(v).Append('\n');
+            byte U8() { _mem += 1; return _b[_p++]; }
+            ushort U16() { _mem += 2; ushort v = BitConverter.ToUInt16(_b, _p); _p += 2; return v; }
+            uint U32() { _mem += 4; uint v = BitConverter.ToUInt32(_b, _p); _p += 4; return v; }
+            void Obj() { _mem += 4; Put(Path(Index())); }
+            string Name() { _mem += 4; string n = _pkg.Names[Index()].Name; Put("n:" + n.ToLowerInvariant()); return n; }
+            void Args() { while (Expr() != 0x16) { } }
+
+            int Expr()
+            {
+                int t = U8(); Put("t" + t.ToString("x2"));
+                switch (t)
+                {
+                    case 0x00: case 0x01: case 0x02: case 0x20: case 0x29: Obj(); break;          // variables, object const, native parm
+                    case 0x04: case 0x0D: case 0x0E: case 0x2D: case 0x37: Expr(); break;       // return, goto label, eat string, bool var, length
+                    case 0x05: Put(U8()); Expr(); break;                                       // switch
+                    case 0x06: Put(U16()); break;                                              // jump
+                    case 0x07: case 0x09: case 0x15: case 0x18: Put(U16()); Expr(); break;     // jump if not, assert, line number, skip
+                    case 0x08: case 0x0B: case 0x16: case 0x17: case 0x25: case 0x26: case 0x27: case 0x28: case 0x2A: case 0x30: case 0x31: break;
+                    case 0x0A: { ushort o = U16(); Put(o); if (o != 0xffff) Expr(); break; }    // case
+                    case 0x0C: while (true) { string n = Name(); Put(U32()); if (n.Equals("None", StringComparison.OrdinalIgnoreCase)) break; } break;
+                    case 0x0F: case 0x10: case 0x14: case 0x1A: Expr(); Expr(); break;         // let, array elements, let bool
+                    case 0x11: for (int i = 0; i < 4; i++) Expr(); break;                      // new
+                    case 0x12: case 0x19: Expr(); Put(U16()); Put(U8()); Expr(); break;        // (class) context
+                    case 0x13: case 0x2E: case 0x36: Obj(); Expr(); break;                     // meta cast, dynamic cast, struct member
+                    case 0x1B: case 0x38: Name(); Args(); break;                               // virtual / global function
+                    case 0x1C: Obj(); Args(); break;                                           // final function
+                    case 0x1D: case 0x1E: Put(U32()); break;                                   // int / float const
+                    case 0x1F: { int e = Array.IndexOf(_b, (byte)0, _p); Put(Convert.ToHexString(_b, _p, e - _p)); _mem += e + 1 - _p; _p = e + 1; break; }
+                    case 0x21: Name(); break;                                                  // name const
+                    case 0x22: case 0x23: Put(U32()); Put(U32()); Put(U32()); break;           // rotator / vector const
+                    case 0x24: case 0x2C: Put(U8()); break;                                    // byte consts
+                    case 0x2F: Expr(); Put(U16()); break;                                      // iterator
+                    case 0x32: case 0x33: Obj(); Expr(); Expr(); break;                        // struct compare
+                    case 0x34: { int q = _p; while (_b[q] != 0 || _b[q + 1] != 0) q += 2; Put(Convert.ToHexString(_b, _p, q - _p)); _mem += q + 2 - _p; _p = q + 2; break; }
+                    default:
+                        if (t >= 0x39 && t <= 0x5f) Expr();                                    // UE1 conversion tokens
+                        else if (t >= 0x60 && t <= 0x6f) { Put(U8()); Args(); }               // extended native
+                        else if (t >= 0x70) Args();                                            // native
+                        else throw new System.IO.InvalidDataException($"token 0x{t:x2}");
+                        break;
+                }
+                return t;
+            }
+
+            void NoneProps() { if (!_pkg.Names[Index()].Name.Equals("None", StringComparison.OrdinalIgnoreCase)) throw new System.IO.InvalidDataException("tagged properties on a script export"); }
+
+            public static string Of(UnrealPackage pkg, UExportTableItem fn, byte[] bytes, System.IO.Stream file)
+            {
+                var f = new FunctionForm(pkg, bytes);
+                f.NoneProps();
+                int super = f.Index(); f.Index(); f.Index(); int child = f.Index(); f.Index();   // SuperField; Next, ScriptText left out; Children; FriendlyName left out
+                f._p += 8;                                                              // Line, TextPos
+                int scriptSize = BitConverter.ToInt32(bytes, f._p); f._p += 4;
+                f.Put("super:" + f.Path(super)); f.Put("size:" + scriptSize);
+                while (f._mem < scriptSize) f.Expr();
+                if (f._mem != scriptSize) throw new System.IO.InvalidDataException("bytecode ran past ScriptSize");
+                ushort native = BitConverter.ToUInt16(bytes, f._p); byte prec = bytes[f._p + 2]; uint flags = BitConverter.ToUInt32(bytes, f._p + 3); f._p += 7;
+                f.Put($"fn:{native}:{prec}:{flags:x}");
+                if ((flags & 0x40) != 0) { f.Put("rep:" + BitConverter.ToUInt16(bytes, f._p)); f._p += 2; }   // FUNC_Net
+                if (f._p != bytes.Length) throw new System.IO.InvalidDataException($"function export has {bytes.Length - f._p} trailing bytes");
+                while (child != 0)                                                      // parameters and locals, Children/Next order
+                {
+                    if (child < 0) throw new System.IO.InvalidDataException("an imported function child");
+                    UExportTableItem e = pkg.Exports[child - 1];
+                    var b = new byte[e.SerialSize];
+                    file.Seek(e.SerialOffset, System.IO.SeekOrigin.Begin);
+                    file.ReadExactly(b);
+                    var p = new FunctionForm(pkg, b);
+                    p.NoneProps(); p.Index(); child = p.Index();                            // SuperField; Next: the following one
+                    ushort dim = BitConverter.ToUInt16(b, p._p); uint pflags = BitConverter.ToUInt32(b, p._p + 2); p._p += 6;
+                    string cat = pkg.Names[p.Index()].Name;
+                    f._s.Append($"prop|{e.Class?.ObjectName}|{e.ObjectName}|{dim}|{pflags:x}|{cat}".ToLowerInvariant());
+                    if ((pflags & 0x20) != 0) { f._s.Append('|').Append(BitConverter.ToUInt16(b, p._p)); p._p += 2; }   // CPF_Net
+                    while (p._p < b.Length) f._s.Append('|').Append(p.Path(p.Index()));    // the type's references
+                    if (p._p != b.Length) throw new System.IO.InvalidDataException($"property {e.ObjectName} ran past its export");
+                    f._s.Append('\n');
+                }
+                return f._s.ToString();
+            }
         }
 
         static bool Modified(string edition) => UEEdition.TierOf(Enum.Parse<UEEdition.DataSet>(edition)) == UEEdition.Support.Modified;
@@ -419,15 +627,16 @@ namespace HP1.UEScript
             return changed;
         }
 
-        // A recognised modified re-release: the bound functions its own scripts changed from US 1.53 (by the table rows, not
+        // A recognised modified re-release: the bound functions its own scripts changed from US 1.53 / HP2 EN (by the table rows, not
         // the files). The port's overrides replace them there too. Empty for the reference editions and unrecognised installs.
         public static List<string> ReleaseChangedTargets(string systemDir = null)
         {
             var changed = new List<string>();
             string edition = RowsOf(systemDir);
             if (edition is null || !Modified(edition)) return changed;
+            string reference = UEGameProfile.Current.Game == UEEdition.Game.HP2 ? "HP2_EN" : "US153";   // the game's reference release
             foreach (var r in ShippedScriptHashes)
-                if (r.Edition == edition && !Array.Exists(ShippedScriptHashes, u => u.Edition == "US153" && u.Target == r.Target && u.Hash == r.Hash))
+                if (r.Edition == edition && !Array.Exists(ShippedScriptHashes, u => u.Edition == reference && u.Target == r.Target && u.Hash == r.Hash))
                     changed.Add(r.Target);
             return changed;
         }
@@ -446,14 +655,57 @@ namespace HP1.UEScript
         // Display Mode is filled here: the original LoadAvailableSettings puts "16/32 bit" into this frame every time.
         static void SelectVideo(UEInterpreter interp, UEObject self)
         {
-            UEObject depth = Combo(self, "ColorDepthCombo");
-            Fill(interp, depth, DisplayModeText, (Fullscreen, Fullscreen), (Windowed, Windowed));
-            Call(interp, depth, "SetSelectedIndex", ViewportOf(interp).Fullscreen ? 0 : 1);
+            SelectDisplayMode(interp, self, DisplayModeText);
             UEObject size = Combo(self, "ObjectDetailCombo");
             int[] steps = InterfaceSizeSteps(ViewportOf(interp).SizeY);
             Fill(interp, size, InterfaceSizeText, Array.ConvertAll(steps, st => (InterfaceSizes[st + 1], InterfaceSizes[st + 1])));
             int at = Array.IndexOf(steps, UEConfig.Global?.UIScaleStep ?? 0);   // a saved step not offered here = Standard
             Call(interp, size, "SetSelectedIndex", at >= 0 ? at : Array.IndexOf(steps, 0));
+        }
+
+        static void SelectDisplayMode(UEInterpreter interp, UEObject self, string comboText)
+        {
+            UEObject depth = Combo(self, "ColorDepthCombo");
+            Fill(interp, depth, comboText, (Fullscreen, Fullscreen), (Windowed, Windowed));
+            Call(interp, depth, "SetSelectedIndex", ViewportOf(interp).Fullscreen ? 0 : 1);
+        }
+
+        // HP2 FESoundVideoPage.LoadAvailableSettings (author decision 2026-11-16): the shipped body (filtered GetRes list, the
+        // saved size selected, 16/32 bit into the Color Depth frame, the other items), then the resolution list rebuilt with
+        // every GetRes mode in order and the shipped selection kept, the Display Mode items in the Color Depth frame and its
+        // label control renamed.
+        static object Hp2VideoLoadSettings(UEInterpreter interp, UEObject self, object[] args, Func<object> original)
+        {
+            object r = original();
+            Quiet(self, () =>
+            {
+                UEObject res = Combo(self, "ResolutionCombo");
+                string selected = Call(interp, res, "GetValue") as string;
+                UEObject owner = Call(interp, self, "GetPlayerOwner") as UEObject
+                    ?? throw new InvalidOperationException("FESoundVideoPage: no player owner");
+                Call(interp, res, "Clear");
+                foreach (string mode in (Call(interp, owner, "ConsoleCommand", "GetRes") as string ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                    Call(interp, res, "AddItem", mode, "", 0);
+                Call(interp, res, "SetValue", selected, "");
+                SelectDisplayMode(interp, self, null);
+            });
+            Call(interp, self.GetProp("ColorDepthLabel") as UEObject ?? throw new InvalidOperationException("FESoundVideoPage: no ColorDepthLabel"),
+                "SetText", DisplayModeText);
+            return r;
+        }
+
+        // HP2 (author decision 2026-11-16): the page has no BeforePaint of its own (UWindowWindow's is empty, never dispatched
+        // to an override), so UWindowWindow.PaintClients — final, run by every painted window after its Paint — is wrapped
+        // for it: the mode switched elsewhere (Alt+Enter) left Display Mode stale, and a later resolution pick would toggle it
+        // back (SettingsChanged compares the item with the device). Refilled as on opening, before the children paint. Only
+        // the mode is compared: HP2's body selects the SAVED size (Windowed*/Fullscreen* keys), which need not equal the live
+        // one, and a refill also re-sends MLOD.
+        static object Hp2VideoPaintClients(UEInterpreter interp, UEObject self, object[] args, Func<object> original)
+        {
+            if (UEInterpreter.ClassIsA(self.Class, "FESoundVideoPage") && self.GetProp("ColorDepthCombo") is UEObject depth
+                && UEInterpreter.ToInt(Call(interp, depth, "GetSelectedIndex")) != (ViewportOf(interp).Fullscreen ? 0 : 1))
+                Call(interp, self, "LoadAvailableSettings");
+            return original();
         }
 
         // FEOptionsPage.BeforePaint (every frame the page is shown): the page lives for the whole session and fills Display
@@ -506,7 +758,7 @@ namespace HP1.UEScript
             bool wantFull = Call(interp, Combo(self, "ColorDepthCombo"), "GetValue2") as string == Fullscreen;
             if (wantFull != vp.Fullscreen)
             {
-                UEConsoleCommand.Execute(cfg, "ToggleFullscreen", null, vp);
+                UEConsoleCommand.ToggleFullscreen(cfg, vp);
                 UEConsoleCommand.Execute(cfg, "set ini:Engine.Engine.ViewportManager StartupFullscreen " + (vp.Fullscreen ? "True" : "False"), null, vp);
                 Call(interp, self, "LoadAvailableSettings");
                 return null;
@@ -576,14 +828,16 @@ namespace HP1.UEScript
             object canvas = args[0];
             float w = UEInterpreter.AsFloat(self.GetProp(PK.WinWidth)), h = UEInterpreter.AsFloat(self.GetProp(PK.WinHeight));
             float bh = UEInterpreter.AsFloat((self.GetProp(PK.LookAndFeel) as UEObject)?.GetProp(PK.Size_ScrollbarButtonHeight));
-            Call(interp, self, "DrawStretchedTexture", canvas, w / 2f - 1f, bh, 2f, h - 2f * bh, Tex("HPMenu.Icons.FEComboListBox"));
+            // The menu textures' package: HP1 HPMenu.Icons, HP2 hgame.Icons (HP2's ComboList_DrawItem / HSlider.Created).
+            string icons = UEGameProfile.Current.Game == UEEdition.Game.HP2 ? "hgame.Icons." : "HPMenu.Icons.";
+            Call(interp, self, "DrawStretchedTexture", canvas, w / 2f - 1f, bh, 2f, h - 2f * bh, Tex(icons + "FEComboListBox"));
             if (UEInterpreter.ToBool(self.GetProp(PK.bDisabled))) return null;
             float ts = UEInterpreter.AsFloat(self.GetProp(PK.ThumbStart)), th = UEInterpreter.AsFloat(self.GetProp(PK.ThumbHeight));
             // The knob at native size, centred in the thumb area: stretched
             // brass looks distorted.
             float ky = ts + (th - 25f) / 2f;
             Call(interp, self, "DrawStretchedTextureSegment", canvas, (w - 9f) / 2f, ky, 9f, 25f, 0f, 0f, 9f, 25f,
-                Tex("HPMenu.Icons.FESliderKnobTexture"));
+                Tex(icons + "FESliderKnobTexture"));
             return null;
         }
 
@@ -693,17 +947,25 @@ namespace HP1.UEScript
             return original();
         }
 
+        // HP2 FEBook.KeyEvent (NOT ORIGINAL, D-77 for HP2, author decision 2026-11-16): its first branch, F7 pressed (Key 118,
+        // Action IST_Press), returns true and with Shift down first flips HPConsole.bDebugMode — unlike HP1's F7
+        // (HPConsole.ToggleDebugMode, gated by Version.bDebugEnabled), it needs no debug build, so every player could turn on
+        // the developer mode (the cheat matcher's gate, the Tab console). Here the press is taken as shipped (true) without
+        // the flip; every other key runs the shipped body.
+        static object Hp2KeyEventNoDebugToggle(UEInterpreter interp, UEObject self, object[] args, Func<object> original)
+            => UEInterpreter.ToInt(args[1]) == 1 && UEInterpreter.ToInt(args[0]) == 118 ? true : original();
+
         // FEStoryBookPage.KeyEvent (FEStoryBookPage.uc:466-503): Space pressed goes to the next page once the page has
-        // been shown longer than _MinTimeOnPage, never from page 0 — the shipped debug-mode branch (bAllowPageSkipping =
-        // bDebugMode) for every player. GotoNextPage is the same call the page timer makes (Tick), so the story's end,
-        // the bonus card of story 6 and the travel are unchanged. The debug "NextPage" button and the F fast-skip
-        // stay debug-only (not built). Other keys: the shipped body.
+        // been shown longer than _MinTimeOnPage — the shipped debug-mode branch (bAllowPageSkipping = bDebugMode) for
+        // every player, without its `iCurrentPage != 0` condition (author decision 2026-11-15, NOT ORIGINAL: with it,
+        // page 0 and so every one-page story could not be skipped). GotoNextPage is the same call the page timer makes
+        // (Tick), so the story's end, the bonus card of story 6 and the travel are unchanged. The debug "NextPage" button
+        // and the F fast-skip stay debug-only (not built). Other keys: the shipped body.
         static object SpaceSkipsStoryPage(UEInterpreter interp, UEObject self, object[] args, Func<object> original)
         {
             if (UEInterpreter.ToInt(args[1]) != 1 || UEInterpreter.ToInt(args[0]) != 32) return original();
             float now = UEInterpreter.AsFloat((Call(interp, self, "GetLevel") as UEObject)?.GetProp("TimeSeconds"));
-            if (now - UEInterpreter.AsFloat(self.GetProp("_TimeSecondsSave")) > UEInterpreter.AsFloat(self.GetProp("_MinTimeOnPage"))
-                && UEInterpreter.ToInt(self.GetProp("iCurrentPage")) != 0)
+            if (now - UEInterpreter.AsFloat(self.GetProp("_TimeSecondsSave")) > UEInterpreter.AsFloat(self.GetProp("_MinTimeOnPage")))
                 Call(interp, self, "GotoNextPage");
             return true;
         }
@@ -753,12 +1015,14 @@ namespace HP1.UEScript
         }
 
         static Handler Lookup(UFunction fn)
+            => LookupName((fn.Outer as UClass)?.Name.ToString() ?? fn.Outer?.Name.ToString(), fn.Name.ToString());
+
+        // Lookup's rule by names (owner class or state, function) in the current profile's table.
+        internal static Handler LookupName(string owner, string function)
         {
-            string name = fn.Name.ToString();
-            string cls = (fn.Outer as UClass)?.Name.ToString() ?? fn.Outer?.Name.ToString();
             foreach (var e in Table)
-                if (string.Equals(e.Function, name, StringComparison.OrdinalIgnoreCase)
-                    && string.Equals(e.Class, cls, StringComparison.OrdinalIgnoreCase)) return e.Body;
+                if (string.Equals(e.Function, function, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(e.Class, owner, StringComparison.OrdinalIgnoreCase)) return e.Body;
             return null;
         }
 

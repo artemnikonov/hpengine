@@ -233,7 +233,7 @@ namespace HPEngine
                 cur.AudioChannels, cur.AudioResumeSerial, cur.ActorViews, cur.Coronas, cur.EnhancedVisuals,
                 lerps ? Drawn(prev.Drawn, cur.Drawn, sameTree) : cur.Drawn,
                 lerps ? cur.DrawnTextures.Union(prev.DrawnTextures, StringComparer.OrdinalIgnoreCase).ToArray() : cur.DrawnTextures,
-                cur.AudioCallStops, cur.AudioMixDt, cur.DrawOrder, cur.CanvasScale);
+                cur.AudioCallStops, cur.AudioMixDt, cur.DrawOrder, cur.CanvasScale, cur.TextureFrames);
         }
 
         // The tick's frame with its own copy of the actor list: Core rotates three snapshot buffers (WorldFrameProjector.
@@ -250,7 +250,7 @@ namespace HPEngine
                 f.Decals, f.Paused, f.ViewFlash, f.DrawWorld, f.Reverb,
                 f.Views, f.MeshPoses, f.SpriteActors,
                 f.AudioChannels, f.AudioResumeSerial, f.ActorViews, f.Coronas, f.EnhancedVisuals,
-                f.Drawn, f.DrawnTextures, f.AudioCallStops, f.AudioMixDt, f.DrawOrder, f.CanvasScale);
+                f.Drawn, f.DrawnTextures, f.AudioCallStops, f.AudioMixDt, f.DrawOrder, f.CanvasScale, f.TextureFrames);
         }
 
         static bool SameTree(IReadOnlyList<ViewFrame> prev, IReadOnlyList<ViewFrame> cur)

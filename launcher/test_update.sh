@@ -144,7 +144,8 @@ slot() {   # <name> <expected> <version> [mods...]
 slot v5_mods_in_order "B|A" 5 B A
 slot v5_no_mods "-" 5
 slot v4_legacy legacy 4
-slot v6_unknown unknown 6
+slot v6_mods "A" 6 A
+slot v7_unknown unknown 7
 printf 'garbage file' > "$T/one.hp1sav"; got=$("$L" --slot-mods "$T/one.hp1sav"); [ "$got" = unknown ] && ok "slot_mods_garbage_unknown" || bad "slot_mods_garbage_unknown: '$got'"
 head5 "$T/one.hp1sav" 5 Alpha; head -c 12 "$T/one.hp1sav" > "$T/cut.hp1sav"
 got=$("$L" --slot-mods "$T/cut.hp1sav"); [ "$got" = unknown ] && ok "slot_mods_truncated_unknown" || bad "slot_mods_truncated_unknown: '$got'"
@@ -251,6 +252,154 @@ name=modded want="Harry Potter and the Sorcerer's Stone" title "Modded re-releas
 name=modified_release want="Harry Potter" title "Modified release: modified"
 name=unknown want="Harry Potter" title "Unknown release: unverified"
 name=none want="Harry Potter" title
+
+# The owner of the mod-placement and language rules is C# (hpengine/packaging ModOverlay.cs, GameLanguage.cs); the
+# Launcher mirrors them. launcher/Desktop.Tests runs the owner's code on the same folders for the comparisons below.
+dotnet build "$HERE/Desktop.Tests" -c Release > "$T/dt.log" 2>&1 || { tail -20 "$T/dt.log"; echo "build of launcher/Desktop.Tests failed"; exit 2; }
+DT() { dotnet run --no-build --project "$HERE/Desktop.Tests" -c Release -- "$@"; }
+
+# Mod conflicts and the apply-order numbers (--mods-conflicts, --mods-order): the cases and texts of launcher/Desktop.Tests
+# (ModConflicts), and each case compared with the owner's lines (ModOverlay.Conflicts through Desktop.Tests).
+G="$T/conflict"
+for f in System/Shared.u Textures/A.utx HPEngineData/x Mods/A/Textures/A.utx Mods/A/System/Shared.u Mods/B/textures/a.utx Mods/B/Shared.u \
+    Mods/B/readme.txt Mods/C/Textures/A.UTX Mods/C/Textures/Own.utx Mods/D/Textures/A.utx Mods/E/System/E.u Mods/E/E.u; do
+    mkdir -p "$(dirname "$G/$f")"; echo x > "$G/$f"; done
+printf '[Core.System]\nPaths=../System/*.u\nPaths=../Textures/*.utx\n' > "$G/System/Default.ini"
+conf() { cn=$1 want=$2; shift 2; inis "$@" > "$G/HPEngineData/Mods.ini"
+    got=$("$L" --mods-conflicts "$G" | paste -sd/ -); [ "$got" = "$want" ] && ok "mods_conflicts_$cn" || bad "mods_conflicts_$cn: want '$want', got '$got'"
+    own=$(DT --mods-conflicts "$G" | paste -sd/ -); [ "$got" = "$own" ] && ok "mods_conflicts_${cn}_as_owner" || bad "mods_conflicts_${cn}_as_owner: launcher '$got', owner '$own'"; }
+conf pairs "B and A both have System/Shared.u and 1 more file: the game uses B's (later in the order)/C and B both have Textures/A.UTX: the game uses C's (later in the order)" A B C
+conf other_order "A and C both have Textures/A.utx: the game uses A's (later in the order)" C A
+conf one_mod "" A
+conf same_mod "" E D
+conf unplaceable "" A Ghost
+order() { on=$1 want=$2; shift 2; inis "$@" > "$G/HPEngineData/Mods.ini"
+    got=$("$L" --mods-order "$G"); [ "$got" = "$want" ] && ok "mods_order_$on" || bad "mods_order_$on: want '$want', got '$got'"; }
+order numbered "A=1|B=2|C=3|D=-|E=-" A B C
+order moved "C=1|A=2|B=-|D=-|E=-" C A
+
+# Game language (--language-list, --language-select, --edition-label): the Launcher's mirror against GameLanguage.cs on
+# two identical folders; every listing, every stdout and the written HPEngineData/Default.ini byte for byte.
+mklang() {
+    g=$1; mkdir -p "$g/System/0" "$g/System/7" "$g/System/12" "$g/System/3" "$g/System/4" "$g/System/5" "$g/System/6" "$g/System/not-a-language" "$g/HPEngineData"
+    printf '[Engine.Engine]\nLanguage=eng\n[Core.System]\nPaths=../System/*.u\n' > "$g/System/0/Default.ini"
+    printf '[Engine.Engine]\nLanguage=fin\n' > "$g/System/7/default.INI"
+    printf '[Engine.Engine]\nLanguage=fin\n' > "$g/System/12/Default.ini"   # ordinal folder order: 12 before 7, its fin wins
+    printf '[Engine.Engine]\r\nLanguage=dan\r\nLanguage="swe"\r\n' > "$g/System/3/Default.ini"   # last duplicate, quotes stripped
+    { printf '\377\376'; printf '[Engine.Engine]\r\nLanguage=nor\r\n' | iconv -f UTF-8 -t UTF-16LE; } > "$g/System/4/Default.ini"
+    printf '[Engine.Engine]\n Language=xx\n' > "$g/System/5/Default.ini"   # no trimming: not the key
+    printf '[Engine.Engine]\nLanguage=ABC\n' > "$g/System/6/Default.ini"
+    printf '[Engine.Engine]\nLanguage=../bad\n' > "$g/System/not-a-language/Default.ini"
+    printf '; settings\r\n[Engine.Engine]\r\nLanguage=eng\r\nLanguage=eng\r\n[Other]\r\nKeep=42\r\nOwner=H\344\r\n' > "$g/HPEngineData/Default.ini"
+}
+G1="$T/lang_launcher"; G2="$T/lang_owner"; mklang "$G1"; mklang "$G2"
+langcmp() {   # <name>: the listing and the settings file of both folders
+    a=$("$L" --language-list "$G1" | paste -sd/ -); b=$(DT --language-list "$G2" | paste -sd/ -)
+    [ "$a" = "$b" ] && ok "language_list_$1_as_owner" || bad "language_list_$1_as_owner: launcher '$a', owner '$b'"
+    cmp -s "$G1/HPEngineData/Default.ini" "$G2/HPEngineData/Default.ini" && ok "language_file_$1_as_owner" || bad "language_file_$1_as_owner: the settings files differ"
+}
+got=$("$L" --language-list "$G1" | paste -sd/ -)
+want="abc|abc|6/eng|English|0/fin|Finnish|12/nor|Norwegian|4/swe|Swedish|3/selected=-"
+[ "$got" = "$want" ] && ok "language_list" || bad "language_list: want '$want', got '$got'"
+langcmp initial
+for c in fin swe abc default nor; do
+    a=$("$L" --language-select "$G1" $c); b=$(DT --language-select "$G2" $c)
+    [ "$a" = "$b" ] && [ "$a" = OK ] && ok "language_select_$c" || bad "language_select_$c: launcher '$a', owner '$b'"
+    langcmp "$c"
+done
+grep -q 'CurLanguageName=NORWEGIAN' "$G1/HPEngineData/Default.ini" && LC_ALL=C grep -q "Owner=H$(printf '\344')" "$G1/HPEngineData/Default.ini" \
+    && ok "language_file_narrator_and_latin1" || bad "language_file_narrator_and_latin1"
+rm -rf "$G1/System/4" "$G2/System/4"
+a=$("$L" --language-select "$G1" nor); b=$(DT --language-select "$G2" nor)
+[ "$a" = "$b" ] && [ "$a" = "FAIL The selected language is no longer installed: nor" ] && ok "language_select_removed" || bad "language_select_removed: launcher '$a', owner '$b'"
+langcmp removed
+G3="$T/nordic"; for x in 0:eng 1:dan 2:fin 3:swe 4:nor; do mkdir -p "$G3/System/${x%%:*}"; printf '[Engine.Engine]\nLanguage=%s\n' "${x#*:}" > "$G3/System/${x%%:*}/Default.ini"; done
+for e in "UK 1.1: modified" "US 1.53: exact"; do for g in "$G3" "$G1"; do
+    a=$("$L" --edition-label "$e" "$g"); b=$(DT --edition-label "$e" "$g")
+    [ "$a" = "$b" ] && ok "edition_label_as_owner: $a" || bad "edition_label_as_owner: launcher '$a', owner '$b'"; done; done
+got=$("$L" --edition-label "UK 1.1: modified" "$G3")
+[ "$got" = "Nordic multilingual data|different data|Engine family: UK 1.1. Languages: Danish, English, Finnish, Norwegian, Swedish." ] && ok "edition_label_nordic" || bad "edition_label_nordic: '$got'"
+
+
+# HP2 tab: the Launcher's mirror of Hp2FrontEnd (launcher/Desktop/Logic.cs, judged against HP2 Game.exe by
+# tools/hp2/frontend_judge.sh) answers the judge's own cases byte for byte as the owner does (--hp2-frontend), and runs
+# the menu on real folders as the owner does (--hp2-menu: save dir, page texts, scan, New Game / Load clicks, files left).
+python3 "$HERE/../tools/hp2/frontend_judge.py" --cases "$T/h2all" || { echo "NOVERDICT: frontend_judge.py --cases"; exit 3; }
+# The launchers offer no HP2 Options (author 2026-11-16: Sound / Video live in the game's own menu): the judge's Sound
+# page cases (soundinit / soundok) have no launcher answer and are left out.
+grep -v -E '^sound(init|ok)	' "$T/h2all" > "$T/h2cases"
+"$L" --hp2-frontend "$T/h2cases" "$T/h2swift" && DT --hp2-frontend "$T/h2cases" "$T/h2owner" > /dev/null
+n=$(wc -l < "$T/h2cases" | tr -d ' ')
+cmp -s "$T/h2swift" "$T/h2owner" && [ "$n" -gt 80 ] && ok "hp2_frontend_cases_as_owner ($n judge cases)" || { bad "hp2_frontend_cases_as_owner"; diff "$T/h2swift" "$T/h2owner" | head -5; }
+mkh2() {   # a fresh HP2 root and HP1 data dir at the same paths for each run
+    rm -rf "$T/h2"; mkdir -p "$T/h2/root/System" "$T/h2/data/game" "$T/h2/data/HP2Data/Save/Slot2" "$T/h2/data/HP2Data/Save/Slot4"
+    : > "$T/h2/root/System/Engine.dll"
+    printf '[IDDIALOG_FrontEndPageMainMenu]\r\nIDC_Title=Main Menu\r\nIDC_NewGame=New Game\r\n IDC_LoadGame = Load\r\n[IDDIALOG_FrontEndPageNewGame]\r\nIDC_Title=New\r\nIDC_SlotEmpty=Empty\r\nIDC_SlotUsed=Used\r\n[IDDIALOG_FrontEndPageLoadGame]\r\nIDC_SlotEmpty=Leer\r\nIDC_SlotUsed=Caf\351\r\n' > "$T/h2/root/System/Startup.int"
+    printf '[IDDIALOG_FrontEndPageMainMenu]\nIDC_Options=Optionen\n' > "$T/h2/root/System/Startup.det"
+    printf '[Engine.Engine]\nLanguage=det\n' > "$T/h2/root/System/default.ini"
+    { printf '\377\376'; printf '[All]\r\nSelect_Game_0001=Replace?\r\nSelect_Game_0002=Caption\r\n' | iconv -f UTF-8 -t UTF-16LE; } > "$T/h2/root/System/HPMenu.int"
+    s2="$T/h2/data/HP2Data/Save/Slot2"; s4="$T/h2/data/HP2Data/Save/Slot4"; mkdir -p "$s2/cache" "$s4/cache"
+    printf 'save' > "$s2/save0.hp1sav"; printf 'bmp' > "$s2/Save0.bmp"; printf 'pa' > "$s2/Entry_pa.usa"; printf 'c' > "$s2/cache/c.bin"
+    printf 'x' > "$s4/notes.txt"; : > "$s4/zero.txt"; : > "$s4/save0.hp1sav"; printf 'old' > "$s4/Save0.usa"; printf 'c' > "$s4/cache/c.bin"
+}
+h2menu() {   # <name> [new|load <slot> <0|1>]
+    hn=$1; shift
+    mkh2; a=$("$L" --hp2-menu "$T/h2/data/game" "$T/h2/root" "$@")
+    mkh2; b=$(DT --hp2-menu "$T/h2/data/game" "$T/h2/root" "$@")
+    [ "$a" = "$b" ] && ok "hp2_menu_${hn}_as_owner" || { bad "hp2_menu_${hn}_as_owner"; printf '%s\n----\n%s\n' "$a" "$b" | head -20; }
+}
+h2menu scan; scan_out=$a
+h2menu new_unused new 1 1
+h2menu new_used_no new 2 0
+h2menu new_used_yes new 2 1; new_out=$a
+h2menu load_unused load 4 1
+h2menu load_used load 2 1
+case "$scan_out" in *"slots=1:0:-;2:1:Slot2\\Save0.bmp;3:0:-;4:0:-;5:0:-;6:0:-"*"files=Slot2/Entry_pa.usa,Slot2/Save0.bmp,Slot2/cache/c.bin,Slot2/save0.hp1sav,Slot4/save0.hp1sav,Slot4/zero.txt"*) ok "hp2_menu_scan_branches" ;;
+    *) bad "hp2_menu_scan_branches: $scan_out" ;; esac
+case "$new_out" in *"go=1 --root|$T/h2/root|--launched-by-launcher|--hp2-savedir|$T/h2/data/HP2Data/Save|--hp2-cmdline|PrivetDr.unr  -SAVESLOT=2"*"files=Slot4/save0.hp1sav,Slot4/zero.txt") ok "hp2_menu_new_game_branch" ;;
+    *) bad "hp2_menu_new_game_branch: $new_out" ;; esac
+
+# Gamepad (author 2026-11-16: both launchers the same): the Launcher's PadMap mirrors launcher/Desktop/Logic.cs PadMap, the
+# whole table (every button x popup x tab, the stick around half way, presses between polls) byte for byte (--pad-map);
+# then the pad on the window's view offscreen (--pad-check): focus starts on the primary, the d-pad walks the targets,
+# A opens the Mods page, B leaves it, Start opens the Menu, B closes it, HP2 Load Game slots. No controller is needed.
+"$L" --pad-map > "$T/padswift"; DT --pad-map > "$T/padowner"
+n=$(grep -c '^button' "$T/padswift")
+cmp -s "$T/padswift" "$T/padowner" && [ "$n" = 64 ] && ok "pad_map_as_owner ($n button rows)" || { bad "pad_map_as_owner"; diff "$T/padswift" "$T/padowner" | head -5; }
+grep -qx 'button 3 popup=0 hp2=1 None' "$T/padswift" && grep -qx 'button 10 popup=0 hp2=0 Hp2' "$T/padswift" && grep -qx 'stick 16001 0 16384' "$T/padswift" \
+    && ok pad_map_y_rb_stick || bad pad_map_y_rb_stick
+got=$("$L" --pad-check | grep -v '^gamecontroller' | sed 's/ ring=[01]//' | paste -sd/ -)
+want="hp2_off: tab2_target=0 hp2Tab=0/start: focus=play mods=0 popup=0 page=Main/up: focus=menu mods=0 popup=0 page=Main/down: focus=play mods=0 popup=0 page=Main/down: focus=mods mods=0 popup=0 page=Main/a_on_mods: focus=back mods=1 popup=0 page=Main/right: focus=mod:Alpha mods=1 popup=0 page=Main/b: focus=play mods=0 popup=0 page=Main/start: focus=pop1 mods=0 popup=1 page=Main/down: focus=pop2 mods=0 popup=1 page=Main/b: focus=play mods=0 popup=0 page=Main/hp2: focus=loadgame mods=0 popup=0 page=Main/y_on_hp2: focus=loadgame mods=0 popup=0 page=Main/a_on_load: focus=slot1-true mods=0 popup=0 page=LoadGame/right: focus=slot2-true mods=0 popup=0 page=LoadGame/b: focus=loadgame mods=0 popup=0 page=Main"
+[ "$got" = "$want" ] && ok "pad_window_offscreen" || bad "pad_window_offscreen: got '$got'"
+"$L" --pad-check | grep -q '^start: focus=play ring=0' && "$L" --pad-check | grep -q '^up: focus=menu ring=1' && ok pad_ring_after_first_press || bad pad_ring_after_first_press
+# A long in-window list (author 2026-11-16, both launchers): 30 start maps open at the choice and scroll; End reaches the
+# last map and scrolls it into view, Home / Page Down / type-ahead / the d-pad move through it, its indicator drags it (middle, end, top; and a real mouse drag on its track; the indicator stands where the list is after every step), A picks (--popup-check).
+"$L" --popup-check > "$T/popup"
+grep -q '^end: focus=Map30 popup=1 scroll=[1-9][0-9]*+[0-9]* last_in_view=1 ' "$T/popup" && grep -q '^home: focus=Game (normal start) .* last_in_view=0 ' "$T/popup" \
+    && grep -q '^page_down: focus=Map06 ' "$T/popup" && grep -q '^type_m: focus=Map07 ' "$T/popup" \
+    && grep -q '^pad_down_15: focus=Map22 popup=1 scroll=[1-9]' "$T/popup" && grep -qx 'chosen=Map22' "$T/popup" \
+    && grep -q '^drag_mid: .* scroll=[45][0-9][0-9]+[0-9]* last_in_view=0 ' "$T/popup" && grep -q '^drag_end: .* last_in_view=1 ' "$T/popup" \
+    && grep -q '^drag_top: .* scroll=[0-4]+' "$T/popup" \
+    && grep -q '^mouse_drag_down: .* last_in_view=1 ' "$T/popup" \
+    && ! grep -q ' ind=0' "$T/popup" \
+    && ok popup_long_list_scrolls || { bad popup_long_list_scrolls; cat "$T/popup"; }
+
+# Per game (author 2026-11-16): the Launcher's GameScope mirrors Logic.cs GameScope (--game-scope): the error banner of each
+# tab (HP2's never on HP1, HP1's never on HP2, the launcher's own on both), each game's data and logs folder, the console capture.
+mkdir -p "$T/scope/game"; "$L" --game-scope "$T/scope/game" > "$T/scopeswift"; DT --game-scope "$T/scope/game" > "$T/scopeowner"
+cmp -s "$T/scopeswift" "$T/scopeowner" && [ "$(grep -c '^error' "$T/scopeswift")" = 16 ] && ok game_scope_as_owner || { bad game_scope_as_owner; diff "$T/scopeswift" "$T/scopeowner" | head -5; }
+grep -qx 'error hp2Tab=0 hp1=- hp2=e2 launcher=- -> -' "$T/scopeswift" && grep -q "^game hp2=1 data=$T/scope/HP2Data/HPEngineData logs=$T/scope/HP2Data/HPEngineData/logs console=/d/HPEngine-HP2.log$" "$T/scopeswift" \
+    && ok game_scope_hp2_apart || bad game_scope_hp2_apart
+# Architecture lock (source text, CLAUDE.md §5: not proof of activation; macOS activation cannot be checked without a
+# window): every start of the game process hands it the focus (Launcher.handFocus, activate(from:) on macOS 14+).
+# Without it the first launch kept the game inactive: "capture on ... focus False", OS cursor visible.
+python3 - "$HERE/Launcher.swift" <<'PY' && ok "game_launch_hands_focus" || bad "game_launch_hands_focus"
+import re, sys
+s = open(sys.argv[1], encoding='utf-8').read()
+starts = s.count('runtimeURL.appendingPathComponent("HPEngine")')
+hands = len(re.findall(r'try p\.run\(\); playing = true;[^\n]*\n    Launcher\.handFocus\(to: p\.processIdentifier\)', s))
+sys.exit(0 if starts >= 2 and hands == starts and 'app.activate(from: .current)' in s else 1)
+PY
 
 [ $fails -eq 0 ] || exit 1
 echo "all passed"

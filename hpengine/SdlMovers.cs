@@ -1,11 +1,11 @@
-// Movers: geometry and per-frame lightmap tiles from Core (UELevelRuntime.MoverLightmaps: brush FPolys at the base
-// position, level branch with the +0x48 records, zone layer, mode 3); here only their own atlas and the draw batches.
-// Texture and lightmap UVs are computed once (base position; invariant to motion), vertex positions every tick:
+// Movers: geometry and per-frame lightmap tiles from Core (UELevelRuntime.MoverLightmaps: brush FPolys placed as on the
+// first frame, the level branch per drawn polygon and zone, mode 3); here only their own atlas and the draw batches.
+// Texture and lightmap UVs are computed once (that placement; invariant to motion), vertex positions every tick:
 // brush point through the mover's ToWorld from the frame (MoverState.ToWorld). Blend mode follows the BSP rule (WorldMesh).
 // Which polygons a view draws is Core's (WorldFrame.Drawn Movers: a brush polygon of which OccludeBsp drew a tracker
 // fragment in that frame): Draws holds one batch per (material batch, view) with only those polygons; Batches is the
 // whole geometry of the tick.
-// Not ported: brushes without UPolys, MainScale |s|≠1, counted in Problems.
+// Not drawn: brushes without UPolys (the original faults there) and sheared brushes (BuildMoverGeometry), counted in Problems.
 using HP1.UEScript;
 
 namespace HPEngine

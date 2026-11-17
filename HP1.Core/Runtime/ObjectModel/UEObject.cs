@@ -333,7 +333,7 @@ namespace HP1.UEScript
         // VM's value-struct intrinsics; every other struct becomes an empty
         // IsStruct bag (member reads null-coerce to type zero, member writes
         // land on the bag — both matching a zero-filled UE1 struct).
-        static object ZeroStructValue(UELib.Core.UProperty prop)
+        internal static object ZeroStructValue(UELib.Core.UProperty prop)
         {
             string sn = (prop as UELib.Core.UStructProperty)?.Struct?.Name?.ToString();
             if (string.Equals(sn, "Vector", StringComparison.OrdinalIgnoreCase)) return Vector3.zero;
@@ -377,7 +377,7 @@ namespace HP1.UEScript
                 }
         }
 
-        static object ZeroValueForType(UELib.Types.PropertyType t)
+        internal static object ZeroValueForType(UELib.Types.PropertyType t)
         {
             switch (t)
             {
@@ -553,6 +553,20 @@ namespace HP1.UEScript
         // per instance.
         static readonly Dictionary<UELib.Core.UDefaultProperty, object> _structDefaultCache = new();
         static readonly HashSet<string> _loggedStructDecode = new(UEPropNameComparer.Instance);
+
+        // Census (runtime_poc --hp2-struct-census, S-11): every struct-typed default tag of the class's own defaults through
+        // the decoder above; a tag left as UELib's text (the legacy fallback) is a failure, named.
+        internal static (int Decoded, List<string> Failed) CensusStructDefaults(UClass cls)
+        {
+            int ok = 0; var failed = new List<string>();
+            foreach (var dp in cls.Properties ?? new UELib.Core.DefaultPropertiesCollection())
+            {
+                if (dp?.Type != UELib.Types.PropertyType.StructProperty) continue;
+                if (DecodeStructDefault(cls, dp, dp.Value ?? "") is string) failed.Add($"{cls.Name}.{dp.Name}[{dp.ArrayIndex}] ({dp.StructName})");
+                else ok++;
+            }
+            return (ok, failed);
+        }
 
         static object DecodeStructDefault(UClass cls, UELib.Core.UDefaultProperty dp, string raw)
         {

@@ -25,7 +25,11 @@ namespace HPEngine
     public unsafe sealed class SdlViewportDevice : IViewportDevice
     {
         readonly SDL_Window* _w;
-        public SdlViewportDevice(SDL_Window* window) { _w = window; }
+        // hostIndependentModes (--offscreen-window: judges and benches): the windowed list is the original's constant
+        // windowed GetRes list (UEConsoleCommand.WindowedResolutions), not the host monitor's modes, so a scripted menu
+        // route picks the same entry on every machine and display layout (core_thread_judge's Resolution pick).
+        readonly bool _hostIndependentModes;
+        public SdlViewportDevice(SDL_Window* window, bool hostIndependentModes = false) { _w = window; _hostIndependentModes = hostIndependentModes; }
 
         (int W, int H) Pixels() { int w, h; SDL_GetWindowSizeInPixels(_w, &w, &h); return (w, h); }
         public int SizeX => Pixels().W;
@@ -68,6 +72,7 @@ namespace HPEngine
         {
             get
             {
+                if (_hostIndependentModes && !Fullscreen) return UEConsoleCommand.WindowedResolutions;
                 var modes = new List<(int, int)>();
                 int n;
                 SDL_DisplayMode** list = SDL_GetFullscreenDisplayModes(SDL_GetDisplayForWindow(_w), &n);

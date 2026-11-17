@@ -58,7 +58,6 @@ namespace HP1.UEScript
             Tokens = null; HandlerOwner = null; OffsetToIndex = null; Cursor = 0;
             ProbeMask = UEProbe.All; LatentState = LatentRunState.Continue; ReturnValue = null; InRun = false;
             _iterators?.Clear();
-            SleepTimeLeft = 0f;
         }
         // Fresh set of locals (the frame moved to another state/function).
         public void ResetVariables() => _vars = null;
@@ -100,10 +99,14 @@ namespace HP1.UEScript
         public List<UEIterator> IteratorStack => _iterators ??= new List<UEIterator>();
         List<UEIterator> _iterators;
 
-        // Latent suspension params (set by latent natives, consumed by
-        // TickStateFrame). Sleep uses remaining actor-tick time; movement latents add
-        // their targets here as they're implemented.
-        public float SleepTimeLeft;
+        // AActor.LatentFloat (+0xcc) of the frame's actor: the remaining Sleep time (execSleep / execPollSleep /
+        // execStopWaiting) and the WaitForLanding counter. The property is the one store, as in the original: it keeps
+        // its last value after the latent ends and is visible to script and the actor dump.
+        public float SleepTimeLeft
+        {
+            get => UEInterpreter.AsFloat(Object.GetProp(PK.LatentFloat));
+            set => Object.SetProp(PK.LatentFloat, value);
+        }
     }
 
     // Call-object pool of one interpreter: the UEFrame of a

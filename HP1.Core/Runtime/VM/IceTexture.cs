@@ -84,10 +84,10 @@ namespace HP1.UEScript
                 throw new ArgumentException($"IceTexture: source {sourceP8?.Length.ToString() ?? "null"} bytes != {uSize}x{vSize} — a source of a different size is not supported (shipped behavior unknown)");
             if (!localSource && (glassP8 == null || glassP8.Length != uSize * vSize))
                 throw new ArgumentException($"IceTexture: glass {glassP8?.Length.ToString() ?? "null"} bytes != {uSize}x{vSize} — glass of a different size is not supported (shipped behavior unknown)");
-            // EPanningType: five values 0..4 (MoveIcePosition branches). Any other value cannot occur
-            // in the data; the default branch is unproven for it — loud refusal.
-            if (panningStyle < 0 || panningStyle > 4)
-                throw new ArgumentException($"IceTexture: PanningStyle={panningStyle} outside 0..4 — MoveIcePosition branch unknown");
+            // PanningStyle is the byte +0xe0. 5..255 are valid input (MoveIcePosition leaves UD/VD unwritten, see
+            // there); a value that is not a byte cannot come from a byte property.
+            if (panningStyle < 0 || panningStyle > 255)
+                throw new ArgumentException($"IceTexture: PanningStyle={panningStyle} is not a byte");
             USize = uSize; VSize = vSize; _uMask = uSize - 1; _vMask = vSize - 1;
             _source = sourceP8; _glass = glassP8;
             PanningStyle = panningStyle; Frequency = frequency; Amplitude = amplitude;
@@ -118,9 +118,10 @@ namespace HP1.UEScript
         //                fild; fadd [U|V]; fstp dword                  (0x10505c14-0x10505e46)
         // A float-per-step form with (float)sin differs from shipped in the low bit on ~30% of steps
         // and in the rounded offset on ~0.7%. Style outside 0..4: shipped does not write UD/VD
-        // (0x10505be2 ja -> exit) — rejected by the constructor.
+        // (0x10505be2 ja -> exit), the default case below.
         // Not from the listing: .rdata values 0x10510d04/0d00/0cfc/0cf8 = 120 / 0.0012 / 0.0011 / 0.5;
         // appSin/appCos — bare fsin/fcos (AppSin/AppCos below, UEX87Transcendental).
+        // Original: Fire.dll ?MoveIcePosition@UIceTexture@@AAEXM@Z [HP1 0x10505b40]
         public void MoveIcePosition(float dt)
         {
             X87Ext edt = X87Ext.From(dt);
@@ -147,8 +148,12 @@ namespace HP1.UEScript
                     UDisplace = UPosition;
                     VDisplace = Shift(A, true, AppCos(Arg(F, 0.0012f)), VPosition);
                     break;
-                default:   // 0 (others rejected by the constructor)
+                case 0:
                     UDisplace = UPosition; VDisplace = VPosition;
+                    break;
+                default:
+                    // Disasm 0x10505bd7-0x10505be2 — movzx [esi+0xe0]; cmp eax,4; ja 0x10505cbf (epilogue):
+                    // PanningStyle 5..255 writes neither UD (+0xf8) nor VD (+0xfc); MasterCount/U/V above are stored.
                     break;
             }
         }

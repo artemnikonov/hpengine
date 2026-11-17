@@ -451,9 +451,12 @@ namespace HP1.UEScript
         // ── FDynamicSprite::Setup, sprite branch (Render.dll 0x10b30e4b..0x10b3111d; DrawType 1 and 7) ─────────────────
         // No texture — reject before depth. Z = Zc = ((dz·Z.z + dy·Z.y) + dx·Z.x) − SpriteProjForward (+0x190), d = Location −
         // Coords.Origin; Z < SpriteProjForward·(−2.0) (.rdata 0x10b395fc) — reject (not for ortho views). Screen point —
-        // URender::Project (GRender vtable +0x7c); half size = ((USize·persp)·DrawScale)·0.5 (0x10b385ec); X1/X2 =
+        // URender::Project (GRender vtable +0x7c); half size = ((USize·persp)·DrawScale)·0.5 (0x10b385ec), HP2
+        // ((USize·DrawScale)·persp)·0.5 (0x10b315d7, 0x10b316c1); X1/X2 =
         // appCeil(sx ∓ half) through float, swap, clamp to [0, frame X], reject if X2 ≤ 0 or X1 ≥ X − 1; Y likewise by
         // VSize and frame Y, success: Y2 > 0, Y1 < Y, Y1 < Y2. ShowFlags & 0x20 (editor icons) — loud refusal.
+        // Original: Render.dll not exported: FUN_10b30c70 FDynamicSprite::Setup [HP1 0x10B30C70] [HP2 0x10B31320] — thunks
+        // 0x10b01131 / 0x10b01136, called by the FDynamicSprite ctor (HP1 0x10b307c3, HP2 0x10b30e73) and URender::DrawActor
         public static bool SpriteSetup(UESceneNode f, Vector3 loc, float drawScale, float spriteProjForward, int uSize, int vSize,
             bool hasTexture, int showFlags, int rendMap, out ScreenBounds sb)
         {
@@ -466,13 +469,14 @@ namespace HP1.UEScript
             sb.Z1 = sb.Z2 = z;
             if (!(z >= spriteProjForward * -2f) && rendMap is not (13 or 14 or 15)) return false;
             if (!Project(f, loc, rendMap, out float sx, out float sy, out float persp)) return false;
-            float hx = (((float)uSize * persp) * drawScale) * 0.5f;
+            bool hp2 = UEGameProfile.Current.Game == UEEdition.Game.HP2;
+            float hx = hp2 ? (((float)uSize * drawScale) * persp) * 0.5f : (((float)uSize * persp) * drawScale) * 0.5f;
             int x1 = ViaFloat(AppCeil(sx - hx)), x2 = ViaFloat(AppCeil(hx + sx));
             if (x1 > x2) (x1, x2) = (x2, x1);
             if (x1 < 0) { x1 = 0; if (x2 < 0) x2 = 0; }
             if (x2 > f.X) { x2 = f.X; if (x1 > f.X) x1 = f.X; }
             if (!(x2 > 0) || !(x1 < f.X - 1)) return false;
-            float hy = (((float)vSize * persp) * drawScale) * 0.5f;
+            float hy = hp2 ? (((float)vSize * drawScale) * persp) * 0.5f : (((float)vSize * persp) * drawScale) * 0.5f;
             int y1 = ViaFloat(AppCeil(sy - hy)), y2 = ViaFloat(AppCeil(hy + sy));
             if (y1 > y2) (y1, y2) = (y2, y1);
             if (y1 < 0) { y1 = 0; if (y2 < 0) y2 = 0; }
@@ -487,6 +491,7 @@ namespace HP1.UEScript
         public static bool BoundVisible(UESceneNode frame, in BrushCoords box, out ScreenBounds sb)
             => BoundVisible(frame, box, null, out sb);
 
+        // Original: Render.dll ?BoundVisible@URender@@UAEHPAUFSceneNode@@ABVFCoords@@PAVFSpanBuffer@@AAUFScreenBounds@@@Z [HP1 0x10B21030] [HP2 0x10B20980]
         // span — the caller's FSpanBuffer (OccludeBsp, map node): a visible box outside free spans is invisible
         // (0x10b21ff8..0x10b2201d: BoxIsVisible on UNclamped bounds). Camera inside the box — visible without the test.
         public static bool BoundVisible(UESceneNode frame, in BrushCoords box, UESpanBuffer span, out ScreenBounds sb)
@@ -501,8 +506,9 @@ namespace HP1.UEScript
             BrushCoords inv = Inverse(box);
             Vector3 fo = f.Origin;
             float px, py, pz;
-            if (UEEdition.RuOrder)
-            {   // RU EA (RU Render 0x10b20ae3..0x10b20b3e): ((Y·fo.y + Z·fo.z) + X·fo.x) + O.
+            if (UEEdition.RuOrder || UEGameProfile.Current.Game == UEEdition.Game.HP2)
+            {   // RU EA (RU Render 0x10b20ae3..0x10b20b3e) and HP2 (0x10b20d03..0x10b20d4e, ((Z·fo.z + Y·fo.y) + X·fo.x) + O):
+                // ((Y·fo.y + Z·fo.z) + X·fo.x) + O.
                 px = ((inv.Y.x * fo.y + inv.Z.x * fo.z) + inv.X.x * fo.x) + inv.Origin.x;
                 py = ((inv.Y.y * fo.y + inv.Z.y * fo.z) + inv.X.y * fo.x) + inv.Origin.y;
                 pz = ((inv.Y.z * fo.y + inv.Z.z * fo.z) + inv.X.z * fo.x) + inv.Origin.z;
@@ -676,7 +682,8 @@ namespace HP1.UEScript
         // BEFORE the frame's GetFrame (DrawFrame runs after all SetupDynamics, Render.dll.c:2659-2660).
         public static void SetupDynamicsPass(UESceneNode frame, IList<UEObject> levelActors,
             UEObject viewer, UEObject exclude, bool highDetailActors, int rendMap, Action<UEObject> sprite,
-            Action<UEObject> update, Action<UEObject> brushUpdate, int recursion = 0, Action<UEObject> light = null)
+            Action<UEObject> update, Action<UEObject> brushUpdate, int recursion = 0, Action<UEObject> light = null,
+            Action shadowBoundVisible = null)
         {
             if (viewer is null) return;
             if ((UEValue.ToInt(viewer.GetProp(PK.ShowFlags)) & 8) == 0) return;
@@ -695,7 +702,7 @@ namespace HP1.UEScript
                         sprite?.Invoke(a);
                         if (a.GetDeclared("Actor", "Shadow") is UEObject shadow && !shadow.Destroyed
                             && rendMap is not (13 or 14 or 15)
-                            && ShadowBoxVisible(frame, loc, UEValue.AsFloat(a.GetProp(PK.CollisionRadius))))
+                            && ShadowBoxVisible(frame, loc, UEValue.AsFloat(a.GetProp(PK.CollisionRadius)), shadowBoundVisible))
                             update(a);
                     }
                 }
@@ -731,7 +738,7 @@ namespace HP1.UEScript
         {
             bool behind = UEValue.ToBool(viewer.GetProp(PK.bBehindView));
             if (ReferenceEquals(a, exclude)) return false;
-            if (UEValue.ToBool(a.GetProp(PK.bHidden))) return false;
+            if (UEValue.ToBool(a.GetProp(PK.bHidden)) && !HiddenShownAsPath(a, viewer)) return false;
             if (!UEInterpreter.ClassIsA(viewer.Class, "PlayerPawn")) return false;   // IsA APlayerPawn failed -> 0x10b3051a
             // APlayerPawn::IsActorVisible is always true (0x10379720).
             Vector3 loc = UEValue.AsVector3(a.GetProp(PK.Location));
@@ -751,6 +758,16 @@ namespace HP1.UEScript
             return true;
         }
 
+        // Original: Render.dll ?SetupDynamics@URender@@QAEXPAUFSceneNode@@PAVAActor@@@Z [HP1 0x10b2fb30] [HP2 0x10b30190]
+        // The HP2 lines after the hidden test [HP2 0x10b3027c..0x10b302d3]: a hidden actor still passes when the viewport
+        // actor's ShowFlags has 0x1000 (SHOW_Paths) and it IsA Keypoint or IsA PatrolPoint (Engine's AKeypoint /
+        // APatrolPoint PrivateStaticClass); HP1 skips every hidden actor (0x10b2fc1d). The rest of the HP2 body is HP1's by
+        // fields (tools/hp2/render_diff.py; bools bHighDetail/bOwnerNoSee/bOnlyOwnerSee/bDynamicLight/bHiddenEd renumbered).
+        static bool HiddenShownAsPath(UEObject a, UEObject viewer)
+            => UEGameProfile.Current.Game == UEEdition.Game.HP2
+               && (UEValue.ToInt(viewer.GetProp(PK.ShowFlags)) & 0x1000) != 0
+               && (UEInterpreter.ClassIsA(a.Class, "Keypoint") || UEInterpreter.ClassIsA(a.Class, "PatrolPoint"));
+
         // Owner chain, starting at the actor itself (0x10b2fd33..44).
         static bool OwnedBy(UEObject a, UEObject viewer)
         {
@@ -760,7 +777,8 @@ namespace HP1.UEScript
         }
 
         // Shadow box and its tests (0x10b30303..0x10b304bc). Storage is float.
-        public static bool ShadowBoxVisible(UESceneNode frame, Vector3 loc, float radius)
+        // boundVisible: called as the box reaches BoundVisible [HP2 0x10b30b6b] (the GetRenderBoundingBox-path slot's writer).
+        public static bool ShadowBoxVisible(UESceneNode frame, Vector3 loc, float radius, Action boundVisible = null)
         {
             // PC24: all arithmetic is single precision.
             float maxX = radius + loc.x, maxY = radius + loc.y, maxZ = loc.z;
@@ -771,6 +789,7 @@ namespace HP1.UEScript
             float push = (Math.Abs(ex * f.Z.x) + Math.Abs(ez * f.Z.z)) + Math.Abs(ey * f.Z.y);
             float dot = ((cy - f.Origin.y) * f.Z.y + (cz - f.Origin.z) * f.Z.z) + (cx - f.Origin.x) * f.Z.x;
             if (dot < -push) return false;
+            boundVisible?.Invoke();
             return BoundVisible(frame, BoxCoords(new Vector3(minX, minY, minZ), new Vector3(maxX, maxY, maxZ)));
         }
     }

@@ -100,6 +100,7 @@ namespace HP1.UEScript
         public Func<int, UEObject> ZoneActor;            // Model.Zones[z].ZoneActor (None -> null)
         public UEObject LevelInfo;                       // Level->Actors[0]
         public object Level;                             // FSceneNode.Level (+4) — compared for children
+        public UEObject Viewer;                          // Frame->Viewport->Actor (+0x30): HP2's Lumos pass reads it
         public int ShowFlags, RendMap;
         public Func<bool> SpanBased;                     // RenDev +0x48 — read in the mirror and warp branches and by the DrawFrame sprite sort (D-79)
         public Func<bool> Shiny;                         // RenDev.ShinySurfaces (+0x5c) — read only for a translucent mirror
@@ -648,6 +649,7 @@ namespace HP1.UEScript
             UESpanBuffer fs = f.SpanBuffer;
             UESpanBuffer fz = zoneSpans[frameZone];
             fz.StartY = fs.StartY; fz.EndY = fs.EndY; fz.ValidLines = fs.ValidLines; fz.Index = fs.Index;
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2) LumosPass(m, w, frameZone);
 
             // Walk stack: frame — {iNode, iFar, farOutside, outside, flag, prev}.
             var stack = new List<StackFrame> { new StackFrame() };
@@ -736,6 +738,43 @@ namespace HP1.UEScript
         }
 
         sealed class StackFrame { public int Node, Far = -1, FarOutside, Outside, Flag, Prev; }
+
+        // Original: Render.dll ?OccludeBsp@URender@@QAEXPAUFSceneNode@@@Z [HP1 0x10b22480] [HP2 0x10b21dd0]
+        // HP2's Lumos pass, between the walk stack's allocation and the walk [HP2 0x10b2251c..0x10b2269b]. The viewport
+        // actor (Viewport->Actor IsA APlayerPawn, else NULL, 0x10b21fb6..0x10b21ff5) with PlayerPawn.bLumosOn (+0x950 bit 0)
+        // and !GIsEditor: every node i < Nodes.Num whose iZone[0] and iZone[1] (+0x34/+0x35) are both in the mask 1 << the
+        // frame's zone (__allshl, set at 0x10b22036) and whose surface (+0x1c) has PolyFlags | ExtraPolyFlags (Viewport+0x90,
+        // 0 in game) with a bit of 0x800040 and not 0x40000 gets PolyFlags |= 0x40000 as soon as one of its NumVertices
+        // (+0x36) points (VertPool[iVertPool + k].pVertex) lies closer than PlayerPawn.fLumosRadius (+0x954) to the actor's
+        // Location: d² = (dx·dx + dz·dz) + dy·dy, d = appFastSqrt by GMath's table (+0x1008c, built by the identical
+        // FGlobalMath ctor: equal to FogMap.FastSqrt's table in all 2048 entries, run under unicorn), `fcomp; test ah,1`
+        // (d < radius or unordered). The render window is PC24: float arithmetic.
+        internal static void LumosPass(HeadlessBspModel m, UEOcclusionWorld w, int frameZone)
+        {
+            UEObject a = w.Viewer;
+            if (a is null || !UEInterpreter.ClassIsA(a.Class, "PlayerPawn"))
+                throw new NotSupportedException("HP2 OccludeBsp: the viewport actor is not a PlayerPawn (the original reads +0x950 of NULL)");
+            if (!UEValue.ToBool(a.GetProp("bLumosOn"))) return;
+            float radius = UEValue.AsFloat(a.GetProp("fLumosRadius"));
+            Vector3 loc = UEValue.AsVector3(a.GetProp(PK.Location));
+            ulong mask = Bit(frameZone);
+            int nodes = m.LiveNodeCount;
+            for (int i = 0; i < nodes; i++)
+            {
+                m.RenderNode(i, out _, out _, out _, out _, out _, out int iSurf, out _, out _, out _, out _,
+                    out int zone0, out int zone1, out int numVerts, out int vertPool);
+                if ((Bit(zone0) & mask) == 0 || (Bit(zone1) & mask) == 0) continue;
+                int pf = m.SurfPolyFlagsOf(iSurf);   // | ExtraPolyFlags: 0 in game
+                if ((pf & 0x800040) == 0 || (pf & 0x40000) != 0) continue;
+                for (int k = 0; k < numVerts; k++)
+                {
+                    Vector3 p = m.Point(m.RenderVertexPoint(vertPool, k));
+                    float dx = p.x - loc.x, dy = p.y - loc.y, dz = p.z - loc.z;
+                    float d = FogMap.FastSqrt((dx * dx + dz * dz) + dy * dy);
+                    if (!(d >= radius)) { m.OrSurfPolyFlags(iSurf, 0x40000); break; }
+                }
+            }
+        }
 
         // Node after the near subtree (0x10b22f85 .. 0x10b24e4a): near leaf PreRender, frustum culling,
         // node and coplanar surfaces, far leaf PreRender. popNow — the branch went to Pop past the far
@@ -1259,6 +1298,10 @@ namespace HP1.UEScript
         internal void SetRenderNodeFlags(int i, int flags) => _nodes[i].NodeFlags = flags & 0xff;
         internal int RenderVertexPoint(int vertPool, int k) => _vertices[vertPool + k];
         internal int SurfPolyFlagsOf(int surf) => surf >= 0 && surf < _surfFlags.Length ? _surfFlags[surf] : 0;
+        // A write into the level's Surfs[surf].PolyFlags (+4), the one array collision reads too: HP2 OccludeBsp's Lumos mark.
+        internal void OrSurfPolyFlags(int surf, int bits) => _surfFlags[surf] |= bits;
+        // Fixture seam (headless --hp2-lumos, InternalsVisibleTo): a case restores the flags as loaded.
+        internal void SetSurfPolyFlagsForTest(int surf, int flags) => _surfFlags[surf] = flags;
         // UModel::GetLightMapIndex != NULL (Engine.dll.c:153191): iSurf != -1, Surfs[iSurf].iLightMap != -1, LightMap.Num != 0.
         internal bool SurfHasLightMapIndex(int surf)
             => surf != -1 && _surfRec[surf].LightMap != -1 && ParseTables.LightMaps.Length != 0;

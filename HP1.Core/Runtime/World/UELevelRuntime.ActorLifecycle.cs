@@ -11,6 +11,68 @@ namespace HP1.UEScript
 {
     public sealed partial class UELevelRuntime
     {
+        // The AParticleFX constructor [HP1 0x103C0E90] [HP2 0x103CE420] ends with CreateParticleList. Its gate is the
+        // actor's own bDeleteMe, the same rule in both games: `mov eax,[esi+0x28]; test ah,2` [HP1 0x103C1BE3] / `test ah,4`
+        // [HP2 0x103CF0A3] read AActor's first bool word, where bDeleteMe is bit 0x200 (HP1) / 0x400 (HP2: bAnimNotReplaceable
+        // precedes it) by each build's layout (ShippedLayout). Not an object flag: ObjectFlags is UObject +0x1c
+        // (StaticAllocateObject stores InFlags there [HP1 Core 0x10161EED] [HP2 Core 0x101652BD]). The constructor sees the
+        // class defaults (InitProperties [HP1 Core 0x10161F16] runs before StaticConstructObject calls the class
+        // constructor [HP1 Core 0x101620BB]), so every emitter, placed (CreateExport) or spawned, gets a list
+        // (engine_body_judge.py CreateParticleList; live HP2: Entry's spawned SpellCursor0, PrivetDr's placed CloudPuffs0).
+
+        // Original: Engine.dll ?CreateParticleList@AParticleFX@@QAEXXZ [HP1 0x103C1B70] [HP2 0x103CF030]
+        // Original: Engine.dll ?Create@UParticleList@@SAPAV1@PAVAActor@@@Z [HP1 0x103C7090] [HP2 0x103D45B0]
+        // check(!ParticleList), check(DrawType == DT_Particles), then unless bDeleteMe: UParticleList::Create(this) =
+        // new(GetOuter(), NAME_None) UParticleListPriv — MakeUniqueObjectName in the actor's outer with the native class's
+        // ClassUnique. The particles themselves stay in the frame producer's container (UEWorldFrameProducer.Particles);
+        // this is the object ParticleList (transient) points at.
+        internal void CreateParticleList(UEInterpreter interp, UEObject fx)
+        {
+            if (!UEInterpreter.ClassIsA(fx.Class, "ParticleFX")) return;
+            CheckParticleListCtor(fx);
+            if (CreatesParticleList(fx.GetProp("bDeleteMe"))) AttachParticleList(interp, fx);
+        }
+
+        // bDeleteMe as the constructor sees it (the object's defaults; for an export the port does not instantiate, its
+        // class's default).
+        internal static bool CreatesParticleList(object bDeleteMe) => !UEValue.ToBool(bDeleteMe);
+
+        // The constructor's two checks, on the class defaults it sees.
+        internal static void CheckParticleListCtor(UEObject fx)
+        {
+            if (fx.GetProp("ParticleList") is not null)
+                throw new NotSupportedException($"AParticleFX::CreateParticleList on {fx.GetProp(PK.Name)}: check(!ParticleList) fails");
+            if (UEValue.ToInt(fx.GetProp(PK.DrawType)) != 8)
+                throw new NotSupportedException($"AParticleFX::CreateParticleList on {fx.GetProp(PK.Name)}: check(DrawType == DT_Particles) fails");
+        }
+
+        // `fx` null: an emitter export the port does not instantiate (not in ULevel::Actors) — its constructor still
+        // takes a name.
+        void AttachParticleList(UEInterpreter interp, UEObject fx)
+        {
+            // UParticleList / UParticleListPriv are native-only classes (no script class in Engine.u): no UClass, and no
+            // script reads the object (ParticleList is named only by its declaration in Engine.u).
+            var list = new UEObject { Interp = interp, OuterPath = LevelPackageName };
+            list.Props["Name"] = new UEName(MintName("ParticleListPriv", () => interp.ParticleListPrivUnique++));
+            if (fx is not null) fx.Props["ParticleList"] = list;
+        }
+
+        // The placed emitters of this world's map in export-table order (UEActorGraphLoader.Load), named when the world's
+        // LoadMap runs: the port reads a map's actor graph before the Entry world it boots first, the original constructs
+        // them in LoadMap's LoadPackage after Entry's startup.
+        internal readonly List<UEObject> PendingLoadedParticleLists = new();
+
+        void AttachLoadedParticleLists(UEInterpreter interp)
+        {
+            foreach (UEObject fx in PendingLoadedParticleLists) AttachParticleList(interp, fx);
+            PendingLoadedParticleLists.Clear();
+        }
+
+        // HP2 [0x103b0d20] is HP1's body but for two lines (a side-by-side read, tools/hp2 sbs: 8 hunks — bDeleteMe and
+        // Actor.Deleted by name, the relocated error paths, and these): the level pass clears every actor's TickParent /
+        // TickParent2 that points at the dying actor [HP2 0x103b109f..0x103b10b0], and the audio notification checks
+        // Engine too and goes through the HP2 audio subsystem's slot +0x88 [HP2 0x103b124d..0x103b1260] (HP1 +0x7c).
+        // Original: Engine.dll ?DestroyActor@ULevel@@UAEHPAVAActor@@H@Z [HP1 0x103a72c0] [HP2 0x103b0d20]
         public bool DestroyActor(UEInterpreter interp, UEObject self)
         {
             if (self is null) return false;
@@ -71,8 +133,12 @@ namespace HP1.UEScript
             // unlink every touch pair FROM THE HOLDER's side — an asymmetric
             // link (they hold us, we do not hold them) is found here, not in
             // our own list. bNoNotify=1: the dying side gets no UnTouch (253052).
+            bool hp2 = UEGameProfile.Current.Game == UEEdition.Game.HP2;
             foreach (UEObject a in Actors.ToArray())
             {
+                if (hp2 && a is not null)
+                    foreach (string parent in new[] { "TickParent", "TickParent2" })
+                        if (ReferenceEquals(a.GetProp(parent), self)) a.Props[parent] = null;
                 if (a is null || a.Destroyed || ReferenceEquals(a, self)) continue;
                 if (ReferenceEquals(a.GetProp(PK.Owner) as UEObject, self))
                 {
@@ -101,7 +167,9 @@ namespace HP1.UEScript
             self.Props["bDeleteMe"] = true;
             // Engine->Audio->NoteDestroy(Actor) (vtable +0x7c, 253088-253089): the ambient slot
             // is silenced, other channels are detached from the actor.
-            FrameProducer?.Audio.NoteDestroy(self.ObjectId);
+            // HP2: if (Engine && Engine->Audio) Audio->vtable[+0x88](this) [HP2 0x103b124d..0x103b1260] — the audio line's
+            // device seam names that slot; the port's seam is the same call.
+            FrameProducer?.AudioDevice?.NoteDestroy(self.ObjectId);
             ExitProperties(self.Class, self);   // ConditionalDestroy -> UObject::Destroy (253087)
             // Outside the editor the actor joins Level->FirstDeleted (disasm
             // 0x103a7801..0x103a7812); CleanupDestroyed clears the list.
@@ -148,12 +216,15 @@ namespace HP1.UEScript
 
         // ── AActor::SetOwner (Engine.dll.c:44726): LostChild on the old owner,
         // set Owner, GainedChild on the new. Shipped keeps no child list. ──
+        // HP2 adds one line: no new owner -> AnimBone = 0 [HP2 0x103813d4] (tools/hp2/engine_body_judge.py: the HP1 and HP2
+        // bodies agree on every other outcome).
         public void SetOwner(UEInterpreter interp, UEObject actor, UEObject newOwner)
         {
             UEObject old = actor.GetProp(PK.Owner) as UEObject;
             if (old is not null) UELifecycle.CallEvent(interp, old, "LostChild", actor);
             actor.Props["Owner"] = newOwner;
             if (newOwner is not null) UELifecycle.CallEvent(interp, newOwner, "GainedChild", actor);
+            else if (UEGameProfile.Current.Game == UEEdition.Game.HP2) actor.Props["AnimBone"] = (byte)0;
         }
 
         // ── AActor::SetBase (Engine.dll.c:160728): re-parent onto NewBase with
@@ -269,7 +340,7 @@ namespace HP1.UEScript
         public UEObject SpawnActor(UEInterpreter interp, UEObject self, UClass cls, UEObject owner,
             string tag, Vector3 location, UERotator rotation,
             Func<UEObject> premadeFactory = null, UEObject instigator = null,
-            bool noCollisionFail = false)
+            bool noCollisionFail = false, string name = null)
         {
             // ── CLASS CANONICALISATION ───────────────────────────────────────
             //
@@ -360,10 +431,12 @@ namespace HP1.UEScript
             }
             if (premadeFactory is null) actor.LoadDefaults();
 
-            actor.Props["Name"] = new UEName(MakeUniqueSpawnName(interp, cls));
+            actor.Props["Name"] = new UEName(name ?? MakeUniqueSpawnName(interp, cls));   // InName != NAME_None: that name
             // StaticConstructObject(Class, Level->GetOuter(), ...) — the outer of a
             // spawned actor is the level package (Engine.dll 0x103a6863-0x103a6881).
             actor.OuterPath = LevelPackageName;
+            // The constructor of a ParticleFX runs here (StaticConstructObject: HP1 0x103a6863..0x103a6881, HP2 0x103b02dc).
+            CreateParticleList(interp, actor);
             actor.Props["Location"] = location;
             actor.Props["OldLocation"] = location;
             actor.Props["Rotation"] = rotation;
@@ -390,6 +463,9 @@ namespace HP1.UEScript
                 UFunction gained = UELifecycle.ActorEventsBlocked(owner) ? null : interp.FindEventFunction(owner, "GainedChild");
                 if (gained is not null) Guard(() => interp.Invoke(owner, gained, actor), "GainedChild");
             }
+            // SpawnActor calls SetOwner(Owner) with no owner too [HP1 0x103a6b80] [HP2 0x103b05e3]: on a new actor (Owner
+            // None) that is HP1's no-op and HP2's AnimBone = 0.
+            else SetOwner(interp, actor, null);
             if (instigator is not null) actor.Props["Instigator"] = instigator;
 
             Actors.Add(actor);

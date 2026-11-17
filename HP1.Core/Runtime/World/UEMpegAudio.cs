@@ -51,16 +51,17 @@ namespace HP1.UEScript
         public int Frames => Channels == 0 ? 0 : Samples.Length / Channels;
     }
 
-    // Sound PCM by package format (USound.FileType): "WAV" — the data chunk as is (unsigned 8-bit
-    // is converted to signed 16-bit as any WAV player does: (b-128)<<8). mp2 does not come here: its
-    // PCM is an engine stream loop (UEMp2SoundStream.ShippedPcm, needs iEndPosn from the package
-    // tail). The shipped data has no other formats — refusal.
+    // Sound PCM of a non-mp2 sound: the WAV data chunk as is (unsigned 8-bit becomes b - 0x80 in Galaxy's PCM reader
+    // FUN_10617130, mixed as b << 8 — the same as (b-128)<<8 here, GalaxyMixKernel). mp2 does not come here: its
+    // PCM is an engine stream loop (UEMp2SoundStream.ShippedPcm, needs iEndPosn from the package tail).
     public static class UESoundPcm
     {
         public static UEPcm Decode(byte[] payload, string format, string what)
         {
-            if (!string.Equals(format, "WAV", StringComparison.OrdinalIgnoreCase))
-                throw new NotSupportedException($"{what}: sound format {format}");
+            // Galaxy does not read FileType for a non-mp2 sound: FUN_10616790 sniffs the first 0x50 bytes — "AS  ", ".snd",
+            // "WAVE" at +8, "SCRS" — and hands anything else to its MPEG decoder FUN_1061e4e0. Only the WAVE loader is ported.
+            if (payload.Length >= 12 && !(payload[8] == 'W' && payload[9] == 'A' && payload[10] == 'V' && payload[11] == 'E'))
+                throw new NotSupportedException($"{what}: sound format {format} without WAVE at +8 — Galaxy's other loaders (FUN_10616790) are not ported (STOP)");
             if (payload.Length < 12 || payload[0] != 'R' || payload[1] != 'I' || payload[2] != 'F' || payload[3] != 'F'
                 || payload[8] != 'W' || payload[9] != 'A' || payload[10] != 'V' || payload[11] != 'E')
                 throw new InvalidDataException($"{what}: WAV without a RIFF/WAVE header");
@@ -71,8 +72,15 @@ namespace HP1.UEScript
                 if (size < 0 || pos + 8 + size > payload.Length) throw new InvalidDataException($"{what}: truncated WAV chunk");
                 if (payload[pos] == 'f' && payload[pos + 1] == 'm' && payload[pos + 2] == 't' && payload[pos + 3] == ' ')
                 {
-                    if (BitConverter.ToUInt16(payload, pos + 8) != 1)
-                        throw new NotSupportedException($"{what}: WAV is not PCM (tag {BitConverter.ToUInt16(payload, pos + 8)})");
+                    // Original: Galaxy.dll not exported: FUN_10617270 (the WAVE loader of FUN_10616790, called by ?RegisterSound@UGalaxyAudioSubsystem@@UAEXPAVUSound@@@Z) [HP1 0x10617270]
+                    // The loader knows tag 1 (PCM), 0x11 (IMA ADPCM: its own decoder FUN_10617b20) and 0x55 (MPEG: Galaxy's
+                    // decoder FUN_1061e4e0); any other tag returns no sample and RegisterSound logs "Invalid sound format in %s"
+                    // to GError (Galaxy.dll.c:105-109): a fatal error.
+                    int tag = BitConverter.ToUInt16(payload, pos + 8);
+                    if (tag == 0x11 || tag == 0x55)
+                        throw new NotSupportedException($"{what}: WAV tag 0x{tag:x} — Galaxy's {(tag == 0x11 ? "IMA ADPCM" : "MPEG")} decoder is not ported (STOP)");
+                    if (tag != 1)
+                        throw new InvalidDataException($"Invalid sound format in {what} (WAV tag 0x{tag:x}: Galaxy's loader returns no sample, GError — fatal)");
                     channels = BitConverter.ToUInt16(payload, pos + 10);
                     rate = BitConverter.ToInt32(payload, pos + 12);
                     bits = BitConverter.ToUInt16(payload, pos + 22);
@@ -82,6 +90,7 @@ namespace HP1.UEScript
                 pos += 8 + size + (size & 1);
             }
             if (dataAt < 0 || channels <= 0 || rate <= 0) throw new InvalidDataException($"{what}: WAV without fmt/data");
+            if (channels > 2) throw new NotSupportedException($"{what}: WAV with {channels} channels — Galaxy reads it as mono, not ported (STOP)");
             short[] samples;
             if (bits == 16)
             {
@@ -93,7 +102,9 @@ namespace HP1.UEScript
                 samples = new short[dataLen / channels * channels];
                 for (int i = 0; i < samples.Length; i++) samples[i] = (short)((payload[dataAt + i] - 128) << 8);
             }
-            else throw new NotSupportedException($"{what}: WAV {bits} bits");
+            // Galaxy keys only on 16 bits (flag 4) and 2 channels (flag 0x40): any other size reads as 8-bit bytes and any
+            // other channel count as mono (FUN_10617270 :15838-15841) with frames = data / block align — not ported (STOP).
+            else throw new NotSupportedException($"{what}: WAV {bits} bits — Galaxy reads it as 8-bit, not ported (STOP)");
             return new UEPcm { SampleRate = rate, Channels = channels, Samples = samples, SampleBytes = bits / 8 };
         }
     }
@@ -127,9 +138,18 @@ namespace HP1.UEScript
             {
                 uint h = (uint)(data[pos] << 24 | data[pos + 1] << 16 | data[pos + 2] << 8 | data[pos + 3]);
                 var hd = UEMpegAudio.ParseHeader(h, offsets.Count, pos, what);
+                // Original: Engine.dll not exported: CMpegFilePlayer Open, frame decode, frame read [HP1 0x10453030, 0x10452C80, 0x104531E0]
+                // The stream's format is the first frame's: Open fixes the output frame size (+0x249c) and the rate Galaxy
+                // plays at; every frame is then decoded by its OWN header (FUN_10452c80 -> layer II FUN_10456190). A later
+                // frame with another rate or MPEG version but the same channel count decodes exactly as it does alone
+                // (unicorn on the real bodies: Common_Room 8 frames + Green_Cauldron_mx 8 frames, 22050 MPEG-2 -> 44100
+                // MPEG-1: frames 1-7 after the change byte-equal to Green_Cauldron decoded alone) and plays at the first rate.
                 if (offsets.Count == 0) { SampleRate = hd.Rate; Channels = hd.Channels; }
-                else if (hd.Rate != SampleRate || hd.Channels != Channels)
-                    throw new InvalidDataException($"{what}: frame {offsets.Count} changes format ({hd.Rate} Hz × {hd.Channels} versus {SampleRate} × {Channels})");
+                else if (hd.Channels != Channels)
+                    // A mono frame in a stereo stream yields a full stereo-size frame (4608 bytes) that is neither its mono
+                    // decode nor stale data (same unicorn run with Invisible's mono frames): the layer II rule for a mode
+                    // change inside FUN_10456190 is not read — STOP.
+                    throw new NotSupportedException($"{what}: frame {offsets.Count} changes the channel count ({hd.Channels} versus {Channels}) — the decoder's mode change is not ported (STOP)");
                 if (pos + hd.Bytes > data.Length) break;   // a truncated last frame is not decoded
                 offsets.Add(pos);
                 pos += hd.Bytes;
@@ -181,7 +201,7 @@ namespace HP1.UEScript
     //     (the RIGHT sample of frame 240 comes first — confirmed by execution under unicorn);
     //   * a loop is exactly iEndPosn bytes (+0x4c: USound — tail word v76, 0x1038018e; UMusic —
     //     Data.mUncompressedLength, Engine.dll.c:80303/80311). 0 in shipped means up to the end of decoder
-    //     data (for a loop — assert "!(iEndPosn==0 && IsLooping)", 0x1037e5dc); here a refusal (see below);
+    //     data (for a loop — assert "!(iEndPosn==0 && IsLooping)", 0x1037e5dc);
     //   * loop (+0x54): FUN_10452650 -> FUN_10453150 (0x10453150-0x10453176) resets ONLY the bitstream
     //     and frame-buffer positions (+0x24e8/+0x24ac/+0x24a8/+0x24e4/+0x24b4); the synthesis filter
     //     (V +4.., index +0x24bc) is zeroed only by Open (FUN_10452730) — state is CONTINUOUS across the
@@ -196,19 +216,25 @@ namespace HP1.UEScript
     {
         readonly UEMpegStream _dec;
         readonly int _skip;          // int16 samples skipped (skip bytes / 2)
-        readonly long _loop;         // int16 samples per loop (iEndPosn / 2)
+        readonly long _lapBytes;     // bytes per lap (iEndPosn, or the decoder output when it ends first)
         readonly short[] _scratch;
-        long _pos;                   // delivered in this loop (mPosn / 2)
-        readonly bool _endsEarly;    // iEndPosn past the decoder output: the stream finishes after lap 1
-        readonly bool _oddEnd;       // an odd byte lap: lap 2 would start mid-sample
+        readonly short[] _one = new short[1];
+        long _pos;                   // bytes delivered in this lap (mPosn +0x28)
+        int _decHi = -1;             // high byte of a decoder sample whose low byte ended the previous read
+        int _outLo = -1;             // low byte of an output sample whose high byte comes from the next lap
 
         public int SampleRate => _dec.SampleRate;
         public int Channels => _dec.Channels;
-        public long LoopSamples => _loop;   // int16, interleaved channels
+        // Whole int16 samples of one lap (interleaved channels); an odd byte lap's half sample is not counted.
+        public long LoopSamples => _lapBytes / 2;
+        // The stream finishes after lap 1 whatever the loop flag (FillBuffer's short read, 0x1037e661: +8 = 1, then
+        // every call returns 0 at 0x1037e594): iEndPosn past the decoder output, or iEndPosn == 0 without a loop.
+        public bool Finishes { get; }
 
         // FUN_10452a80: skip bytes by layer.
         public static int SkipBytes(int layer) => layer == 1 ? 0x442 : layer == 2 ? 0x3c2 : 0;
 
+        // Original: Engine.dll not exported: MP2SoundStream::FillBuffer FUN_1037e550 [HP1 0x1037E550]
         public UEMp2SoundStream(byte[] data, int endBytes, string what)
         {
             _dec = new UEMpegStream(data, what);   // accepts layer II only
@@ -216,25 +242,17 @@ namespace HP1.UEScript
             _skip = SkipBytes(layer) / 2;
             if (endBytes < 0)
                 throw new InvalidDataException($"{what}: iEndPosn {endBytes} < 0");
-            long avail = _dec.Frames * _dec.Channels - _skip;
-            // iEndPosn == 0: shipped delivers up to the end of decoder data, and on the frame past the end
-            // reads memory beyond the buffer (FUN_10452ab0 without a bound; the "mpeg fail" frame of
-            // FUN_104531e0 is not counted). In shipped data no such sound reaches a stream (the only mp2
-            // with zero, HPSounds.menu_sfx.s_menu_enter, has bIsMP2 = 0 — the catalog refuses earlier) —
-            // not ported, STOP.
-            if (endBytes == 0)
-                throw new NotSupportedException($"{what}: iEndPosn == 0 — the \"to the end of decoder data\" loop is not ported (STOP)");
-            // Decoder shorter than the loop (RU AllDialog: 1366 voice lines): the frame past the data fails in the
+            long avail = 2 * (_dec.Frames * _dec.Channels - _skip);
+            // iEndPosn == 0 (0x1037e641-0x1037e64c): every read takes the whole request, so the stream delivers up to the
+            // end of decoder data and finishes there (the same short read as below). With the loop flag the engine asserts
+            // "!(iEndPosn==0 && IsLooping)" (0x1037e5dc-0x1037e5f8, appFailAssert: fatal) — ShippedPcm refuses that loudly.
+            // Decoder shorter than the lap (RU AllDialog: 1366 voice lines): the frame past the data fails in the
             // header read (FUN_104529c0: FSoundData::Buffer 0x1037ef20 clamps to Data.Num, returns != 4 ->
             // "waiting for cd access"), FUN_104531e0 does not count it ("mpeg fail 2"), so FillBuffer's read comes back
             // short (0x1037e65d) and the stream is finished (+8 = 1, 0x1037e664) after exactly the decoded bytes, looping
-            // or not. An odd iEndPosn (RU, all of them also past the decoder) makes the last read an odd byte count;
-            // the Galaxy voice end is the ring byte position >> 1 (0x1060bf1d-0x1060bf24), so the half sample is not
-            // played: the lap is floor(bytes / 2) int16 samples.
-            long laps = Math.Min(endBytes, 2 * avail);
-            _endsEarly = endBytes > 2 * avail;
-            _oddEnd = (laps & 1) != 0;
-            _loop = laps / 2;
+            // or not: it never restarts.
+            Finishes = endBytes == 0 || endBytes > avail;
+            _lapBytes = Finishes ? avail : endBytes;
             _scratch = new short[_skip];
             Skip();
         }
@@ -245,68 +263,112 @@ namespace HP1.UEScript
             _pos = 0;
         }
 
-        // New loop (FUN_1037e550 loop 0x1037e6c0): bitstream restart without synthesis reset, then skip.
+        // Decoder output as bytes (FUN_10452630 copies bytes of the int16 frame buffer): an odd count leaves the high
+        // byte of the last sample for the next call; Rewind drops it with the frame buffer position (FUN_10453150).
+        int DecoderBytes(byte[] dst, int off, int n)
+        {
+            int done = 0;
+            if (n > 0 && _decHi >= 0) { dst[off + done++] = (byte)_decHi; _decHi = -1; }
+            int whole = (n - done) / 2;
+            if (whole > 0)
+            {
+                var tmp = new short[whole];
+                int got = _dec.Read(tmp, 0, whole);
+                Buffer.BlockCopy(tmp, 0, dst, off + done, 2 * got);
+                done += 2 * got;
+                if (got < whole) return done;
+            }
+            if (done < n && _dec.Read(_one, 0, 1) == 1) { dst[off + done++] = (byte)_one[0]; _decHi = (byte)(_one[0] >> 8); }
+            return done;
+        }
+
+        // One lap as the bytes FillBuffer delivers (0x1037e641-0x1037e65f / 0x1037e714-0x1037e729).
+        byte[] LapBytes(string what)
+        {
+            var b = new byte[_lapBytes - _pos];
+            int got = DecoderBytes(b, 0, b.Length);
+            _pos += got;
+            if (got != b.Length) throw new InvalidOperationException($"{what}: mp2 lap not read completely ({got}/{b.Length})");
+            return b;
+        }
+
+        // New lap (FUN_1037e550 0x1037e6c0): bitstream restart without synthesis reset (FUN_10452650 -> FUN_10453150),
+        // then the skip. A finished stream never comes here in the engine (FillBuffer returns 0 at 0x1037e594).
         public void Restart()
         {
-            // A finished stream (early end) does not loop in shipped; an odd lap shifts the byte phase of lap 2.
-            // Neither occurs for a looping sound or a song in the shipped data (US, RU) — not ported, STOP.
-            if (_endsEarly || _oddEnd)
-                throw new NotSupportedException($"mp2 loop restart after {(_endsEarly ? "an early end of stream" : "an odd-byte lap")} — not ported (STOP)");
+            if (Finishes) throw new InvalidOperationException("mp2 Restart of a finished stream (FillBuffer returns 0, no lap follows)");
             _dec.Rewind();
+            _decHi = -1;
             Skip();
         }
 
-        // Up to count samples of the loop; 0 = end of loop (the caller loops via Restart).
+        // Up to count int16 samples of the byte stream; 0 = end of lap (the caller loops via Restart). An odd byte lap ends
+        // with the low byte of a sample whose high byte is the first byte of the next lap (the ring takes bytes).
         public int Read(short[] dst, int offset, int count)
         {
-            int n = (int)Math.Min(count, _loop - _pos);
-            if (n <= 0) return 0;
-            int got = _dec.Read(dst, offset, n);
-            _pos += got;
-            return got;
+            int want = (int)Math.Min(2L * count - (_outLo >= 0 ? 1 : 0), _lapBytes - _pos);
+            if (want <= 0) return 0;
+            var b = new byte[want + 1];
+            int k = 0;
+            if (_outLo >= 0) { b[k++] = (byte)_outLo; _outLo = -1; }
+            int got = DecoderBytes(b, k, want);
+            _pos += got; k += got;
+            int n = k / 2;
+            Buffer.BlockCopy(b, 0, dst, 2 * offset, 2 * n);
+            if ((k & 1) != 0) _outLo = b[k - 1];
+            return n;
         }
 
-        short[] Circle(string what)
-        {
-            var c = new short[_loop];
-            int read = 0;
-            while (read < c.Length) { int n = Read(c, read, c.Length - read); if (n == 0) break; read += n; }
-            if (read != c.Length) throw new InvalidOperationException($"{what}: mp2 loop not read completely ({read}/{c.Length})");
-            return c;
-        }
-
-        // Sound PCM for a voice that repeats data itself (HPEngine mixer): no loop — loop 1; looping —
-        // loop 1 plus the repeated part from frame LoopStart. Loops k ≥ 2 equal loop 2 (see above), so a
-        // loop is loop 1, then loop 2 repeated; if loop 2 equals loop 1 (mono), one loop remains. Stereo
-        // with an odd sample count per loop: the per-frame layout repeats every TWO loops (each loop
-        // shifts the channel parity) — the start is "loop 1 + loop 2", the repeat "loop 2 + loop 2";
-        // without a loop the last unpaired sample is dropped (ASSUMPTION: how the Galaxy ring consumes
-        // the half frame is not read; shipped data has 6 entries of the form iEndPosn = output - 0x3c2,
-        // e.g. HPSounds.Hub2_sfx.waterfall2).
+        // Sound PCM for a voice that repeats data itself (HPEngine mixer). The FillBuffer byte stream is lap 1, then lap 2
+        // repeated (loops k >= 3 equal loop 2: the loop ends on the same last frame); a lap carries the synthesis tail of
+        // the previous one (stereo: up to 1414 units at the AMB_pre_dungeon seam). A lap of B bytes keeps the frame
+        // layout only every m laps, m the smallest with m·B a multiple of the frame size 2·ch (an odd byte lap shifts the
+        // byte phase, an odd stereo sample lap the channel parity), so the start is lap 1 + (m-1)·lap 2 and the repeat
+        // m·lap 2; if it equals the start (mono), one lap remains. Without a loop, or when the stream finishes (the voice then
+        // ends: Core plays it as not looping, SoundInfo.Finishes), lap 1 in
+        // whole frames: the Galaxy voice end is the ring byte position >> 1 (0x1060bf1d-0x1060bf24), so the half sample is
+        // not played (ASSUMPTION carried over: how the ring consumes a stereo stream's last unpaired sample is not read).
         public static UEPcm ShippedPcm(byte[] data, int endBytes, bool looping, string what)
         {
+            if (endBytes == 0 && looping)
+                throw new NotSupportedException($"{what}: iEndPosn == 0 with the loop flag — the engine asserts \"!(iEndPosn==0 && IsLooping)\" (0x1037e5dc, fatal)");
             var s = new UEMp2SoundStream(data, endBytes, what);
-            short[] c1 = s.Circle(what);
-            int ch = s.Channels;
-            bool odd = ch == 2 && (c1.Length & 1) != 0;
+            int ch = s.Channels, frame = 2 * ch;
+            byte[] b1 = s.LapBytes(what);
             var pcm = new UEPcm { SampleRate = s.SampleRate, Channels = ch };
-            if (!looping)
+            if (!looping || s.Finishes)
             {
-                pcm.Samples = odd ? c1[..^1] : c1;
+                pcm.Samples = Samples(b1, b1.Length / frame * frame);
                 return pcm;
             }
             s.Restart();
-            short[] c2 = s.Circle(what);
-            short[] head = odd ? Join(c1, c2) : c1, body = odd ? Join(c2, c2) : c2;
-            if (head.AsSpan().SequenceEqual(body)) { pcm.Samples = body; return pcm; }
-            pcm.Samples = Join(head, body);
-            pcm.LoopStart = head.Length / ch;
+            byte[] b2 = s.LapBytes(what);
+            int m = 1;
+            while (m * (long)b2.Length % frame != 0) m++;
+            byte[] head = Join(b1, Repeat(b2, m - 1)), body = Repeat(b2, m);
+            if (head.AsSpan().SequenceEqual(body)) { pcm.Samples = Samples(body, body.Length); return pcm; }
+            pcm.Samples = Samples(Join(head, body), head.Length + body.Length);
+            pcm.LoopStart = head.Length / frame;
             return pcm;
         }
 
-        static short[] Join(short[] a, short[] b)
+        static short[] Samples(byte[] b, int bytes)
         {
-            var r = new short[a.Length + b.Length];
+            var r = new short[bytes / 2];
+            Buffer.BlockCopy(b, 0, r, 0, r.Length * 2);
+            return r;
+        }
+
+        static byte[] Repeat(byte[] a, int n)
+        {
+            var r = new byte[a.Length * n];
+            for (int i = 0; i < n; i++) a.CopyTo(r, i * a.Length);
+            return r;
+        }
+
+        static byte[] Join(byte[] a, byte[] b)
+        {
+            var r = new byte[a.Length + b.Length];
             a.CopyTo(r, 0); b.CopyTo(r, a.Length);
             return r;
         }
@@ -325,7 +387,6 @@ namespace HP1.UEScript
         internal struct Header
         {
             public int Rate, Channels, Bytes, Mode, ModeExt, Table;
-            public bool Crc;
         }
 
         internal static Header ParseHeader(uint h, int frame, int pos, string what)
@@ -339,8 +400,15 @@ namespace HP1.UEScript
             int layer = 4 - ((int)(h >> 17) & 3);
             int brIndex = (int)(h >> 12) & 15;
             int srIndex = (int)(h >> 10) & 3;
-            if (version == 1 || layer != 2 || brIndex == 0 || brIndex == 15 || srIndex == 3)
-                throw new NotSupportedException($"{what}: frame {frame} is not MPEG Layer II or has a free bitrate (0x{h:x8})");
+            // CMpegBase::ProcessHeader (FUN_10452760): a free bitrate prints "bad bit rate" through the AUDIO ASSERT
+            // FUN_104533c0, which ends in int3 (0x104528c9-0x104528f1, 0x104533ce): the game dies — loud here too.
+            if (brIndex == 0)
+                throw new InvalidDataException($"{what}: frame {frame} has a free bitrate — the engine's AUDIO ASSERT \"bad bit rate\" ends in int3 (0x104528f1), fatal (0x{h:x8})");
+            // Not read (STOP): bit 20 clear (MPEG-2.5/reserved: ProcessHeader returns -1, 0x10452770, the caller's
+            // handling is not read), layer I/III (other decoders, FUN_10453630), bitrate 15 (table 0x10482aa8 gives 0:
+            // a frame body of -4 bytes) and sample-rate index 3.
+            if (version == 1 || version == 0 || layer != 2 || brIndex == 15 || srIndex == 3)
+                throw new NotSupportedException($"{what}: frame {frame} is not MPEG-1/2 Layer II with a listed bitrate and rate (0x{h:x8}) — not ported (STOP)");
             bool lsf = version != 3;
             int fs = srIndex == 0 ? 44100 : srIndex == 1 ? 48000 : 32000;
             if (version == 2) fs >>= 1; else if (version == 0) fs >>= 2;
@@ -350,7 +418,6 @@ namespace HP1.UEScript
             return new Header
             {
                 Rate = fs, Channels = nch, Mode = mode, ModeExt = (int)(h >> 4) & 3,
-                Crc = ((h >> 16) & 1) == 0,
                 Bytes = 144 * bitrate / fs + ((int)(h >> 9) & 1),
                 Table = lsf ? 4 : Translate[srIndex * 32 + (2 - nch) * 16 + brIndex],
             };
@@ -370,9 +437,9 @@ namespace HP1.UEScript
         {
             uint h = (uint)(data[pos] << 24 | data[pos + 1] << 16 | data[pos + 2] << 8 | data[pos + 3]);
             Header hd = ParseHeader(h, frame, pos, what);
-            // The engine stores the protection bit (+0x24c2, FUN_10452760) but does not skip the CRC: bit
-            // allocation is read right after the header. Shipped data has no CRC frames — not ported (STOP).
-            if (hd.Crc) throw new NotSupportedException($"{what}: frame {frame} with CRC — the engine does not skip CRC, not ported (STOP)");
+            // The engine stores the protection bit (+0x24c2, FUN_10452760) but does not skip the CRC: bit allocation is
+            // read right after the header, so a CRC frame decodes its CRC word as allocation bits (mp2 engine oracle,
+            // HP1_MP2_EDGE crc).
             int nch = hd.Channels;
             short[] alloc = Tables[hd.Table];
             int sblimit = SbLimit[hd.Table];

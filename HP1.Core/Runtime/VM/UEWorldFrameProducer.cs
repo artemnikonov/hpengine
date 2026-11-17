@@ -13,6 +13,16 @@ using UELib;
 namespace HP1.UEScript
 {
 
+    // The audio device (UAudioSubsystem) of the game as the calls both games make see it: Galaxy (HP1, UEGalaxyAudio) and
+    // ALAudio (HP2, UEALAudio) implement it; game-specific calls take the typed field (UEWorldFrameProducer.Audio / ALAudio).
+    public interface IUEAudioDevice
+    {
+        void NoteDestroy(int actorId);   // UAudioSubsystem::NoteDestroy(AActor*), from AActor destruction
+        // UAudioSubsystem::SetViewport(NULL / viewport), vtable +0x60: WinDrv WM_ACTIVATE [HP1 WinDrv.dll.c:3086-3109]
+        // [HP2 WinDrv.dll.c:3192-3218, Engine->Audio at UEngine+0x5c] and WM_SIZE minimise/restore (window focus).
+        void SetViewport(bool present);
+    }
+
     public sealed partial class UEWorldFrameProducer
     {
         // Viewport dims are FRONTEND state: the headless takes
@@ -118,8 +128,10 @@ namespace HP1.UEScript
         public Func<UEObject, UEVector[]> PosePoints;
         public Func<UEVector, UEVector, bool> ParticleFastLineCheckClear;
         public Func<UEVector, UEVector, ParticleLineHit> ParticleSingleLineCheck;
-        // AWind::GetTotalWind(point) — owner UELevelRuntime.TotalWind.
+        // AWind::GetTotalWind(point) — owner UELevelRuntime.TotalWind; the length of the wind list it walks — owner
+        // UELevelRuntime.WindSourceCount.
         public Func<UEVector, UEVector> TotalWind;
+        public Func<int> WindSourceCount;
         public readonly struct ParticleLineHit
         {
             public readonly bool World;        // hit on LevelInfo (world/BSP)
@@ -216,8 +228,13 @@ namespace HP1.UEScript
             _systemDir = systemDir;
             SpriteTextureSize = DefaultSpriteTextureSize;
             _fonts = new Hp1FontCatalog(systemDir);
-            Galaxy = UEGalaxyConfig.Load(systemDir);
-            Audio = new UEGalaxyAudio(new GalaxyWorld(this));
+            // Galaxy is HP1's audio device, made with the producer. HP2's Engine->Audio is made by UEngine::InitAudio (InitAudio
+            // below), after the first LoadMap and Login: until then there is none.
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP1)
+            {
+                Galaxy = UEGalaxyConfig.Load(systemDir);
+                AudioDevice = Audio = new UEGalaxyAudio(new GalaxyWorld(this));
+            }
             UkParticleWalk = UEEdition.OfSystem(systemDir).Render == UEEdition.RenderSet.UK11;
         }
 
@@ -227,8 +244,37 @@ namespace HP1.UEScript
         internal bool UkParticleWalk;
 
         // UGalaxyAudioSubsystem — Core (channel pool, music; UEGalaxyAudio). Lives with the engine, like Engine->Audio:
-        // a level change does not recreate it (LoadMap stops its channels: UEGalaxyAudio.SetViewportSame).
+        // a level change does not recreate it (LoadMap stops its channels: UEGalaxyAudio.SetViewportSame). HP1 only.
         public readonly UEGalaxyAudio Audio;
+        // UALAudioSubsystem — Core (source table, end of play, ambient sounds; UEALAudio). HP2 only, from InitAudio. Its frame
+        // call is Update(master frame) with World set and Clock advanced by the frame time: the HP2 frame path's (not built yet).
+        public UEALAudio ALAudio { get; private set; }
+        // Engine->Audio as the calls both games make reach it (null while the game has none).
+        public IUEAudioDevice AudioDevice { get; private set; }
+
+        // Original: Engine.dll ?InitAudio@UEngine@@QAEXXZ [HP2 0x1039a990] (thunk 0x103033b4)
+        // With a client and no -NOSOUND (the caller's tests): Audio = the [Engine.Engine] AudioDevice class of the ini,
+        // constructed and Init-ed (vtable +0x5c); a failed Init destroys it and leaves no device. HP2 only (HP1's Galaxy is
+        // made with the producer). Read from the shipped Default.ini, as the device's config; a class other than
+        // ALAudio.ALAudioSubsystem is not ported. First UseSound (UEngine+0x70, the config bool [Engine.GameEngine] UseSound,
+        // Engine StaticConstructor [HP2 Engine.dll.c:55494]): false -> no device (disasm 0x1039a9ba..0x1039a9bf). `config` is
+        // GConfig (the settings overlay over the install's ini); the device's config properties are read from it too.
+        public UEALAudio InitAudio(UEConfig config)
+        {
+            if (UEGameProfile.Current.Game != UEEdition.Game.HP2)
+                throw new InvalidOperationException("InitAudio: HP1's audio device is the producer's Galaxy");
+            if (!config.TryGetIni(UEConfig.ScopeSystem, "Engine.GameEngine", "UseSound", out string useSound)
+                || UELocalization.ImportBoolWord(useSound) is not bool useSoundOn)
+                throw new System.IO.InvalidDataException($"[Engine.GameEngine] UseSound = '{useSound ?? "<no key>"}': unrecognized "
+                    + "text keeps the class default in the original (UBoolProperty::ImportText), which the port does not carry");
+            if (!useSoundOn) return null;
+            string ini = UELevelRuntime.DefaultIniPath(_systemDir);
+            string cls = new UEIniFile(ini).Get("Engine.Engine", "AudioDevice");
+            if (!string.Equals(cls, "ALAudio.ALAudioSubsystem", StringComparison.OrdinalIgnoreCase))
+                throw new NotSupportedException($"{ini}: [Engine.Engine] AudioDevice={cls} is not ported (HP2: ALAudio.ALAudioSubsystem)");
+            AudioDevice = ALAudio = UEALAudio.FromConfig(config);
+            return ALAudio;
+        }
         // Runtime of the current level — source of the listener, actors and the view actor (set by BindFrameProducerHooks).
         public UELevelRuntime AudioRuntime;
 
@@ -262,14 +308,30 @@ namespace HP1.UEScript
             {
                 if (UESoundCatalog.Shared.Root is null) return null;
                 var info = UESoundCatalog.Shared.LoadInfo(path);   // header only: the voice's stream decodes as it is fed
-                return info is { } i ? new UEGalaxyAudio.SoundInfo(i.Frames, i.Rate, i.Channels) : null;
+                return info is { } i ? new UEGalaxyAudio.SoundInfo(i.Frames, i.Rate, i.Channels, i.Finishes) : null;
+            }
+            public string SongFileType(string path)
+            {
+                try { return UEMusicCatalog.Shared.FileType(path); }
+                catch (Exception e) when (e is InvalidOperationException or System.IO.InvalidDataException or ArgumentException)
+                {
+                    return null;   // Song() reports the unresolved path
+                }
+            }
+            public byte[] SongData(string path)
+            {
+                try { return UEMusicCatalog.Shared.Data(path); }
+                catch (Exception e) when (e is InvalidOperationException or System.IO.InvalidDataException or ArgumentException)
+                {
+                    return null;   // Song() reports the unresolved path
+                }
             }
             public UEGalaxyAudio.SoundInfo? Song(string path)
             {
                 try
                 {
                     UEMp2SoundStream st = UEMusicCatalog.Shared.OpenStream(path);
-                    return new UEGalaxyAudio.SoundInfo(st.LoopSamples / Math.Max(1, st.Channels), st.SampleRate, st.Channels);
+                    return new UEGalaxyAudio.SoundInfo(st.LoopSamples / Math.Max(1, st.Channels), st.SampleRate, st.Channels, st.Finishes);
                 }
                 catch (Exception e)
                 {
@@ -410,7 +472,7 @@ namespace HP1.UEScript
         // synthetically. The fixture builds its own canvas, calls DrawTile directly and
         // reads the emitted commands.
         public IReadOnlyList<HudCommand> HudForTest => _hud;
-        public void ClearHudForTest() => _hud.Clear();
+        public void ClearHudForTest() { _hud.Clear(); _hudDepthZ = null; }
 
         // Everything here is keyed on actors of a SPECIFIC level, so it
         // dies with it (called from UELevelRuntime.ResetWorld).
@@ -425,8 +487,9 @@ namespace HP1.UEScript
             _fx.Clear();
             _ambientPlaying.Clear();
             _audio.Clear();
-            Audio.ClearWorld();
-            _hud.Clear();
+            // No device (HP2): no sound native is matched, so nothing was started that a new level would stop.
+            Audio?.ClearWorld();
+            _hud.Clear(); _hudDepthZ = null;
             _hudCache = Array.Empty<HudCommand>();
             _cameraCache = default;
             _frameCache = null;
@@ -503,9 +566,10 @@ namespace HP1.UEScript
         // Update bridge sets it for a call from the translated GetRenderBoundingBox, return address 0x103c1171).
         bool _grbbPath;
         bool _setupResidueKnown; float _setupResY, _setupResZ;
+        bool _grbbShifted;   // the last GetRenderBoundingBox took the shift branch (Update(0)), D-73 HP2 (7)
         // Diagnostics: first particles born from the render-path chain / the Setup residue / the bSystemRelative
         // residue; GetRenderBoundingBox-path Updates before any Setup BoundVisible of the session (session-start 0, 0).
-        public int ChainParticleSlot, SetupResidueParticleSlot, SysRelParticleSlot, NoSetupResidueYet;
+        public int ChainParticleSlot, SetupResidueParticleSlot, SysRelParticleSlot, NoSetupResidueYet, WindParticleSlot;
 
         // Third-person weapon ObjectId -> the pawn whose DrawActorSprite draws it (this tick). The weapon's DrawMesh gets the
         // PAWN's FDynamicSprite (DrawActorSprite 0x10b3306e: `mov edx, [ebp+0xc]` — its own sprite argument — pushed for
@@ -559,7 +623,9 @@ namespace HP1.UEScript
         // wholly outside one frustum side (sign bit of (Prj·Z ± X) + extent, 0x7fffffff < bits). Otherwise area =
         // ((Length·Width)·s)·s, s = ProjZ / Z; x = (Priority + 1)·area·0.25; budget = FY·FX·URender[+0x5c]·0.5 (the
         // drawer ctor FUN_10b16a10 and DrawParticleSystem 0x10b159f9..0x10b15a20; URender+0x5c = 1.0: URender::Init, the
-        // FinishMasterFrame clamp to [0.01, 1]). x > budget: Alpha = min(Alpha, (2·budget − x) / budget)
+        // FinishMasterFrame clamp to [0.01, 1]; RU's and HP2's PostRender adapt it to the wall-clock particle cost, the
+        // port keeps 1.0: not original, DECISIONS "URender::PostRender's two adapters"). x > budget:
+        // Alpha = min(Alpha, (2·budget − x) / budget)
         // (0x10b18c06..0x10b18c2e, a GAME write: the particle keeps it), and Alpha <= 0 culls it (0x10b18c31..0x10b18c4d).
         // Render window PC24: every operation rounds to float. A NULL Textures[0] returns before the walk (0x10b150c3).
         // The frame draws each emitter per draw call, with the particles this pass kept and their Alpha at the call.
@@ -578,6 +644,37 @@ namespace HP1.UEScript
         // consumer that reads twice. The buffer drains only on a tick change.
         int _lastViewActorId = int.MinValue;
 
+        // Original: Render.dll ?Init@URender@@UAEXPAVUEngine@@@Z [HP1 0x10b1d6b0] [HP2 0x10b1cd60] (HP2's tail 0x10b1ce64..0x10b1d090)
+        // HP2's Init sets GlobalShapeLOD (URender+0x4c) = 0.1 / 0.2 / 0.5 / 0.8 for GConfig->GetStr("Engine.Engine.
+        // ViewportManager", "TextureDetail") = ObjectDetailVeryHigh / High / Medium / Low (appStricmp), 1.0 for VeryLow or
+        // anything else. The shipped HP2 ini has no such key (UEMeshLod.GlobalShapeLOD = 1.0, as HP1); the four values that
+        // change it are not ported: loud. Checked at the first HP2 world frame (only DrawLodMesh reads the value).
+        bool _hp2RenderInitChecked;
+        void Hp2RenderInitCheck()
+        {
+            if (_hp2RenderInitChecked) return;
+            _hp2RenderInitChecked = true;
+            string detail = UEConfig.Global?.Get(UEConfig.ScopeSystem, "Engine.Engine.ViewportManager", "TextureDetail")
+                ?? new UEIniFile(UELevelRuntime.DefaultIniPath(_systemDir)).Get("Engine.Engine.ViewportManager", "TextureDetail");
+            foreach (string v in new[] { "ObjectDetailVeryHigh", "ObjectDetailHigh", "ObjectDetailMedium", "ObjectDetailLow" })
+                if (string.Equals(detail, v, StringComparison.OrdinalIgnoreCase))
+                    throw new NotSupportedException($"HP2 URender::Init: [Engine.Engine.ViewportManager] TextureDetail={detail} "
+                        + "sets GlobalShapeLOD != 1 (HP2 0x10b1ce64..0x10b1d090), not ported");
+        }
+
+        // Original: Render.dll ?DrawActorSprite@URender@@QAEXPAUFSceneNode@@PAUFDynamicSprite@@@Z [HP1 0x10b32850] [HP2 0x10b32ee0]
+        // Its debug drawing is not ported for HP2: collision radii on the viewport actor's ShowFlags 0x10000 (HP1: 0x8000,
+        // HP2 0x10b33380..0x10b33393), bounding boxes on 0x8000 (HP2 0x10b33db0) and HP2's InterpolationPoint / PatrolPoint
+        // path lines on 0x1000 (SHOW_Paths, HP2 0x10b33f08..0x10b343a6): loud. Shipped play sets ShowFlags 0x480c, and the
+        // port is never the editor (GIsEditor = 0, the other gate of the radii).
+        static void Hp2DebugDrawCheck(UEObject viewer)
+        {
+            int showFlags = UEValue.ToInt(viewer?.GetProp(PK.ShowFlags));
+            if ((showFlags & 0x19000) != 0)
+                throw new NotSupportedException($"HP2 URender::DrawActorSprite: ShowFlags 0x{showFlags:x} has debug bits "
+                    + "(0x1000 paths, 0x8000 boxes, 0x10000 radii; HP2 0x10b33380 / 0x10b33db0 / 0x10b33f08), not ported");
+        }
+
         // The appEnableFastMath(1) window opened inside BuildFrame is closed even when the frame throws: a flag left on would
         // run the next tick's logic arithmetic in PC24.
         public WorldFrame Build(int tick, string label,
@@ -587,6 +684,8 @@ namespace HP1.UEScript
             finally { FastMathWindow = false; }
         }
 
+        // Original: Engine.dll ?Draw@UGameEngine@@UAEXPAVUViewport@@HPAEPAH@Z [HP1 0x1039fa40]
+        // Original: Render.dll ?DrawWorld@URender@@UAEXPAUFSceneNode@@@Z [HP1 0x10b27ba0]
         WorldFrame BuildFrame(int tick, string label,
             IEnumerable<UEObject> actors, UEInterpreter interp, UEObject player)
         {
@@ -625,6 +724,24 @@ namespace HP1.UEScript
                 _lastViewActorId = _cameraCache.ViewActorId;
                 HP1.Core.UEPlaythroughLog.Always("view",
                     $"view owner -> id={_cameraCache.ViewActorId}");
+            }
+            // HP2: Audio->Update(Frame) right after Render->CreateMasterFrame (ProjectCamera above) and before
+            // Render->PreRender [HP2 0x103a8e20..0x103a8e47]; a Draw the level tick's clock advance did not precede (the
+            // owed first frame, LoadMap fades and progress) advances the device clock by its own delta first.
+            // URender::PreRender [HP1 0x10b1edf0] [HP2 0x10b1e6c0] and CreateMasterFrame [HP2 0x10b1fcc0] are HP1's bodies
+            // by fields (tools/hp2/render_diff.py: Actor.XLevel 0x80/0x94, LevelInfo.TimeSeconds 0x3b4/0x408, assert lines)
+            // but for how appSecondsSlow's FTime comes back into URender+0x6c/+0x70 (a statistics time no frame reads):
+            // the PreRender below holds for HP2. DrawWorld and its callees: see the DrawWorld gate below.
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2 && ALAudio is not null)
+            {
+                if (ALAudio is not null)
+                {
+                    if (!_audioClockAdvancedByTick) AdvanceAudioClock(ViewportDelta);
+                    _audioClockAdvancedByTick = false;
+                    if (!_cameraCache.Valid)
+                        throw new NotSupportedException("HP2: a Draw without a viewport actor (CreateMasterFrame) is not ported");
+                    UpdateAudio(AudioRuntime, interp, UESceneNode.MasterCoords(_cameraCache.Location, _cameraCache.Rotation));
+                }
             }
             // HUD single-execution ownership: the HUD bytecode must run ONCE per
             // frame. A frontend still driving its own canvas renderer (one that
@@ -677,6 +794,10 @@ namespace HP1.UEScript
             if (UseTranslatedRenderPass) pass?.BeginFrame(player, _cameraCache.Location, _cameraCache.Rotation, _viewportX, _viewportY,
                 viewFov != UEValue.AsFloat(player?.GetProp(PK.FovAngle)) ? viewFov : float.NaN);
             int frameX = _viewportX, frameY = _viewportY;
+            // Viewport->Lock (UGameEngine::Draw, before PreRender): the frame's viewport time — the UECoronas clock (shipped: wall
+            // time at each run of the block) and the CurrentTime of every UTexture::Update of the frame, the HUD's included.
+            _viewportClock += ViewportDelta;
+            BeginTextureFrame();
             if (DriveHudEnabled) { HudDriveCount++; (frameX, frameY) = HudPreRender(interp, player); }
             else _hudCache = Array.Empty<HudCommand>();
             secT = Section(ref LastHudMs, secT);
@@ -688,6 +809,21 @@ namespace HP1.UEScript
                 && (Console is null || !UEValue.ToBool(Console.GetProp(PK.bNoDrawWorld)));
             LastDrawWorld = drawWorld;
             LastDrawWorldGate = (frameX, frameY, Console is not null && UEValue.ToBool(Console.GetProp(PK.bNoDrawWorld)));
+            // HP2: URender::DrawWorld [HP2 0x10b27930] and OccludeFrame are HP1's bodies by fields; their HP2 callees are
+            // judged against HP1's or HP2's bodies (audit/hp2_render_judge.sh, audit/hp2_render_actors_judge.sh,
+            // audit/hp2_skeletal_judge.sh; DECISIONS "the DrawWorld gate lifted for HP2"): SetupDynamics [HP2 0x10b30190],
+            // OccludeBsp [HP2 0x10b21dd0], DrawFrame's own HP2 lines [HP2 0x10b24f30] (UELumosSurfaces), FLightManager's
+            // actor and surface paths, DrawActorSprite [HP2 0x10b32ee0], the mesh and particle drawers, the skeletal poses.
+            // What is not judged stops at its own line: the DrawActorSprite debug drawing and Init's GlobalShapeLOD ini values
+            // (below), the SpanBased sprite box test, a mover polygon with disagreeing records, RenderPrimitive 4, the
+            // D-73 slot of HP2's particles, AttachDecal (so no decal is clipped), and in the frontend the
+            // drawing of DrawnWorld.Lumos.
+            bool hp2 = UEGameProfile.Current.Game == UEEdition.Game.HP2;
+            if (hp2 && drawWorld)
+            {
+                Hp2RenderInitCheck();
+                Hp2DebugDrawCheck(player);
+            }
             // ── PARTICLES: ONLY DRAWN EMITTERS, IN DRAW ORDER ─────
             // Shipped simulates particles in the renderer: DrawActorSprite ->
             // DrawParticleSystem -> AParticleFX::Update(0) for emitters that
@@ -729,7 +865,6 @@ namespace HP1.UEScript
             _drawOrder = null;                    // and no draw order
             _actorViewSets = null;
             _coronas = null;                      // and without coronas
-            _viewportClock += ViewportDelta;      // UECoronas clock (shipped: wall time at each run of the block)
             BeginDecalFrame?.Invoke();             // and no decal pieces
             _views = null;                        // and no child frames
             LastMasterFrame = null;               // and no frame tree (a tick without OccludeBsp: menu, bNoDrawWorld)
@@ -837,7 +972,8 @@ namespace HP1.UEScript
                 // are run by Core in the same walk, without sprite Setup — the port does that for the reference.
                 var (wx, wy) = WorldFrameSize(frameX, frameY);
                 UESceneNode occluded = OccludeWorld(player, interp, wx, wy, frameFov, actors, _shadowBlockers.Count == 0, sprites: false);
-                _views = ProjectViews(occluded, _lastOcclusionWorld.SourceOf, null, _drawn = new List<DrawnWorld>(), _lastOcclusionWorld.PolyOf);
+                _views = ProjectViews(occluded, _lastOcclusionWorld.SourceOf, null, _drawn = new List<DrawnWorld>(), _lastOcclusionWorld.PolyOf,
+                    LumosOf(_lastOcclusionWorld));
                 _drawnTextures = DrawnTexturesOf(occluded, _lastOcclusionWorld);
                 CollectSurfDynamicLights(occluded, _lastOcclusionWorld);
             }
@@ -848,7 +984,12 @@ namespace HP1.UEScript
             // (ViewTarget ?? Actor)` with !GIsEditor and ShowFlags & 8, via
             // ProcessEvent. (GUglyHackFlags|=1 for the call is read only by the
             // draw of Canvas.DrawActor, which is a loud STOP in the port: CanvasDrawActor.)
-            if (DriveHudEnabled && player is not null && _cameraCache.Valid)
+            // ONLY IN A FRAME THAT RUNS DrawWorld (drawWorld): the event's one call site is DrawWorld's tail
+            // (Render 0x10b27cd2, the only reference to ENGINE_RenderOverlays; Engine's eventRenderOverlays export has no
+            // caller), and UGameEngine::Draw calls DrawWorld only past the gate above (0x1039fe8d..0x1039feba). A menu-book
+            // frame (bNoDrawWorld) and an empty frame run no RenderOverlays; a DrawWorld runs it once, whatever child
+            // frames (mirror, warp, sky) its DrawFrame drew.
+            if (DriveHudEnabled && drawWorld && player is not null && _cameraCache.Valid)
             {
                 UEObject overlay = UEValue.ToBool(player.GetProp(PK.bBehindView)) ? null
                     : (player.GetProp(PK.ViewTarget) as UEObject ?? player);
@@ -863,15 +1004,24 @@ namespace HP1.UEScript
                 foreach (var kv in OverlayFingerprints(actors))
                     if (!_overlayPre.TryGetValue(kv.Key, out var pre) || pre.fp != kv.Value.fp) OverlayChanged.Add(kv.Value.what);
             FastMathWindow = false;
-            UEGalaxyAudio.JudgeTap?.Invoke(Audio, "update-begin", (actors, player, new GalaxyWorld(this).Listener, ViewportDelta, AudioRuntime));
-            AmbientPass(actors, player);
-            // Rest of UGalaxyAudioSubsystem::Update — channel loop, bSongFinished, music block (UEGalaxyAudio).
-            // The frame's music request as the script left it (before this Update's Galaxy start block).
-            MusicState music = WorldFrameProjector.ProjectMusic(player);
-            UEObject levelInfo = null;
-            foreach (UEObject a0 in actors) { levelInfo = a0; break; }
-            Audio.Update(music, ViewportDelta, !string.IsNullOrEmpty(levelInfo?.GetProp(PK.Pauser)?.ToString()));
-            UEGalaxyAudio.JudgeTap?.Invoke(Audio, "update-end", null);
+            // HP2 after Console.PostRender [HP2 0x103a8a95..]: Audio->PostRender (UALAudioSubsystem::PostRender
+            // [HP2 ALAudio 0x10001d00] is `ret 4`), Render->PostRender [HP2 0x10b1e850] (appEnableFastMath(0) above, the
+            // frame statistics; its two adapters, GlobalShapeLODAdjust and MaxParticle, stay 1.0: not original, DECISIONS
+            // "URender::PostRender's two adapters", option (a)).
+            // The device's Update ran before PreRender (above); Galaxy's frame work below is HP1's.
+            MusicState music = default;   // HP2: music is the ALAudio device's (PlayMusic), not a frame request
+            if (!hp2)
+            {
+                UEGalaxyAudio.JudgeTap?.Invoke(Audio, "update-begin", (actors, player, new GalaxyWorld(this).Listener, ViewportDelta, AudioRuntime));
+                AmbientPass(actors, player);
+                // Rest of UGalaxyAudioSubsystem::Update — channel loop, bSongFinished, music block (UEGalaxyAudio).
+                // The frame's music request as the script left it (before this Update's Galaxy start block).
+                music = WorldFrameProjector.ProjectMusic(player);
+                UEObject levelInfo = null;
+                foreach (UEObject a0 in actors) { levelInfo = a0; break; }
+                Audio.Update(music, ViewportDelta, !string.IsNullOrEmpty(levelInfo?.GetProp(PK.Pauser)?.ToString()));
+                UEGalaxyAudio.JudgeTap?.Invoke(Audio, "update-end", null);
+            }
             secT = Section(ref LastAmbientMs, secT);
             AllocNote("frame.ambient");
             // A music request (Transition != 0) is acknowledged only by the Galaxy start block (Transition = 0,
@@ -889,10 +1039,11 @@ namespace HP1.UEScript
                 HighDetailActors, decals, _projectScratch,
                 frameLevel is null ? null : GRandoms.Base, drawWorld,
                 UseTranslatedRenderPass ? null : _meshPoses, UseTranslatedRenderPass ? null : _views,
-                UseTranslatedRenderPass ? null : _spriteActors, Audio.Snapshot(), Audio.ResumeSerial,
+                UseTranslatedRenderPass ? null : _spriteActors, Audio?.Snapshot(), Audio?.ResumeSerial ?? 0,
                 UseTranslatedRenderPass ? null : _actorViewSets ?? ActorViewSets.From(_actorViews), _coronas, EnhancedVisuals,
                 UseTranslatedRenderPass ? null : _drawn, UseTranslatedRenderPass ? null : _drawnTextures,
-                Audio.LastCallStops, Audio.LastMixDt, UseTranslatedRenderPass ? null : _drawOrder, _canvasScale);
+                Audio?.LastCallStops, Audio?.LastMixDt ?? 0f, UseTranslatedRenderPass ? null : _drawOrder, _canvasScale, _textureFrames);
+            TextureUses(_frameCache);   // the frame's world and actor texture uses, into its TextureFrames
             long projDt = System.Diagnostics.Stopwatch.GetTimestamp() - projT0;
             AllocNote("frame.project");
             LastProjectMs = projDt * MsPerTick;

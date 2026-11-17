@@ -79,6 +79,8 @@ namespace HP1.UEScript
         // session state, not level state: the live 1.53 original on all 39 maps
         // gives GameInfo1/Mutator1/GameReplicationInfo1 (the zeros went to Entry).
         public readonly Dictionary<UClass, int> ClassUnique = new(ClassIdentity.Instance);
+        // UParticleListPriv's ClassUnique: a native-only class (no UClass in the registry), session state as above.
+        internal int ParticleListPrivUnique;
         // Object names in the Transient package — the outer of `new` without Outer
         // (UObject::execNew -> GetTransientPackage, Core.dll.c:25126-25128):
         // StaticFindObject(NULL, Transient, name) in MakeUniqueObjectName.
@@ -748,7 +750,15 @@ namespace HP1.UEScript
             if (node?.ByteCodeManager == null) return new List<Tok.Token>();
             if (node.ByteCodeManager.DeserializedTokens == null
              || node.ByteCodeManager.DeserializedTokens.Count == 0)
+            {
                 node.ByteCodeManager.Deserialize();
+                foreach (Tok.Token t in node.ByteCodeManager.DeserializedTokens ?? new List<Tok.Token>())
+                    if (t is Tok.DebugInfoToken d && d.Version != 100)
+                        throw new NotSupportedException(
+                            $"{node.GetPath()}: DebugInfo token version {d.Version} at {t.Position}: HP2 execDebugInfo "
+                            + "[HP2 0x10132fe0] rewinds 5 bytes for a version other than 100 (0x10133014), so the original "
+                            + "executes the token again and again; not reproduced");
+            }
             return node.ByteCodeManager.DeserializedTokens ?? new List<Tok.Token>();
         }
 
@@ -942,10 +952,10 @@ namespace HP1.UEScript
 
         // Evaluate one expression starting at the cursor. FFrame::Step
         // (Core.dll.c:39376): GNatives[*Code++]; we dispatch on UELib's token type.
-        // DebugInfoTokens are skipped (UELib emits them between statements;
-        // Token.cs:55 skips them too). The skip is NOT verified against shipped:
-        // Core.dll has no execDebugInfo export; if opcode 0x41 occurs in HP1
-        // bytecode, the GNatives[0x41] body must be checked in the GNatives table disasm.
+        // DebugInfoTokens are skipped. HP1 bytecode has none (no DebugInfo slot in HP1 1.53 GNatives). HP2's 0x38
+        // (UELib HP2 build) with version 100 is the original's behaviour: execDebugInfo [HP2 0x10132fe0] consumes
+        // the two ints and the string and hands them only to GDebugger, which no shipped HP2 module ever writes
+        // (zero .bss, Core 0x101ec07c; audit/hp2_plan_stage0_1_2026-11-15.md S-4). Another version: LoadTokens stops.
         public UEEvalResult EvalNext(UEFrame frame)
         {
             if (UEVmPool.Verify && frame.PoolReleased) UEVmPool.LateRead(frame, "EvalNext");

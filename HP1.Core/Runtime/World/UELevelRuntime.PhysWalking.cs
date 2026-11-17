@@ -110,6 +110,7 @@ namespace HP1.UEScript
         // plan → sweep → stepUp on a block → step-down grounding with
         // SetBase → the displacement velocity tail). Geometry rides the
         // hooks above. ──
+        // Original: Engine.dll ?physWalking@APawn@@QAEXMH@Z [HP1 0x103e6b60] [HP2 0x103f4130]
         public void PhysWalking(UEInterpreter interp, UEObject actor, float dt, int iteration = 0)
         {
             // APawn::physWalking is a PAWN method — a non-Pawn carrying
@@ -154,9 +155,13 @@ namespace HP1.UEScript
             accel.z = 0f;
             actor.Props["Acceleration"] = accel;
             Vector3 accelDir = accel.sqrMagnitude > 0f ? accel.normalized : Vector3.zero;
+            // HP2 [0x103f424e..0x103f4283]: friction = (float)!bNoZoneFriction · ZoneGroundFriction (fild, fmul, fstp) and
+            // bBrake 0; HP1 passes ZoneGroundFriction and bBrake 1 [0x103e6c7e..0x103e6c91].
+            bool hp2 = UEGameProfile.Current.Game == UEEdition.Game.HP2;
+            if (hp2) friction = (float)((UEInterpreter.ToBool(actor.GetProp("bNoZoneFriction")) ? 0.0 : 1.0) * friction);
             UEPawnMovement.CalcVelocity(actor, accelDir,
                 dt, UEInterpreter.AsFloat(actor.GetProp(PK.GroundSpeed)), friction,
-                bFluid: false, bBrake: true, bBuoyant: false);
+                bFluid: false, bBrake: !hp2, bBuoyant: false);
             Vector3 moveVel = UEPawnMovement.WalkingMoveVelocity(actor, zoneVel, dt);
             bool walkerIsPlayer = UEInterpreter.ClassIsA(actor.Class, "PlayerPawn");
 
@@ -293,6 +298,19 @@ namespace HP1.UEScript
                 return Math.Max(ch + r + moveSize + 4f, ch + maxStep + 4f);
             X87Ext a = R64(R64(R64(X87(ch) + X87(r)) + X87(moveSize)) + X87(4f));
             X87Ext b = R64(R64(X87(ch) + X87(maxStep)) + X87(4f));
+            return b.CompareTo(a) < 0 ? a.ToFloat() : b.ToFloat();
+        }
+
+        // HP2's probe depth [HP2 0x103f47c5..0x103f482d]: the moveSize root stays in the register (`fst dword` keeps it) and
+        // A = ((moveSize + R) + CH) + 4; B = (MaxStep + CH) + 4. The sum under the root is (Z·Z + Y·Y) + X·X.
+        // Original: Engine.dll ?physWalking@APawn@@QAEXMH@Z [HP2 0x103f4130] (the probe depth only; HP1's is WalkProbeDepth)
+        internal static float Hp2WalkProbeDepth(float ch, float r, Vector3 d, float maxStep)
+        {
+            if (!Fin(d) || !float.IsFinite(ch) || !float.IsFinite(r) || !float.IsFinite(maxStep))
+                return WalkProbeDepth(ch, r, WalkMoveSize(d), maxStep);
+            X87Ext s = Vector3.Size64Ext(d.z, d.y, d.x);
+            X87Ext a = R64(R64(R64(s + X87(r)) + X87(ch)) + X87(4f));
+            X87Ext b = R64(R64(X87(maxStep) + X87(ch)) + X87(4f));
             return b.CompareTo(a) < 0 ? a.ToFloat() : b.ToFloat();
         }
 
@@ -551,6 +569,13 @@ namespace HP1.UEScript
                 return new Vector3((float)(inv0 * d.x), (float)(inv0 * d.y), (float)(inv0 * d.z));
             }
             X87Ext inv = X87Ext.Div64(X87(1f), R64(X87(dt) - X87(remaining)));
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2)
+            {
+                // HP2 [0x103f7362..0x103f7395]: the reciprocal is stored as a float (`fst [ebp+8]`) and X, Y are float·float;
+                // Z keeps the register (its difference unrounded there; the caller restores Velocity.Z in both games).
+                float invf = inv.ToFloat();
+                return new Vector3(d.x * invf, d.y * invf, MulF87(d.z, inv));
+            }
             return new Vector3(MulF87(d.x, inv), MulF87(d.y, inv), MulF87(d.z, inv));
         }
 
@@ -663,7 +688,8 @@ namespace HP1.UEScript
                 if (!aHit)
                 {
                     Vector3 aEnd = loc + delta + lookAhead;
-                    float probeDepth = WalkProbeDepth(ch, r, moveSize, maxStep);
+                    float probeDepth = UEGameProfile.Current.Game == UEEdition.Game.HP2
+                        ? Hp2WalkProbeDepth(ch, r, delta, maxStep) : WalkProbeDepth(ch, r, moveSize, maxStep);
                     (bool bHit, float bTime, Vector3 bNormal, _) = LineTrace(interp, actor,
                         aEnd, aEnd + gravDir * probeDepth, Vector3.zero, 6);
                     float thick = Math.Min(r * 0.5f, 14f);
@@ -1330,6 +1356,7 @@ namespace HP1.UEScript
         // The float32/extended split below is register allocation, read at the
         // same address: dot products never leave the register file, the Y and Z
         // components round before being scaled, and X does not.
+        // Original: Engine.dll ?TwoWallAdjust@AActor@@QAEXAAVFVector@@000M@Z [HP1 0x1031c3e0] [HP2 0x1031d070]
         public static void TwoWallAdjust(Vector3 desiredDir, ref Vector3 delta, Vector3 hitNormal,
             Vector3 oldNormal, float time)
         {
@@ -1345,9 +1372,9 @@ namespace HP1.UEScript
                 float az = (float)(delta.z - (float)(d * hitNormal.z));
                 float ay = (float)(delta.y - (float)(d * hitNormal.y));
                 double ax = delta.x - d * hitNormal.x;
-                // RU EA (UEEdition.RuOrder; RU Engine 0x1031c558..0x1031c56a): x' and 1 − Time are stored as float before
-                // the three products (US keeps both in the register).
-                if (UEEdition.RuOrder)
+                // RU EA (UEEdition.RuOrder; RU Engine 0x1031c558..0x1031c56a) and HP2 [0x1031d208..0x1031d22f]: x' and
+                // 1 − Time are stored as float before the three products (US keeps both in the register).
+                if (UEEdition.RuOrder || UEGameProfile.Current.Game == UEEdition.Game.HP2)
                 {
                     float axf = (float)ax, ff = (float)f;
                     delta = new Vector3(axf * ff, ay * ff, az * ff);
@@ -1371,8 +1398,9 @@ namespace HP1.UEScript
                 (float)((double)oldNormal.x * hitNormal.z - (double)hitNormal.x * oldNormal.z),
                 (float)((double)hitNormal.x * oldNormal.y - (double)hitNormal.y * oldNormal.x));
             crease = crease.normalized;
-            // RU EA (UEEdition.RuOrder; RU Engine 0x1031c465..0x1031c478): (c.z·D.z + c.y·D.y) + c.x·D.x.
-            double along = UEEdition.RuOrder
+            // RU EA (UEEdition.RuOrder; RU Engine 0x1031c465..0x1031c478) and HP2 [0x1031d115..0x1031d128]:
+            // (c.z·D.z + c.y·D.y) + c.x·D.x.
+            double along = UEEdition.RuOrder || UEGameProfile.Current.Game == UEEdition.Game.HP2
                 ? ((double)crease.z * delta.z + (double)crease.y * delta.y) + (double)crease.x * delta.x
                 : ((double)crease.x * delta.x + (double)crease.z * delta.z) + (double)crease.y * delta.y;
             double scale = along * f;

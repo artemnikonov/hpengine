@@ -87,6 +87,27 @@ namespace HP1.UEScript
             return $"owners={owners}{sb}";
         }
 
+        // Fixture only (SelfTest anim_exec_natives_match_shipped_oracle): the owner's AuxAnims exactly as given, the owner
+        // itself included (an execFinishAnim branch no production route builds).
+        internal void SetAnimChannelsForTest(UEObject owner, IReadOnlyList<UEObject> channels)
+        {
+            var list = new List<AnimChannelEntry>();
+            foreach (UEObject ch in channels)
+                list.Add(new AnimChannelEntry
+                {
+                    Object = ch,
+                    BoneIndex = UEInterpreter.ToInt(ch.GetProp(PK.AnimBone)),
+                    AutoDestroy = UEInterpreter.ToBool(ch.GetProp(PK.bAnimTransient))
+                });
+            if (list.Count == 0) _animChannels.Remove(owner);
+            else _animChannels[owner] = list;
+            SyncAuxAnims(owner);
+        }
+
+        static bool NotReplaceableHp2(UEObject channel)
+            => UEGameProfile.Current.Game == UEEdition.Game.HP2
+               && UEInterpreter.ToBool(channel.GetProp("bAnimNotReplaceable"));
+
         public IReadOnlyList<AnimChannelEntry> AnimChannelsOf(UEObject owner)
             => owner is not null && _animChannels.TryGetValue(owner, out var c)
                 ? (IReadOnlyList<AnimChannelEntry>)c : System.Array.Empty<AnimChannelEntry>();
@@ -96,11 +117,15 @@ namespace HP1.UEScript
         // auto-destroy bit (+0x28 bit 8):
         //   bit clear -> the channel SURVIVES; shipped only zeroes its +0x50
         //   bit set   -> ULevel::DestroyActor (vtable +0x98) and remove from the array
+        // HP2 tests the channel's bAnimNotReplaceable (+0x28 bit 9) first and leaves such a channel untouched: neither
+        // destroyed nor cleared [HP2 0x10416ce5..0x10416cf0].
+        // Original: Engine.dll ?PlayAnim@AActor@@QAEHVFName@@_NMMMW4EAnimType@@0@Z [HP1 0x10408E20] [HP2 0x10416830]
         public void DestroyAnimChannels(UEInterpreter interp, UEObject owner)
         {
             if (owner is null || !_animChannels.TryGetValue(owner, out var channels)) return;
             for (int i = channels.Count - 1; i >= 0; i--)
             {
+                if (NotReplaceableHp2(channels[i].Object)) continue;
                 if (!channels[i].AutoDestroy)
                 {
                     // The surviving branch clears the channel's own animation.
@@ -118,9 +143,15 @@ namespace HP1.UEScript
             SyncAuxAnims(owner);
         }
 
+        // Original: Engine.dll ?CreateAnimChannel@AActor@@QAEPAV1@PAVUClass@@W4EAnimType@@VFName@@_N@Z [HP1 0x10408600]
+        // Original: Engine.dll ?CreateAnimChannel@AActor@@QAEPAV1@PAVUClass@@W4EAnimType@@VFName@@_N3@Z [HP2 0x10415ed0]
+        // HP2's body is HP1's but for a fifth argument, bNotReplaceable, on three lines (tools/hp2/engine_exec_judge.py
+        // CreateAnimChannel): the dedup also compares the channel's bAnimNotReplaceable (+0x28 bit 9) [HP2 0x10415ffd],
+        // the new channel gets it [HP2 0x104160fa], and AT_Replace keeps a channel that has it [HP2 0x104161db].
         public UEObject CreateAnimChannel(UEInterpreter interp, UEObject owner, UClass cls,
-            int animType, string boneName, bool autoDestroy)
+            int animType, string boneName, bool autoDestroy, bool notReplaceable = false)
         {
+            bool hp2 = UEGameProfile.Current.Game == UEEdition.Game.HP2;
             // Shipped order (Engine.dll.c:27768-27813): mesh and bone, look up an existing channel and ONLY
             // then SpawnActor(class) — a None class is not checked before the lookup (SpawnActor returns NULL);
             // the type branches only on `== 1` (Combine), anything else is Replace.
@@ -148,7 +179,8 @@ namespace HP1.UEScript
             // (returning None here would be wrong).
             foreach (AnimChannelEntry e in channels)
                 if (UEInterpreter.ToInt(e.Object.GetProp(PK.AnimBone)) == boneIndex
-                    && UEInterpreter.ToBool(e.Object.GetProp(PK.bAnimTransient)) == autoDestroy)
+                    && UEInterpreter.ToBool(e.Object.GetProp(PK.bAnimTransient)) == autoDestroy
+                    && (!hp2 || UEInterpreter.ToBool(e.Object.GetProp("bAnimNotReplaceable")) == notReplaceable))
                     return e.Object;
 
             // Shipped spawns through ULevel::SpawnActor at the OWNER's
@@ -170,16 +202,23 @@ namespace HP1.UEScript
             channel.Props["SkelAnim"] = owner.GetProp(PK.SkelAnim);
             channel.Props["AnimBone"] = (byte)boneIndex;
             channel.Props["bAnimTransient"] = autoDestroy;
+            if (hp2) channel.Props["bAnimNotReplaceable"] = notReplaceable;
 
             // AT_Combine (1): the channel goes to the HEAD of AuxAnims and
             // nothing is removed (27809-27812). AT_Replace (0): channels whose
             // root lies inside the new root's contiguous RefSkeleton subtree are
             // destroyed through ULevel::DestroyActor (vtable +0x98), then the
             // new one is appended (27813-27852).
+            // HP2's exec does not zero the EAnimType dword before the byte argument lands in it [HP2 0x10416620] and the body
+            // compares the whole dword with 1 [HP2 0x1041611a]: a byte 1 (AT_Combine) depends on the stack bytes above it,
+            // a byte 0 or >= 2 never equals 1 (every shipped HP2 call passes ByteConst 0). Undefined: a loud STOP.
+            if (hp2 && animType == 1)
+                UEGameProfile.Stop(UEEdition.Game.HP2, "CreateAnimChannel AT_Combine (the original compares an EAnimType dword "
+                    + "whose upper bytes its exec never writes)");
             if (animType == 1)
             {
                 channels.Insert(0, new AnimChannelEntry
-                    { Object = channel, BoneIndex = boneIndex, AutoDestroy = autoDestroy });
+                { Object = channel, BoneIndex = boneIndex, AutoDestroy = autoDestroy });
                 SyncAuxAnims(owner);
                 Journal?.Invoke($"anim_channel class={cls.Name} owner={owner.GetProp(PK.Name)} "
                     + $"mesh={meshRef.Name} bone={boneName}:{boneIndex} "
@@ -190,7 +229,8 @@ namespace HP1.UEScript
             for (int i = channels.Count - 1; i >= 0; i--)
             {
                 int existingRoot = channels[i].BoneIndex;
-                if (existingRoot >= boneIndex && existingRoot < subtreeEnd)
+                if (existingRoot >= boneIndex && existingRoot < subtreeEnd
+                    && !(hp2 && UEInterpreter.ToBool(channels[i].Object.GetProp("bAnimNotReplaceable"))))
                 {
                     DestroyActor(interp, channels[i].Object);
                     channels.RemoveAt(i);
@@ -198,7 +238,9 @@ namespace HP1.UEScript
             }
             channels.Add(new AnimChannelEntry
             {
-                Object = channel, BoneIndex = boneIndex, AutoDestroy = autoDestroy
+                Object = channel,
+                BoneIndex = boneIndex,
+                AutoDestroy = autoDestroy
             });
             SyncAuxAnims(owner);
             Journal?.Invoke($"anim_channel class={cls.Name} owner={owner.GetProp(PK.Name)} "
@@ -210,7 +252,9 @@ namespace HP1.UEScript
         // AActor::PlayAnim(None, …, RootBone) (Engine.dll.c:73637-73672): every
         // channel rooted inside the bone's subtree is stopped — a persistent one
         // keeps living with AnimSequence=None, a transient one is destroyed.
-        // Returns false when the bone does not exist (shipped returns 0).
+        // Returns false when the bone does not exist (shipped returns 0). HP2: a bAnimNotReplaceable channel is skipped
+        // before the persistent/transient test [HP2 0x10416b1f..0x10416b2a].
+        // Original: Engine.dll ?PlayAnim@AActor@@QAEHVFName@@_NMMMW4EAnimType@@0@Z [HP1 0x10408E20] [HP2 0x10416830]
         public bool StopAnimChannelsUnder(UEInterpreter interp, UEObject owner, string boneName)
         {
             if (owner?.GetProp(PK.Mesh) is not UEResourceRef meshRef) return false;
@@ -221,6 +265,7 @@ namespace HP1.UEScript
             {
                 int root = channels[i].BoneIndex;
                 if (root < boneIndex || boneIndex + numChildren <= root) continue;
+                if (NotReplaceableHp2(channels[i].Object)) continue;
                 if (!channels[i].AutoDestroy)
                 {
                     channels[i].Object.Props["AnimSequence"] = new UEName("None");

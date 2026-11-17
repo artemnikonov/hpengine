@@ -27,6 +27,7 @@ namespace HP1.UEScript
         readonly List<Set> _pool = new();
         int _used;
         Func<UEVector, UEVector, bool> _lineClear;
+        WorldFrame _frame;   // the frame Update runs on
 
         public UEActorLights(StaticGeometry g, HashSet<int> fogZones)
         {
@@ -45,6 +46,15 @@ namespace HP1.UEScript
         public int[] TriangleOrder(in ActorSnapshot a, int view, int[] triWedge, int[] wedgeVertex, int[] triMaterial,
             int[] materialFlags, UEVector[] points)
         {
+            // A plain UMesh: DrawMesh's UMesh branch decides its triangle list itself (MeshTriangleOrder.UMeshOrder), always.
+            if (_rt?.FindActorById(a.ObjectId)?.GetProp(PK.Mesh) is UEResourceRef { Class: var mc } mr
+                && mc.Equals("Mesh", StringComparison.OrdinalIgnoreCase))
+            {
+                if (view + 1 < 0 || view + 1 >= _frames.Count)
+                    throw new InvalidOperationException($"TriangleOrder: frame {view} outside the tick's tree ({_frames.Count} frames)");
+                return MeshTriangleOrder.UMeshOrder(_frames[view + 1], _rt.MeshCatalog.GetVertexMesh(mr.Name, mr.ObjectPath),
+                    points, _rt.ReadSpanBased(), _viewerId != 0 && a.OwnerId == _viewerId);
+            }
             int pf = MeshTriangleOrder.ActorPolyFlags(a.Style, a.Opacity);
             if ((pf & MeshTriangleOrder.PF_AlphaBlendWord) == 0) return null;
             if (view + 1 < 0 || view + 1 >= _frames.Count)
@@ -56,6 +66,21 @@ namespace HP1.UEScript
             return MeshTriangleOrder.Order(_frames[view + 1], triWedge, wedgeVertex, triMaterial, materialFlags, points, pf,
                 bias, ch, _viewerId != 0 && a.OwnerId == _viewerId);
         }
+        // DrawLodMesh's two-sided depth bias of the same mesh in frame `view` (MeshTriangleOrder.TwoSidedDepthScale): per wedge
+        // the factor of the frame-space point toward the frame origin, or null. A plain UMesh (DrawMesh's own branch) has none.
+        public float[] TwoSidedDepthScale(in ActorSnapshot a, int view, int[] triWedge, int[] wedgeVertex, int[] triMaterial,
+            int[] materialFlags, UEVector[] points)
+        {
+            UEObject live = _rt?.FindActorById(a.ObjectId)
+                ?? throw new InvalidOperationException($"TwoSidedDepthScale: actor {a.ObjectId} is not live");
+            if (live.GetProp(PK.Mesh) is UEResourceRef { Class: var mc } && mc.Equals("Mesh", StringComparison.OrdinalIgnoreCase)) return null;
+            if (!UEValue.ToBool(live.GetProp("bTwoSidedBias"))) return null;
+            int pf = MeshTriangleOrder.ActorPolyFlags(a.Style, a.Opacity);
+            if ((pf & MeshTriangleOrder.PF_TwoSided) == 0 && (materialFlags is null || Array.TrueForAll(materialFlags, m => (m & MeshTriangleOrder.PF_TwoSided) == 0))) return null;
+            if (view + 1 < 0 || view + 1 >= _frames.Count)
+                throw new InvalidOperationException($"TwoSidedDepthScale: frame {view} outside the tick's tree ({_frames.Count} frames)");
+            return MeshTriangleOrder.TwoSidedDepthScale(_frames[view + 1], triWedge, wedgeVertex, triMaterial, materialFlags, points, pf, true);
+        }
         public void Clear() { _sets.Clear(); _used = 0; }
         // The SetupForActor result for the DrawMesh of frame `view` (−1 master, else WorldFrame.Views index).
         public bool TryGet(int objectId, int view, out Set s) { HP1.Core.UECoreOwner.Check("UEActorLights.TryGet"); return _sets.TryGetValue((objectId, view), out s); }
@@ -65,7 +90,7 @@ namespace HP1.UEScript
         public void Update(UELevelRuntime rt, UEInterpreter interp, WorldFrame frame, UESceneNode master,
                            double viewportSeconds, float levelBrightness)
         {
-            _sets.Clear(); _used = 0;
+            _sets.Clear(); _used = 0; _frame = frame;
             _frames.Clear(); _rt = rt; _viewerId = rt.PlayerPawn?.ObjectId ?? 0;
             if (master is not null) { void Walk(UESceneNode f) { _frames.Add(f); foreach (UESceneNode c in f.Children) Walk(c); } Walk(master); }
             _lineClear ??= UEActorLighting.BspLineClear(rt, interp);
@@ -83,17 +108,39 @@ namespace HP1.UEScript
             var post = new List<UESceneNode>();
             void Post(UESceneNode f) { foreach (UESceneNode c in f.Children) Post(c); post.Add(f); }
             if (master is not null) Post(master);
+            // A third-person weapon's DrawMesh comes right after its pawn's, inside the pawn's DrawActorSprite (HP1 Render
+            // 0x10b32ea1 the actor, 0x10b33085 the weapon): its SetupForActor call follows the pawn's.
+            Dictionary<int, int> weaponOf = rt.FrameProducer?.WeaponPawns;
+            ReadOnlySpan<ActorSnapshot> span = frame.ActorSpan;
             foreach (UESceneNode node in post)
             {
                 int view = viewOf[node];
-                foreach (ref readonly ActorSnapshot a in frame.ActorSpan)
+                for (int i = 0; i < span.Length; i++)
                 {
-                    if (a.Destroyed || !drawn.Contains(a.ObjectId)) continue;
+                    ref readonly ActorSnapshot a = ref span[i];
+                    if (weaponOf is not null && weaponOf.ContainsKey(a.ObjectId)) continue;
+                    AddIfDrawn(in a);
+                    if (weaponOf is null || weaponOf.Count == 0) continue;
+                    for (int w = 0; w < span.Length; w++)
+                        if (weaponOf.TryGetValue(span[w].ObjectId, out int pawn) && pawn == a.ObjectId) AddIfDrawn(in span[w]);
+                }
+                void AddIfDrawn(in ActorSnapshot a)
+                {
+                    if (a.Destroyed || !drawn.Contains(a.ObjectId)) return;
                     if (!frame.ActorViews.SetOf.TryGetValue(a.ObjectId, out int si))
                         throw new InvalidOperationException($"actor lights: mesh {a.Name} drawn without frame membership (WorldFrame.ActorViews)");
                     if (Array.IndexOf(frame.ActorViews.Sets[si], view) >= 0) Add(rt, in a, view, node, viewportSeconds);
                 }
             }
+            // The tags SetupForActor wrote on the light actors this frame (UEActorLighting.TagsTaken), as ints on the actors.
+            foreach (var (id, t) in Lighting.TagsTaken)
+                if (rt.FindActorById(id) is UEObject light)
+                {
+                    light.Props["LightingTag"] = t.Score;
+                    light.Props["ExtraTag"] = t.Stamp;
+                    light.Props["SpecialTag"] = t.Counter;
+                }
+            Lighting.TagsTaken.Clear();
         }
 
         void Add(UELevelRuntime rt, in ActorSnapshot a, int view, UESceneNode node, double viewportSeconds)
@@ -108,7 +155,14 @@ namespace HP1.UEScript
             int[] dispatched = Array.Empty<int>();
             int id = rt.FrameProducer is { } fp && fp.WeaponPawns.TryGetValue(a.ObjectId, out int pawn) ? pawn : a.ObjectId;
             foreach (UESprite sp in node.Sprites) if (sp.Actor?.ObjectId == id) { dispatched = sp.LeafLights; break; }
-            s.Count = Lighting.Gather(a.ObjectId, a.Location, a.Leaf, a.Light.SpecialLit, a.Unlit, _lineClear, s.Lights, dispatched);
+            // SetupForActor's actor: HP1 DrawMesh passes its own Actor argument ([ebp+0x10], HP1 0x10b0f413) — the weapon;
+            // HP2 DrawMesh passes the sprite's actor (Sprite+0x98, HP2 0x10b111ff) — the pawn, so a third-person weapon's
+            // call runs on the pawn (its cache, location, leaf and flags; SwARc host: both calls on Harry's Index).
+            ref readonly ActorSnapshot lit = ref a;
+            if (id != a.ObjectId && UEGameProfile.Current.Game == UEEdition.Game.HP2)
+                foreach (ref readonly ActorSnapshot o in _frame.ActorSpan)
+                    if (o.ObjectId == id) { lit = ref o; break; }
+            s.Count = Lighting.Gather(lit.ObjectId, lit.Location, lit.Leaf, lit.Light.SpecialLit, lit.Unlit, _lineClear, s.Lights, dispatched);
             _sets[(a.ObjectId, view)] = s;
         }
     }

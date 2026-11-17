@@ -42,26 +42,37 @@ namespace HP1.UEScript
         // headless). The scope separates System and User, as GConfig does in shipped.
         public interface IStore
         {
-            void Save(string scope, string section, string key, string value);
+            // A key is its list of values, as in FConfigSection (a TMultiMap of pairs): the list replaces every saved
+            // value of the key. Whether it is read as an array or a scalar is decided by the reader (the property).
+            // An empty list = the key has no pairs (SaveConfig of an empty array), which shadows the install pairs.
+            void Save(string scope, string section, string key, IReadOnlyList<string> values);
 
-            // Restore after restart: the saved overlay comes back as (scope, section, key, value).
-            IEnumerable<(string Scope, string Section, string Key, string Value)> Load();
+            // Restore after restart: the saved overlay comes back as (scope, section, key, values).
+            IEnumerable<(string Scope, string Section, string Key, IReadOnlyList<string> Values)> Load();
 
             // Drop saved keys so the shipped file shows through again: one key, or the whole section when key is null.
             // No default body: a store that kept reset keys would bring them back on the next start.
             void Remove(string scope, string section, string key);
         }
 
+        // How a test store shows one write: "scope:section.key=v" for one value, "=[a|b]" for any other count.
+        internal static string FormatWrite(string scope, string section, string key, IReadOnlyList<string> values)
+            => scope + ":" + section + "." + key + "=" + (values.Count == 1 ? values[0] : "[" + string.Join("|", values) + "]");
+
         sealed class MemoryStore : IStore
         {
             public readonly List<string> Writes = new List<string>();
             readonly (string, string, string, string)[] _seed;
             public MemoryStore(params (string, string, string, string)[] seed) { _seed = seed; }
-            public void Save(string scope, string section, string key, string value)
-                => Writes.Add(scope + ":" + section + "." + key + "=" + value);
+            public void Save(string scope, string section, string key, IReadOnlyList<string> values)
+                => Writes.Add(FormatWrite(scope, section, key, values));
             public void Remove(string scope, string section, string key)
                 => Writes.Add("remove " + scope + ":" + section + (key is null ? "" : "." + key));
-            public IEnumerable<(string, string, string, string)> Load() => _seed;
+            IEnumerable<(string, string, string, IReadOnlyList<string>)> IStore.Load()
+            {
+                foreach ((string scope, string section, string key, string value) in _seed)
+                    yield return (scope, section, key, new[] { value });
+            }
         }
 
         // In-memory store whose "saved" overlay is `seed`: a snapshot or probe launched with chosen settings (HPEngine
@@ -76,12 +87,19 @@ namespace HP1.UEScript
         //
         // Format: plain ini with the ORIGINAL sections and keys, one file per scope: the System overlay goes to
         // `Default.ini`, the User overlay to `DefUser.ini`. Saved data is read by the same parser as the shipped
-        // files and is human-readable.
+        // files and is human-readable. A key is written as FConfigFile::Write writes it (Engine 0x103cf190: "[%s]"
+        // for every section, then "%s=%s" per pair in Pairs order): a value list is one line per value.
+        //
+        // NOT ORIGINAL (storage only): a key with NO values (SaveConfig of an empty array) is one bare `Key` line. The
+        // original rewrites the whole file, so the removed key is simply absent; the overlay is a diff over the install
+        // file and must say "no pairs here" to shadow the install pairs of the key. FConfigFile::Read skips a line
+        // without '=' (appStrstr miss, Engine 0x103cfad0), so to the original's parser the overlay reads as the
+        // original's own file would: the section present, the key absent.
         public sealed class FileStore : IStore
         {
             readonly string _dir;
-            readonly Dictionary<string, Dictionary<string, Dictionary<string, string>>> _byScope =
-                new Dictionary<string, Dictionary<string, Dictionary<string, string>>>(
+            readonly Dictionary<string, Dictionary<string, Dictionary<string, List<string>>>> _byScope =
+                new Dictionary<string, Dictionary<string, Dictionary<string, List<string>>>>(
                     StringComparer.OrdinalIgnoreCase);
 
             public FileStore(string writableDir)
@@ -90,18 +108,34 @@ namespace HP1.UEScript
                 System.IO.Directory.CreateDirectory(_dir);
             }
 
-            public string PathFor(string scope) => System.IO.Path.Combine(_dir,
-                string.Equals(scope, ScopeUser, StringComparison.OrdinalIgnoreCase)
-                    ? "DefUser.ini" : "Default.ini");
+            // Any other config file (config(Name), a PerObjectConfig package file) goes under OtherFilesDir by its
+            // normalised name: "Default.ini" of config(Default) is a file of its own, not the System overlay.
+            public const string OtherFilesDir = "Config";
 
-            public void Save(string scope, string section, string key, string value)
+            public string PathFor(string scope)
+                => string.Equals(scope, ScopeUser, StringComparison.OrdinalIgnoreCase) ? System.IO.Path.Combine(_dir, "DefUser.ini")
+                 : string.Equals(scope, ScopeSystem, StringComparison.OrdinalIgnoreCase) ? System.IO.Path.Combine(_dir, "Default.ini")
+                 : System.IO.Path.Combine(_dir, OtherFilesDir, scope);
+
+            Dictionary<string, Dictionary<string, List<string>>> SectionsOf(string scope)
             {
                 if (!_byScope.TryGetValue(scope, out var sections))
                     _byScope[scope] = sections =
-                        new Dictionary<string, Dictionary<string, string>>(UEPropNameComparer.Instance);
+                        new Dictionary<string, Dictionary<string, List<string>>>(UEPropNameComparer.Instance);
+                return sections;
+            }
+
+            Dictionary<string, List<string>> KeysOf(Dictionary<string, Dictionary<string, List<string>>> sections, string section)
+            {
                 if (!sections.TryGetValue(section, out var keys))
-                    sections[section] = keys = new Dictionary<string, string>(UEPropNameComparer.Instance);
-                keys[key] = value;
+                    sections[section] = keys = new Dictionary<string, List<string>>(UEPropNameComparer.Instance);
+                return keys;
+            }
+
+            public void Save(string scope, string section, string key, IReadOnlyList<string> values)
+            {
+                var sections = SectionsOf(scope);
+                KeysOf(sections, section)[key] = new List<string>(values);
                 Rewrite(scope, sections);
             }
 
@@ -112,42 +146,59 @@ namespace HP1.UEScript
                 Rewrite(scope, sections);
             }
 
-            void Rewrite(string scope, Dictionary<string, Dictionary<string, string>> sections)
+            void Rewrite(string scope, Dictionary<string, Dictionary<string, List<string>>> sections)
             {
                 // The file is rewritten whole: the overlay is small, and partial ini edits cause drift between
-                // memory and disk.
+                // memory and disk. A value list is one line per value, in order.
                 var sb = new System.Text.StringBuilder();
                 foreach (var sec in sections)
                 {
                     sb.Append('[').Append(sec.Key).Append("]\n");
-                    foreach (var kv in sec.Value) sb.Append(kv.Key).Append('=').Append(kv.Value).Append('\n');
+                    foreach (var kv in sec.Value)
+                    {
+                        if (kv.Value.Count == 0) sb.Append(kv.Key).Append('\n');   // no pairs (see the format note)
+                        foreach (string v in kv.Value) sb.Append(kv.Key).Append('=').Append(v).Append('\n');
+                    }
                     sb.Append('\n');
                 }
                 // ANSI, as FConfigFile::Read reads it (ISO-8859-1 in the parser).
+                System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(PathFor(scope)));
                 System.IO.File.WriteAllText(PathFor(scope), sb.ToString(), System.Text.Encoding.GetEncoding(28591));
             }
 
-            public IEnumerable<(string, string, string, string)> Load()
+            public IEnumerable<(string, string, string, IReadOnlyList<string>)> Load()
             {
-                foreach (string scope in new[] { ScopeSystem, ScopeUser })
+                var scopes = new List<string> { ScopeSystem, ScopeUser };
+                if (UEInstallPath.Dir(System.IO.Path.Combine(_dir, OtherFilesDir)) is { } other)
+                    foreach (string f in System.IO.Directory.GetFiles(other))
+                        scopes.Add(System.IO.Path.GetFileName(f));
+                foreach (string scope in scopes)
                 {
                     string path = UEInstallPath.File(PathFor(scope));
                     if (path is null) continue;
-                    var ini = new UEIniFile(path);
-                    if (!_byScope.TryGetValue(scope, out var sections))
-                        _byScope[scope] = sections =
-                            new Dictionary<string, Dictionary<string, string>>(UEPropNameComparer.Instance);
-                    foreach (string section in ini.Sections)
+                    string text = UELocalization.LoadFileToString(path);
+                    var sections = SectionsOf(scope);
+                    foreach (var (section, pairs) in UELocalization.ParseIniPairs(text))
                     {
-                        if (!sections.TryGetValue(section, out var keys))
-                            sections[section] = keys =
-                                new Dictionary<string, string>(UEPropNameComparer.Instance);
-                        foreach (var kv in ini.Section(section))
+                        var keys = KeysOf(sections, section);
+                        foreach (var kv in pairs)
                         {
-                            keys[kv.Key] = kv.Value;
-                            yield return (scope, section, kv.Key, kv.Value);
+                            if (!keys.TryGetValue(kv.Key, out var list)) keys[kv.Key] = list = new List<string>();
+                            list.Add(kv.Value);
                         }
                     }
+                    // Bare `Key` lines: a key with no pairs, unless the same section also has pairs of it.
+                    string current = null;
+                    foreach (string line in text.Split('\r', '\n'))
+                    {
+                        if (line.Length == 0) continue;
+                        if (line[0] == '[' && line[line.Length - 1] == ']') current = line.Substring(1, line.Length - 2);
+                        else if (current is not null && line.IndexOf('=') < 0 && !KeysOf(sections, current).ContainsKey(line))
+                            KeysOf(sections, current)[line] = new List<string>();
+                    }
+                    foreach (var sec in sections)
+                        foreach (var kv in sec.Value)
+                            yield return (scope, sec.Key, kv.Key, kv.Value);
                 }
             }
         }
@@ -156,8 +207,10 @@ namespace HP1.UEScript
         public const string ScopeUser = "User";
 
         readonly UEIniFile _system, _user;
-        readonly Dictionary<string, string> _overlay =
-            new Dictionary<string, string>(UEPropNameComparer.Instance);
+        // The saved/live overlay: every key as its list of values (FConfigSection pairs of the key, in Pairs order). A
+        // key here shadows the install file's pairs of that key entirely; an empty list = the key has no pairs.
+        readonly Dictionary<string, List<string>> _overlay =
+            new Dictionary<string, List<string>>(UEPropNameComparer.Instance);
         IStore _store;
 
         public UEConfig(UEIniFile system, UEIniFile user, IStore store = null)
@@ -173,8 +226,8 @@ namespace HP1.UEScript
         {
             _store = store ?? throw new ArgumentNullException(nameof(store));
             if (!restoreSaved) return;
-            foreach ((string scope, string section, string key, string value) in _store.Load())
-                _overlay[Key(scope, section, key)] = value;
+            foreach ((string scope, string section, string key, IReadOnlyList<string> values) in _store.Load())
+                _overlay[Key(scope, section, key)] = new List<string>(values);
         }
 
         // ── PRESENTATION SETTINGS ───────────────────────────────────────────
@@ -220,13 +273,14 @@ namespace HP1.UEScript
         // Fixture seam (InternalsVisibleTo): the config's whole mutable state — overlay and bound store. The process
         // GConfig is shared by a test run; a case that rebinds the store or writes keys puts it back exactly, including
         // "the key was absent", which a `set ini:` of the old value cannot express.
-        internal (Dictionary<string, string> Overlay, IStore Store) SnapshotForTest()
-            => (new Dictionary<string, string>(_overlay, UEPropNameComparer.Instance), _store);
+        // Lists are never changed in place (Set and SetSectionValues store a new one), so a shallow copy is a snapshot.
+        internal (Dictionary<string, List<string>> Overlay, IStore Store) SnapshotForTest()
+            => (new Dictionary<string, List<string>>(_overlay, UEPropNameComparer.Instance), _store);
 
-        internal void RestoreForTest((Dictionary<string, string> Overlay, IStore Store) s)
+        internal void RestoreForTest((Dictionary<string, List<string>> Overlay, IStore Store) s)
         {
             _overlay.Clear();
-            foreach (KeyValuePair<string, string> kv in s.Overlay) _overlay[kv.Key] = kv.Value;
+            foreach (KeyValuePair<string, List<string>> kv in s.Overlay) _overlay[kv.Key] = kv.Value;
             _store = s.Store;
         }
 
@@ -237,12 +291,54 @@ namespace HP1.UEScript
         static string Key(string scope, string section, string key)
             => scope + "\0" + section + "\0" + key;
 
+        // A scope other than System/User is a config file by its normalised name (ScopeForFile): read from the install's
+        // System directory (the original's working directory) when the file exists, else no file. Loaded once.
+        readonly Dictionary<string, UEIniFile> _files = new Dictionary<string, UEIniFile>(UEPropNameComparer.Instance);
+
         UEIniFile Source(string scope)
-            => string.Equals(scope, ScopeUser, StringComparison.OrdinalIgnoreCase) ? _user : _system;
+        {
+            if (string.Equals(scope, ScopeUser, StringComparison.OrdinalIgnoreCase)) return _user;
+            if (string.Equals(scope, ScopeSystem, StringComparison.OrdinalIgnoreCase)) return _system;
+            if (_files.TryGetValue(scope, out UEIniFile f)) return f;
+            string path = InstallSystemDir is null ? null : UEInstallPath.File(System.IO.Path.Combine(InstallSystemDir, scope));
+            return _files[scope] = path is null ? null : new UEIniFile(path);
+        }
+
+        // Original: FConfigCacheIni::Find (Engine.dll.c:276918, FUN_103cf5a0) — the file-name part.
+        //   Filename = Filename ? Filename : SystemIni;  appStrcpy(buf, Filename);
+        //   if (len < 5 || (buf[len-4] != '.' && buf[len-5] != '.')) appStrcat(buf, ".ini");
+        //   appStricmp(buf, "User.ini") == 0   -> the process user ini   (+0x24)
+        //   appStricmp(buf, "System.ini") == 0 -> the process system ini (+0x18)
+        //   otherwise the name itself, relative to the working directory (System); the file is created by the
+        //   create flag (SetString, Detach) or when GFileManager->FileSize >= 0, so GetString on a missing file answers
+        //   "no key" and SetString creates it.
+        // A name with a path separator or drive is refused loudly: config(Name) and a PerObjectConfig package name are
+        // identifiers, so no script route passes one, and the overlay store keeps files flat.
+        public static string ScopeForFile(string name)
+        {
+            string buf = name ?? "";
+            int n = buf.Length;
+            if (n < 5 || (buf[n - 4] != '.' && buf[n - 5] != '.')) buf += ".ini";
+            if (WcsicmpEq(buf, "User.ini")) return ScopeUser;
+            if (WcsicmpEq(buf, "System.ini")) return ScopeSystem;
+            if (buf.IndexOfAny(new[] { '/', '\\', ':' }) >= 0)
+                throw new NotSupportedException("config file '" + buf + "': a path in a config file name is not ported "
+                    + "(no script route names one) — STOP, §4");
+            return buf;
+        }
 
         // `Engine.Engine.AudioDevice` -> `Galaxy.GalaxyAudioSubsystem` — UObject::ResolveName (Core.dll.c:52103-52131):
         // the last dot separates the key from the pointer section; the key value is a class name. No pointer in the
         // data — ResolveName fails, and GET/SET answer "class not found" (Logf 0x8f) (D-14 item 10).
+        // null where ResolveName fails (no dot, or no pointer key): StaticExec GET/SET then answer "Unrecognized class".
+        public string TryResolveSection(string scope, string classRef)
+        {
+            int dot = classRef?.LastIndexOf('.') ?? -1;
+            if (dot <= 0) return null;
+            string concrete = Get(scope, classRef.Substring(0, dot), classRef.Substring(dot + 1));
+            return string.IsNullOrEmpty(concrete) ? null : concrete;
+        }
+
         public string ResolveSection(string scope, string classRef)
         {
             int dot = classRef?.LastIndexOf('.') ?? -1;
@@ -299,7 +395,8 @@ namespace HP1.UEScript
         public string Get(string scope, string section, string key)
         {
             HP1.Core.UECoreOwner.Check("UEConfig.Get");
-            if (_overlay.TryGetValue(Key(scope, section, key), out string v)) return v;
+            if (_overlay.TryGetValue(Key(scope, section, key), out List<string> list))
+                return list.Count > 0 ? list[list.Count - 1] : null;
             string fromIni = Source(scope)?.Get(section, key);
             if (fromIni is not null) return fromIni;
             return string.Equals(scope, ScopeSystem, StringComparison.OrdinalIgnoreCase)
@@ -323,16 +420,17 @@ namespace HP1.UEScript
                      ?? System.Linq.Enumerable.Empty<KeyValuePair<string, string>>())
             {
                 seen.Add(kv.Key);
-                yield return new KeyValuePair<string, string>(
-                    kv.Key, Get(scope, section, kv.Key));
+                string value = Get(scope, section, kv.Key);
+                if (value is null) continue;   // removed by an empty value list
+                yield return new KeyValuePair<string, string>(kv.Key, value);
             }
             string prefix = Key(scope, section, "");
-            foreach (KeyValuePair<string, string> kv in _overlay)
+            foreach (KeyValuePair<string, List<string>> kv in _overlay)
             {
                 if (!kv.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
                 string name = kv.Key.Substring(prefix.Length);
-                if (seen.Contains(name)) continue;
-                yield return new KeyValuePair<string, string>(name, kv.Value);
+                if (seen.Contains(name) || kv.Value.Count == 0) continue;
+                yield return new KeyValuePair<string, string>(name, kv.Value[kv.Value.Count - 1]);
             }
         }
 
@@ -343,9 +441,49 @@ namespace HP1.UEScript
         // to GConfig.
         public bool TryGetIni(string scope, string section, string key, out string value)
         {
-            if (_overlay.TryGetValue(Key(scope, section, key), out value)) return true;
+            if (_overlay.TryGetValue(Key(scope, section, key), out List<string> list))
+            {
+                value = list.Count > 0 ? list[list.Count - 1] : null;   // Find: the newest pair of the key
+                return value is not null;
+            }
             value = Source(scope)?.Get(section, key);
             return value is not null;
+        }
+
+        // GConfig->GetSectionPrivate(Section, Force 0, Const 1, File) + FConfigSection::MultiFind(Key), as UObject::LoadConfig
+        // reads a dynamic array (Core disasm 0x1015acb5..0x1015ac73). false: no such section in the file (GetSectionPrivate
+        // answers NULL). Otherwise every value of the key in Pairs order: MultiFind walks the hash chain newest first
+        // (TMultiMap::Add links the new pair at the head, Core FUN_1016a540; Rehash FUN_1016b4b0 relinks in index order),
+        // and LoadConfig imports the found list from its end, so element i is the i-th pair.
+        public bool TryGetSectionValues(string scope, string section, string key, out List<string> values)
+        {
+            values = null;
+            if (_overlay.TryGetValue(Key(scope, section, key), out List<string> list))
+            {
+                values = new List<string>(list);
+                return true;
+            }
+            UEIniFile src = Source(scope);
+            if (src?.HasSection(section) != true && !HasPrefix(_overlay.Keys, Key(scope, section, ""))) return false;
+            values = src?.GetAll(section, key) ?? new List<string>();
+            return true;
+        }
+
+        static bool HasPrefix(IEnumerable<string> keys, string prefix)
+        {
+            foreach (string k in keys)
+                if (k.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        // UObject::SaveConfig of a dynamic array (Core disasm 0x1015b2ab..0x1015b3d2): GetSectionPrivate(Section, Force 1,
+        // Const 0, File) creates the section; every pair whose key appStricmp-equals the property name is removed (walk
+        // from the last pair down), then one TMultiMap::Add(Name, ExportTextItem(element)) per element, in element order.
+        // The key's values are therefore exactly `values`; an empty list leaves the key absent but the section present.
+        public void SetSectionValues(string scope, string section, string key, IReadOnlyList<string> values)
+        {
+            _overlay[Key(scope, section, key)] = new List<string>(values);
+            _store.Save(scope, section, key, values);
         }
 
         // ── PROCESS GCONFIG ─────────────────────────────────────────────────
@@ -356,6 +494,8 @@ namespace HP1.UEScript
         // LoadDefaults and survive level changes. It is created by UELevelRuntime.AppInit — one entry for both
         // frontends.
         public static UEConfig Global { get; internal set; }
+        // HP2: the DLL-only packages (D3DDrv, ALAudio) UGameEngine::Init has bound so far (UEConsoleCommand's GET of ini:).
+        internal readonly HashSet<string> BoundDllPackages = new(StringComparer.OrdinalIgnoreCase);
         internal string InstallSystemDir;
 
         // HPEngine's own settings — the original has no such section.
@@ -422,8 +562,13 @@ namespace HP1.UEScript
         {
             if (TryGetIni(scope, section, key, out string old) && WcsicmpEq(old, value ?? ""))
                 return;
-            _overlay[Key(scope, section, key)] = value ?? "";
-            _store.Save(scope, section, key, value ?? "");
+            // FConfigCacheIni::SetString: the pair Find answers (the newest = the last) takes the value, or one is added.
+            string k = Key(scope, section, key);
+            var list = _overlay.TryGetValue(k, out List<string> cur) ? new List<string>(cur)
+                : Source(scope)?.GetAll(section, key) ?? new List<string>();
+            if (list.Count == 0) list.Add(value ?? ""); else list[list.Count - 1] = value ?? "";
+            _overlay[k] = list;
+            _store.Save(scope, section, key, list);
         }
 
         // _wcsicmp in the "C" locale (the game never calls setlocale): only A-Z are folded.

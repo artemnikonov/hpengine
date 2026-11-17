@@ -174,12 +174,13 @@ namespace HP1.UEScript
             UNameProperty => new UEName("None"),
             UStrProperty => "",
             UObjectProperty => null,
+            UStructProperty => UEObject.ZeroStructValue(p),
             _ => throw new NotSupportedException(
                 $"ScriptConsoleExec: parameter {fn.Name}.{p.Name} of type {p.GetType().Name} — ImportText not ported"),
         };
 
         // ParseToken (Core.dll.c:50928).
-        static string ParseToken(string s, ref int pos, int maxLen, bool useEscape)
+        internal static string ParseToken(string s, ref int pos, int maxLen, bool useEscape)
         {
             var sb = new System.Text.StringBuilder();
             while (pos < s.Length && (s[pos] == ' ' || s[pos] == '\t')) pos++;
@@ -231,129 +232,15 @@ namespace HP1.UEScript
             }
         }
 
-        static char At(string s, int pos) => pos < s.Length ? s[pos] : '\0';
-
-        // ImportText by type (Core.dll.c: Float 2075, Int 4375, Bool 33202,
-        // Name 35556, Str 42562, Byte 65128) with flag 1 (not PPF_Delimited).
+        // UProperty::ImportText of a parameter with PortFlags 1 (not PPF_Delimited): the bodies and their return pointers
+        // are UEObjectConfig.ImportItem's; NULL -> false.
         static bool ImportText(UProperty p, UFunction fn, string s, ref int pos, out object value)
         {
-            value = null;
-            switch (p)
-            {
-                case UFloatProperty:
-                    value = UEValue.LeadingAtof(s.Substring(pos));   // appAtof (Core 0x101264c0)
-                    while (pos < s.Length && s[pos] != ',' && s[pos] != ')' && s[pos] != '\r' && s[pos] != '\n') pos++;
-                    return true;
-                case UIntProperty:
-                {
-                    int v = 0;
-                    char c0 = At(s, pos);
-                    if (c0 == '-' || (c0 >= '0' && c0 <= '9')) v = AppAtoi(s, pos);
-                    while (At(s, pos) == '-' || (At(s, pos) >= '0' && At(s, pos) <= '9')) pos++;
-                    value = v;
-                    return true;
-                }
-                case UBoolProperty:
-                {
-                    if (!ReadToken(s, ref pos, 0x400, false, out string t)) return false;
-                    // GTrue/GFalse are Core's localised "True"/"False".
-                    if (Eq(t, "1") || Eq(t, "True")) { value = true; return true; }
-                    if (Eq(t, "0") || Eq(t, "False")) { value = false; return true; }
-                    return false;
-                }
-                case UNameProperty:
-                {
-                    if (!ReadToken(s, ref pos, 0x400, false, out string t)) return false;
-                    value = new UEName(t.Length == 0 ? "None" : t);
-                    return true;
-                }
-                case UStrProperty:
-                    // Without PPF_Delimited — the WHOLE rest of the line; the pointer is NOT advanced.
-                    value = s.Substring(Math.Min(pos, s.Length));
-                    return true;
-                case UByteProperty bp:
-                {
-                    if (bp.Enum is UEnum en)
-                    {
-                        if (!ReadToken(s, ref pos, 0x400, false, out string t)) return false;
-                        var names = en.Names;
-                        for (int i = 0; i < names.Count; i++)
-                            if (Eq(names[i].ToString(), t)) { value = (byte)i; return true; }
-                    }
-                    char c = At(s, pos);
-                    if (c >= '0' && c <= '9')
-                    {
-                        value = (byte)AppAtoi(s, pos);
-                        while (At(s, pos) >= '0' && At(s, pos) <= '9') pos++;
-                        return true;
-                    }
-                    return false;
-                }
-                default:
-                    throw new NotSupportedException(
-                        $"ScriptConsoleExec: parameter {fn.Name}.{p.Name} of type {p.GetType().Name} — ImportText not ported");
-            }
-        }
-
-        static bool Eq(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
-
-        // Property token read (Core.dll.c:32281, thunk_FUN_1016c5e0): a quoted string
-        // with escapes \\ and \XY; a non-alphanumeric character is a ONE-character token
-        // without advancing the position; otherwise [A-Za-z0-9_-] (plus '.' when dots).
-        // Overflow and an unterminated quote fail.
-        static bool ReadToken(string s, ref int pos, int max, bool dots, out string token)
-        {
-            var sb = new System.Text.StringBuilder();
-            token = "";
-            char c = At(s, pos);
-            if (c == '"')
-            {
-                int p = pos + 1, n = 0;
-                while (true)
-                {
-                    char d = At(s, p);
-                    if (d == '\0' || d == '"' || d == '\r' || d == '\n' || max - 1 <= n) break;
-                    if (d == '\\')
-                    {
-                        char e = At(s, p + 1);
-                        if (e == '\\') { sb.Append('\\'); n++; p += 2; continue; }
-                        int hi = Hex(e), lo = Hex(At(s, p + 2));
-                        sb.Append((char)(lo < 0 ? Math.Max(hi, 0) * 16 : Math.Max(hi, 0) * 16 + lo));
-                        n++; p += 3;
-                        continue;
-                    }
-                    sb.Append(d); n++; p++;
-                }
-                if (n == max - 1 || At(s, p) != '"') return false;
-                pos = p + 1;
-            }
-            else if (!IsAlnum(c))
-            {
-                if (c != '\0') sb.Append(c);
-            }
-            else
-            {
-                int n = 0;
-                while (n < max - 1)
-                {
-                    char d = At(s, pos);
-                    if (!(IsAlnum(d) || d == '_' || d == '-' || (dots && d == '.'))) break;
-                    sb.Append(d); n++; pos++;
-                }
-                if (n == max - 1) return false;
-            }
-            token = sb.ToString();
+            value = ZeroOf(p, fn);
+            int end = UEObjectConfig.ImportItem(p, s, Math.Min(pos, s.Length), 1, ref value, out _);
+            if (end < 0) return false;
+            pos = end;
             return true;
         }
-
-        static bool IsAlnum(char c) => (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
-
-        // Hex digit for \XY: 0-9, a-f, A-F; anything else is 0 for the high digit, "none" for the low one.
-        static int Hex(char c) => c >= '0' && c <= '9' ? c - '0'
-            : c >= 'a' && c <= 'f' ? c - 'a' + 10
-            : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
-
-        // (appAtoi — UEValue.LeadingAtoi, appAtof — UEValue.LeadingAtof.)
-        static int AppAtoi(string s, int pos) => UEValue.LeadingAtoi(s.Substring(pos));
     }
 }

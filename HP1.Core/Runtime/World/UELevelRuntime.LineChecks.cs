@@ -202,6 +202,11 @@ namespace HP1.UEScript
         public List<MoveHit> MultiLineCheck(Vector3 start, Vector3 end, Vector3 extent,
             bool checkActors, UEObject levelInfo)
         {
+            // HP2 (tools/hp2/physics_judge.py, tools/hp2/bsp_body_judge.py): ULevel::MultiLineCheck [HP1 0x103ac620]
+            // [HP2 0x103b67a0], FCollisionHash::ActorLineCheck [HP1 0x10365cc0] [HP2 0x1036c8c0] and the actor primitives'
+            // LineCheck (UPrimitive, UBox, UOrientedCylinder) behave as HP1's under unicorn; UModel::LineCheck's one worker
+            // call is HP1's two calls merged (Owner ? ToWorld coords : NULL), the world bodies agree with the port; with an
+            // owner HP2 keeps the node plane's W in the register (BrushCoords.KeepsPlaneW, judged against the HP2 body).
             var results = new List<MoveHit>();
             bool haveWorld = false;
             Vector3 worldNormal = Vector3.zero, worldLoc = Vector3.zero;
@@ -516,9 +521,16 @@ namespace HP1.UEScript
         // +0xb4/+0xc0/+0xc8 on the level are exactly SpawnActor (push 0 — 0x103a67e4) and
         // FarMoveActor (push 0 — 0x103a9f2b); only Editor.dll imports the exports. So the
         // port has no ActorPointCheck and needs none.
+        // Original: Engine.dll ?FindSpot@ULevel@@UAEHVFVector@@AAV2@HH@Z [HP1 0x103a9690] [HP2 0x103b3120]
+        // HP2's body behaves as HP1's (tools/hp2/engine_exec_judge.py FindSpot: SinglePointCheck/AdjustSpot scripted, 288
+        // cases, every path); its point checks reach UModel::PointCheck with no owner, where HP2's one change (the
+        // transformed plane's W kept at extended precision, [HP2 0x10435cd8]) is exact (unit coords: W' = W). AdjustSpot's
+        // rays go through MultiLineCheck, which stops for HP2.
         public bool FindSpot(Vector3 extent, ref Vector3 location, bool tryCurrent)
-            => FindSpotMath.FindSpot(extent, ref location, tryCurrent,
+        {
+            return FindSpotMath.FindSpot(extent, ref location, tryCurrent,
                 p => !Bsp.PointCheck(p, extent, null).Hit,
                 AdjustSpot);
+        }
     }
 }

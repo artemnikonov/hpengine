@@ -294,8 +294,7 @@ namespace HPEngine
         int _texDetail, _skinDetail;
         public int TextureDetailLevel => _texDetail;
         public int SkinDetailLevel => _skinDetail;
-        public readonly HashSet<string> ShortChains = new(StringComparer.OrdinalIgnoreCase);
-        public readonly HashSet<string> UndefinedFormats = new(StringComparer.OrdinalIgnoreCase);   // DXT1_FATAL / NON_P8_UNDEFINED
+        public readonly HashSet<string> UndefinedFormats = new(StringComparer.OrdinalIgnoreCase);   // DXT1_FATAL / NON_P8_UNDEFINED / a P8 mip without data
 
         public void ApplyTextureDetail(int textureDetail, int skinDetail)
         {
@@ -336,21 +335,20 @@ namespace HPEngine
             UETextureSource.TextureData d = src.Get(path);
             if (d is not null && d.State == "EXPORTED_RGBA")
             {
-                // Non-P8: Core converted the single mip as D3DDrv 0x100022c0 does (no PolyFlags variant). Core exports only
-                // one-mip non-P8 textures, so Lock gives mip 0 (TextureDetail.FirstMip); any other mip is loud, as for P8.
-                if (firstMip > 0 && ShortChains.Add(path))
-                    Console.Error.WriteLine($"[Texture] STOP: {path}: Lock gives mip {firstMip}, the port has only mip 0 of a non-P8 texture");
+                // Non-P8: Core converted the single mip as D3DDrv 0x100022c0 does (no PolyFlags variant). Only a one-mip
+                // non-P8 texture is defined (the converter applies mip 0's clamp to every mip: UETextureSource.ReadDirect),
+                // and Lock cannot give mip > 0 of a one-mip chain (TextureDetail.FirstMip is 0 for it).
                 return UploadExportedRgba(d);
             }
             if (d?.State is "DXT1_FATAL" or "NON_P8_UNDEFINED" && UndefinedFormats.Add(path))
                 Console.Error.WriteLine($"[Texture] STOP: {path}: {d.State} — the original D3DDrv has no defined picture for it (UETextureSource.ReadDirect)");
             if (d is null || d.State != "EXPORTED" || d.Levels is null || d.Levels.Length == 0) { MissingTextures.Add($"{path} ({d?.State ?? "not found"})"); return _white; }
-            if (firstMip >= d.Levels.Length)
+            if (d.DrawsUndefinedMip(firstMip))
             {
-                // Lock cuts by the package's Mips.Num(), but the port's chain stops at a mip without data: loud,
-                // and the last mip with data is taken.
-                if (ShortChains.Add(path)) Console.Error.WriteLine($"[Texture] STOP: {path}: Lock gives mip {firstMip}, the port has data for {d.Levels.Length} of {d.MipCount}");
-                firstMip = d.Levels.Length - 1;
+                // The original draws an undefined picture (UETextureSource.TextureData.DrawsUndefinedMip): loud, missing.
+                if (UndefinedFormats.Add(path)) Console.Error.WriteLine($"[Texture] STOP: {path}: Lock gives mip {firstMip}, mip {d.LastUndefinedMip} of {d.MipCount} has no full data — the original D3DDrv draws an undefined picture");
+                MissingTextures.Add($"{path} (P8_MIP_UNDEFINED)");
+                return _white;
             }
             var levels = ExpandP8(d, variant, firstMip);
             var tex = Tex(SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, levels[0].Item1, levels[0].Item2, levels.Length, SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER);
@@ -636,19 +634,17 @@ namespace HPEngine
         nint[] _animTex = Array.Empty<nint>();
         public int PannedBatches, AnimatedBatches;
 
-        // wallSeconds: wall clock (same as TickProc); the AnimNext chain frame follows it (UTexture::Update). Only textures
-        // Core's DrawFrame updated this frame advance (SetDrawn: WorldFrame.DrawnTextures); an undrawn chain holds.
-        public void AnimateWorld(float levelTime, UETextureAnim anim, double wallSeconds)
+        // textureFrames: the AnimNext chain frame of every texture Core's frame used (WorldFrame.TextureFrames: Core steps the
+        // chains, UTexture::Update); a batch whose texture the frame did not use keeps its last frame.
+        public void AnimateWorld(float levelTime, IReadOnlyDictionary<string, string> textureFrames)
         {
             if (_uvOff.Length != _draws.Count * 2) { _uvOff = new float[_draws.Count * 2]; _animTex = new nint[_draws.Count]; }
-            anim?.BeginFrame(wallSeconds);
             PannedBatches = AnimatedBatches = 0;
             for (int i = 0; i < _draws.Count; i++)
             {
                 Batch b = _draws[i].b;
-                if (anim != null && _drawnTex.Contains(b.Material) && anim.IsAnimated(b.Material))
+                if (textureFrames.TryGetValue(b.Material, out string frame))
                 {
-                    string frame = anim.CurrentFrame(b.Material);
                     _animTex[i] = TextureFor(frame, b.AlphaTest ? TexDraw.Masked : TexDraw.Normal); AnimatedBatches++;
                 }
                 if (b.PanFlags != 0)
@@ -676,7 +672,8 @@ namespace HPEngine
 
         // CHILD VIEWS: ViewTree (Core occlusion child frames, D-61). DrawFrame draws children before the parent
         // (Render.dll.c:1011-1014); here each into its own target, and the batch of the surface that spawned the frame
-        // takes the target colour in screen coordinates. The sky frame draws only sky zones and takes no children.
+        // takes the target colour in screen coordinates — except the camera-in-warp child, drawn into its parent's target
+        // (ViewTree.FullScreenChild). The sky frame draws only sky zones and takes no children.
         const int KindMirror = ViewTree.KindMirror, KindWarp = ViewTree.KindWarp, KindSky = ViewTree.KindSky;
         readonly ViewTree _tree = new();
         List<ViewTree.View> _views => _tree.Views;
@@ -736,6 +733,11 @@ namespace HPEngine
                     Refuse("Core reflagged a level node with flags the mesh has no run for — drawn with its surface flags");
                 if ((_mesh?.UnportedBackZone ?? 0) > unportedBefore)
                     Refuse("a node on a zone boundary drawn from behind has no back run (back side fully covered in the coplanar cut) — lit with its front zone");
+                // HP2 Lumos carriers (DrawnWorld.Lumos, Core's DrawComplexSurface PolyFlags/alpha of HP2's DrawFrame): D3DDrv's
+                // SetBlending 0x800040 case (INVSRCALPHA/SRCALPHA), the z-write bit and the carrier word in place of the static
+                // flags are not drawn here — the polygons keep their static surface | texture flags.
+                if (DrawnOfView(vi).Lumos.Length > 0)
+                    Refuse("HP2 Lumos carrier surfaces: their DrawComplexSurface flags and alpha (DrawnWorld.Lumos) are not drawn — drawn with the static surface flags");
             }
         }
 
@@ -841,7 +843,10 @@ namespace HPEngine
                 _curView = vi;
                 DrawLog.Pass = ViewName(vi);
                 if (DrawLog.On) LogView(vi, cam);
-                var mp = BeginPass(cmd, _viewRt[vi], clearColor: true);
+                // A camera-in-warp child is drawn into its parent's target (the parent draws nothing of its own and keeps
+                // it: its pass loads instead of clearing); every other view into its own.
+                bool full = _tree.FullScreenChild(v.Parent) == vi;
+                var mp = BeginPass(cmd, full ? (v.Parent == 0 ? target : _viewRt[v.Parent]) : _viewRt[vi], clearColor: _tree.FullScreenChild(vi) < 0);
                 DrawGroups(cmd, mp, fu, samplers);
                 SDL_EndGPURenderPass(mp);
                 if (v.Kind == KindMirror) MirrorPasses++; else if (v.Kind == KindWarp) WarpPasses++; else SkyPasses++;
@@ -851,7 +856,7 @@ namespace HPEngine
             // Level: sky windows, mirrors, portals from their child views.
             fixed (float* rows = _rows) SDL_PushGPUVertexUniformData(cmd, 0, (nint)rows, 64);
             DrawLog.Pass = "main";
-            var main = BeginPass(cmd, target, clearColor: true);
+            var main = BeginPass(cmd, target, clearColor: _tree.FullScreenChild(0) < 0);
             _screenW = w; _screenH = h;
             DrawGroups(cmd, main, fu, samplers);
             SDL_EndGPURenderPass(main);

@@ -125,22 +125,34 @@ namespace HP1.UEScript
         // from any other frame in 48 cases). No discard rule is the only option that
         // does not add invention to the unknown.
         //
-        // Comparing a candidate against ALL saved points is wrong unconditionally: it
+        // In HP1, comparing a candidate against ALL saved points is wrong unconditionally: it
         // discards by a rule absent from the machine code for any frame. On sets shorter
         // than ten points that changes the penalty by 500 and flips the lesson outcome.
+        //
+        // HP2 fixed the loop: the candidate is compared with every point kept so far (the cursor starts at the kept
+        // buffer and advances 8 bytes per j) and dropped on the first one with |dx| < 0.001 and |dy| < 0.001 (dx =
+        // fld kept.x; fsub cand.x, the sign by fcom 0.0 + fchs, then fcomp the double 0.001: C0 set = below, so a NaN
+        // difference counts as below too). Sub-0.001 differences of two floats are exact at every x87 precision.
+        // Original: Engine.dll ?execCompareGesture@UGesture@@QAEXAAUFFrame@@QAX@Z [HP1 0x103A3F60] [HP2 0x103AD990]
         static List<Vector3> GestureDedupDrawn(IList drawn)
         {
             var kept = new List<Vector3>();
             if (drawn is null) return kept;
+            bool hp2 = UEGameProfile.Current.Game == UEEdition.Game.HP2;
             int n = Math.Min(drawn.Count, GestureMaxPoints);
             for (int i = 0; i < n; i++)
             {
                 Vector3 p = UEInterpreter.AsVector3(drawn[i]);
                 if (p.z == -1f) continue;
+                if (hp2 && kept.Exists(k => GestureNear((double)k.x - p.x) && GestureNear((double)k.y - p.y)))
+                    continue;   // [HP2 0x103ada7a..0x103adad0]
                 kept.Add(new Vector3(p.x, p.y, 0f));
             }
             return kept;
         }
+
+        // |d| < 0.001 as HP2's fcom/fchs/fcomp chain decides it [HP2 0x103ada82..0x103adac4]: unordered (NaN) is "below".
+        static bool GestureNear(double d) => !(Math.Abs(d) >= 0.001);
 
         // execCompareGesture 0x103a40bb-0x103a41c4 — densify the template 8x.
         //
@@ -183,14 +195,16 @@ namespace HP1.UEScript
 
         // The running minimum starts at 1.0f and is stored back as float32
         // (`fstp dword [esp+0x10]`), so a distance only survives at float
-        // precision even though it arrives as a double.
+        // precision even though it arrives as a double. The compare is `fcom best; test ah, 1; je keep` (0x103a3a1e,
+        // 0x103a3ae4, 0x103a3e84): C0 is set for below AND for unordered, so a NaN distance replaces the minimum (and
+        // every later distance replaces a NaN minimum).
         static float GestureNearest(List<Vector3> points, in Vector3 probe)
         {
             float best = 1.0f;
             for (int i = 0; i < points.Count; i++)
             {
                 double d = GestureDistance(probe, points[i]);
-                if (d < best) best = (float)d;
+                if (!(d >= best)) best = (float)d;
             }
             return best;
         }
@@ -208,17 +222,18 @@ namespace HP1.UEScript
         //     drives the score to (near) zero;
         //   score = clamp(1 - penalty/total, 0, 1).
         //
-        // `total == 0` (an empty template with >= 10 drawn points) divides by
-        // zero on the x87: the masked result is +-Inf or NaN, `1.0 - that` is
-        // never >= 0.0, and the lower clamp returns 0.0f. Written explicitly
-        // here rather than relying on .NET reproducing the same NaN ordering.
+        // "Within accuracy" is `fld nearest; fcomp accuracy; test ah, 0x41; jne` (0x103a3a3e, 0x103a3b04): below, equal or
+        // unordered, so a NaN nearest counts as within. `total == 0` divides by zero on the x87 (fild; fidiv): the
+        // masked 0/0 NaN and +x/0 = +Inf give 0.0f through the lower clamp (0x103a3b77, unordered counts as below), a
+        // negative penalty's -Inf gives 1 - (-Inf) = +Inf and the upper clamp's 1.0f: IEEE division of doubles is the
+        // same.
         static float GestureScore(List<Vector3> drawn, List<Vector3> template, float accuracy)
         {
             int penalty = 0, total = 0;
             for (int t = 0; t < template.Count; t++)
             {
                 float nearest = GestureNearest(drawn, template[t]);
-                if (nearest <= accuracy) { total += 2; continue; }
+                if (!(nearest > accuracy)) { total += 2; continue; }
                 // 0x103a3a48: `fld accuracy; fmul 5.0f; fdivr nearest; fadd 1.0f`
                 // — the multiplier and quotient live in a REGISTER and are not rounded
                 // to float32. Folding them to float32 gives 1.99999994f at the boundary,
@@ -231,13 +246,12 @@ namespace HP1.UEScript
             for (int d = 0; d < drawn.Count; d++)
             {
                 float nearest = GestureNearest(template, drawn[d]);
-                if (nearest <= accuracy) continue;
+                if (!(nearest > accuracy)) continue;
                 int p = Ftol((double)nearest / accuracy);   // 0x103a3b0e
                 if (p > 3) p = 3;
                 penalty += p; total += p;
             }
             if (drawn.Count < 10) { penalty += 500; total += 500; }
-            if (total == 0) return 0f;
             double score = 1.0 - (double)penalty / total;
             if (!(score >= 0.0)) return 0f;
             if (score > 1.0) return 1.0f;

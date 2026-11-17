@@ -57,6 +57,11 @@ namespace HP1.UEScript
         {
             _aliases.Clear();
             _bindings.Clear();
+            // UInput::Exec's alias lookup walks the 40 slots from 0 and runs the FIRST whose FName matches, then returns
+            // ([HP1 0x103a55b7..0x103a561a]; HP2's UInput::Exec [0x103aec60] is the same body, tools/hp2/native_match.py).
+            // So a name in two slots answers with the lower slot: HP2's DefUser.ini has MoveForward/MoveBackward in
+            // Aliases[2]/[3] (aBaseY) and again in [25]/[26] (aForward).
+            var slots = new List<(int Slot, string Alias, string Command)>();
             foreach (KeyValuePair<string, string> kv in engineInputSection)
             {
                 if (kv.Key.StartsWith("Aliases[", StringComparison.OrdinalIgnoreCase))
@@ -64,11 +69,15 @@ namespace HP1.UEScript
                     (string command, string alias) = ParseAliasValue(kv.Value);
                     if (string.IsNullOrEmpty(alias) || string.Equals(alias, "None", StringComparison.OrdinalIgnoreCase))
                         continue;                       // empty table slots
-                    _aliases[alias] = command;
+                    if (!int.TryParse(kv.Key.AsSpan(8, kv.Key.Length - 9), out int slot) || !kv.Key.EndsWith("]", StringComparison.Ordinal))
+                        throw new FormatException($"[Engine.Input] {kv.Key}: not an Aliases[<slot>] key");
+                    slots.Add((slot, alias, command));
                 }
                 else if (kv.Value.Length > 0)
                     _bindings[kv.Key] = kv.Value;       // <Key>=<command>
             }
+            slots.Sort((a, b) => a.Slot.CompareTo(b.Slot));   // an ini key is unique, so no two entries share a slot
+            foreach (var s in slots) _aliases.TryAdd(s.Alias, s.Command);
             Log($"input_bindings aliases={_aliases.Count} keys={_bindings.Count}");
         }
 
@@ -108,12 +117,15 @@ namespace HP1.UEScript
         }
 
         public bool IsDown(string key) => _down.Contains(key);
+        // KeyDownTable[Min(key, 0xfe)] (+0xeb0) as UInput::KeyDown reads it [HP1 0x1034e320] [HP2 0x10354240]: negative -> 0.
+        internal bool KeyDownTable(int key) => _down.Contains(KeyNamesByIndex()[key < 0 ? 0 : Math.Min(key, 0xfe)]);
 
         // Layout, READ-ONLY — for frontend boundary checks ("the binding came from the real DefUser.ini, not from a
         // C# table"). No writer on purpose: the only entry is LoadBindings from ini.
         public int BindingCount => _bindings.Count;
         public bool TryGetBinding(string key, out string command)
             => _bindings.TryGetValue(key ?? string.Empty, out command);
+        internal bool TryGetAlias(string alias, out string command) => _aliases.TryGetValue(alias ?? string.Empty, out command);
 
         // ── SET Input <Key> [<Command>] ─────────────────────────────────────
         //
@@ -434,6 +446,14 @@ namespace HP1.UEScript
         public bool InputEvent(UEInterpreter interp, UEObject console, UEObject pawn, string key,
             InputAction action, float delta)
         {
+            // HP2's UGameEngine::InputEvent begins [HP2 0x103ac4e6..0x103ac5b2]: on a Delete press (IST_Press, IK_Delete
+            // 0x2e) GConfig->GetStr("HGame.baseConsole", "bDebugMode", NULL) (the system ini; GetString empties the buffer
+            // on a miss) equal to "True" (appStricmp) toggles GLevel's special pause (ULevel+0x111c).
+            // Original: Engine.dll ?InputEvent@UGameEngine@@UAEHPAVUViewport@@W4EInputKey@@W4EInputAction@@M@Z [HP1 0x103A2BE0] [HP2 0x103AC4C0]
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2 && action == InputAction.Press && UEConsoleCommand.FindKeyName(key) == 0x2e
+                && SpecialPauseKey((UEConfig.Global ?? throw new InvalidOperationException("InputEvent: no GConfig (AppInit)"))
+                    .TryGetIni(UEConfig.ScopeSystem, "HGame.baseConsole", "bDebugMode", out string debugMode) ? debugMode : ""))
+                Level.SpecialPause = !Level.SpecialPause;
             // D-75: the device in use follows keyboard keys and the pad; the mouse (moves, clicks, wheel, trackpad) keeps it
             // (author 2026-11-13: a click on the Controls page in the pad view flipped it to the keyboard view).
             if ((action == InputAction.Press || (action == InputAction.Axis && delta != 0f)) && (_inPadPoll || !IsMouseKey(key))) _padLast = _inPadPoll;
@@ -445,6 +465,12 @@ namespace HP1.UEScript
                 UEPortScriptOverrides.ScrollOpenComboList(interp, console, key == "MouseWheelUp" ? -1 : 1);
             return r;
         }
+
+        // The level whose Input this is (GLevel for the frontend's events).
+        internal UELevelRuntime Level;
+
+        // HP2's special-pause key test on the ini value: appStricmp(value, "True") == 0.
+        internal static bool SpecialPauseKey(string debugMode) => string.Equals(debugMode, "True", StringComparison.OrdinalIgnoreCase);
 
         bool InputEventCore(UEInterpreter interp, UEObject console, UEObject pawn, string key,
             InputAction action, float delta)

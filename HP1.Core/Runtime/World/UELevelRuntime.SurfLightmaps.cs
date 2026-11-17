@@ -86,7 +86,8 @@ namespace HP1.UEScript
         }
 
         internal void UpdateMoverSurfaceLightmaps()
-            => MoverLightmaps?.Update(LatestFrame, FrameProducer?.LightmapFx, ZoneAmbientHSB, FrameProducer?.SurfDynamicLights);
+            => MoverLightmaps?.Update(LatestFrame, FrameProducer?.LightmapFx, ZoneAmbientHSB, FrameProducer?.SurfDynamicLights,
+                FrameProducer?.LastMasterFrame);
 
         // Zone fog maps of the CURRENT world, per frame of the tick's occlusion tree (LevelFogMaps); built with the
         // per-frame lightmaps (ComputeSurfaceLightmapsInFrame). A new world gets a new object.
@@ -122,14 +123,24 @@ namespace HP1.UEScript
         // +0x2d0/+0x2d1/+0x2d2 (AmbientBrightness/Hue/Saturation) — R:20385-20392.
         public (int h, int s, int b) ZoneAmbientHSB(int zone)
         {
+            UEObject z = ZoneActorOf(zone);
+            return (UEValue.AsByte(z.GetProp(PK.AmbientHue)), UEValue.AsByte(z.GetProp(PK.AmbientSaturation)),
+                    UEValue.AsByte(z.GetProp(PK.AmbientBrightness)));
+        }
+
+        // The zone byte of the lightmap cache keys 0x18/0x31: the draw record's zone actor (+0x34) Region.ZoneNumber (+0xa8,
+        // SetupForSurf 0x10b079d7..0x10b079ef); zones falling back to LevelInfo share its byte, hence one cache.
+        // Original: Render.dll not exported: FUN_10b077f0 FLightManager::SetupForSurf [HP1 0x10B077F0] — slot 3 of the FLightManager vtable 0x10b386d4 (unwind string "FLightManager::SetupForSurf") (the zone byte, 0x10b079d7..0x10b079ef)
+        internal int ZoneCacheByte(int zone) => UEValue.AsByte((ZoneActorOf(zone).GetProp(PK.Region) as UEObject)?.GetProp(PK.ZoneNumber));
+
+        UEObject ZoneActorOf(int zone)
+        {
             int[] zoneActors = Bsp?.RawZoneActors;   // same array as StaticGeometry.ZoneActorExports
             int export = zoneActors is not null && zone >= 0 && zone < zoneActors.Length ? zoneActors[zone] : 0;
             UEObject z = null;
             if (export > 0) ActorsByExport.TryGetValue(export, out z);
             if (z is null) z = Actors.Count > 0 ? Actors[0] : null;
-            if (z is null) throw new InvalidOperationException($"zone ambient {zone}: neither a zone actor nor Actors(0)");
-            return (UEValue.AsByte(z.GetProp(PK.AmbientHue)), UEValue.AsByte(z.GetProp(PK.AmbientSaturation)),
-                    UEValue.AsByte(z.GetProp(PK.AmbientBrightness)));
+            return z ?? throw new InvalidOperationException($"zone {zone}: neither a zone actor nor Actors(0)");
         }
     }
 }

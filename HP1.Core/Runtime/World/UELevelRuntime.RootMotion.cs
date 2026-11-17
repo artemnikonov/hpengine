@@ -119,11 +119,18 @@ namespace HP1.UEScript
         //   C = FCoords(−Origin⊙S, (S.x,0,0), (0,S.y,0), (0,0,S.z));
         //   C /= mesh RotOrigin; C.Origin += PrePivot + (0,0,bAlignBottom shift);
         //   C /= actor Rotation (rotates the origin too); C.Origin += Location.
-        BrushCoords MeshCoordsOf(UEObject actor)
+        // meshRef — `this` of USkeletalMesh::GetMeshCoords when it is not the actor's own Mesh (ApplyAnim on the owner in
+        // GetFrame's bAnimByOwner route, on a channel in the owner's overlay).
+        // HP2 adds the actor's SavedPrePivotZ (the step smoothing, Hp2SmoothStep) to that z after PrePivot [HP2
+        // 0x10429a96, 0x10429b3b..0x10429b46]: z = float(float(shift + PrePivot.z) + SavedPrePivotZ); and its shift
+        // condition (AlignBottomActive) has bAlignBottomAlways in front.
+        // Original: Engine.dll ?GetMeshCoords@USkeletalMesh@@ABE?AVFCoords@@PBVAActor@@@Z [HP1 0x1041AEF0] [HP2 0x10429A00]
+        BrushCoords MeshCoordsOf(UEObject actor, UEResourceRef meshRef = null)
         {
-            if (actor.GetProp(PK.Mesh) is not UEResourceRef meshRef)
+            if ((meshRef ?? actor.GetProp(PK.Mesh)) is not UEResourceRef mr)
                 throw new InvalidOperationException(
                     $"mesh coords on an actor without a Mesh actor={actor.GetProp(PK.Name)}");
+            meshRef = mr;
             EnsureMeshBounds(meshRef, actor, "mesh coords");
             Hp1MeshHashFields mesh = MeshHashFieldsHook is not null
                 ? MeshHashFieldsHook(meshRef)
@@ -144,8 +151,10 @@ namespace HP1.UEScript
             Vector3 prePivot = UEInterpreter.AsVector3(actor.GetProp(PK.PrePivot));
             // GetMeshCoords — the USkeletalMesh body: the mesh here is always skeletal.
             float shiftZ = AlignBottomActive(actor) ? SkeletalAlignShiftZ(actor, mesh) : 0f;
+            float pivotZ = shiftZ + prePivot.z;
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2) pivotZ += UEInterpreter.AsFloat(actor.GetProp("SavedPrePivotZ"));
             coords.Origin = new Vector3(coords.Origin.x + prePivot.x, coords.Origin.y + prePivot.y,
-                coords.Origin.z + (shiftZ + prePivot.z));
+                coords.Origin.z + pivotZ);
             UERotator actorRotation = UEInterpreter.AsRotator(actor.GetProp(PK.Rotation));
             coords.DivRotator(actorRotation.Pitch, actorRotation.Yaw, actorRotation.Roll);
             Vector3 loc = UEInterpreter.AsVector3(actor.GetProp(PK.Location));
@@ -184,8 +193,12 @@ namespace HP1.UEScript
             return SkeletalAlignShiftZ(actor, mesh);
         }
 
+        // HP2 takes the shift whenever bAlignBottomAlways (+0x200 bit 0x80) is set, before HP1's four conditions
+        // [HP2 0x10429a66, 0x10429aa3] (USkeletalMesh::GetMeshCoords; its inlined twin MeshAdjust [HP2 0x10429960] has no
+        // caller).
         static bool AlignBottomActive(UEObject actor)
         {
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2 && UEInterpreter.ToBool(actor.GetProp("bAlignBottomAlways"))) return true;
             if (!UEInterpreter.ToBool(actor.GetProp(PK.bAlignBottom))
                 || !UEInterpreter.ToBool(actor.GetProp(PK.bCollideWorld))) return false;
             if (UEInterpreter.ToInt(actor.GetProp(PK.Physics)) == 0) return false;
@@ -194,7 +207,9 @@ namespace HP1.UEScript
         }
 
         // The shift body is ONE for both entries (skeletal GetMeshCoords and
-        // frontend frame alignment).
+        // frontend frame alignment). Every step stays in the register up to one fstp dword (fsub, fmul, fmul, then
+        // CollisionHeight + the qword 2.5 and fsubp [HP1 0x1041afab..0x1041afee]): the PC64 register in game logic, 24-bit
+        // steps (float operations) inside the render window.
         static float SkeletalAlignShiftZ(UEObject actor, Hp1MeshHashFields mesh)
         {
             // DrawScale: a field the actor does not set takes the engine default 1.0
@@ -202,8 +217,13 @@ namespace HP1.UEScript
             float drawScale = actor.GetProp(PK.DrawScale) is { } ds
                 ? UEInterpreter.AsFloat(ds) : 1f;
             float height = UEInterpreter.AsFloat(actor.GetProp(PK.CollisionHeight));
-            return (mesh.Origin.z - mesh.BoundMin.z) * mesh.Scale.z * drawScale
-                   - (height + 2.5f);
+            if (UEWorldFrameProducer.FastMathWindow)
+                return (mesh.Origin.z - mesh.BoundMin.z) * mesh.Scale.z * drawScale
+                       - (height + 2.5f);
+            static HP1.Core.X87Ext F(float v) => HP1.Core.X87Ext.From(v);
+            static HP1.Core.X87Ext R(HP1.Core.X87Ext v) => HP1.Core.X87Ext.Round64(v);
+            HP1.Core.X87Ext d = R(R(R(F(mesh.Origin.z) - F(mesh.BoundMin.z)) * F(mesh.Scale.z)) * F(drawScale));
+            return R(d - R(F(height) + HP1.Core.X87Ext.From(2.5))).ToFloat();
         }
 
         // Diagnostic wrappers of the SAME data body (C7: a probe does not keep

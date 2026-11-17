@@ -21,7 +21,7 @@ static class Program
         Directory.CreateDirectory(sys);
         string ini = Path.Combine(sys, "Default.ini");
         File.WriteAllText(ini, "[WinDrv.WindowsClient]\nWindowedViewportX=640\nWindowedViewportY=480\n"
-            + "[Galaxy.GalaxyAudioSubsystem]\nUseSurround=False\nReverseStereo=False\nAmbientFactor=0.7\nDopplerSpeed=9000.0\nLatency=40\nOutputRate=22050Hz\n");
+            + "[Galaxy.GalaxyAudioSubsystem]\nUseSurround=False\nReverseStereo=False\nAmbientFactor=0.7\nDopplerSpeed=9000.0\nLatency=40\nOutputRate=22050Hz\nUseDigitalMusic=False\nUseCDMusic=False\n");
         try
         {
             var natives = new UEGameEngineNatives(1, new List<string>(), ini, null);
@@ -175,6 +175,15 @@ static class Program
         byte[] mp2 = { 0xFF, 0xFD, 0x00, 0xC0 };
         string e2 = Err(() => UESoundCatalog.SoundPeriod(mp2, "mp2", "Test.free", 4410), out float p2);
         Check("GetPeriod mp2 bitrateIndex 0", e2 is null && Math.Abs(p2 - Want(4410, 44100 * 16)) <= 1e-6f, e2 ?? $"{p2:R}");
+
+        // B26: the Galaxy WAVE loader (FUN_10617270) — FileType is not read, tag 1 plays, 0x11/0x55 are Galaxy decoders
+        // (not ported: STOP), any other tag is "Invalid sound format" (GError, fatal).
+        string Dec(byte[] d, string format) { try { UESoundPcm.Decode(d, format, "Test.w"); return "ok"; } catch (Exception e) { return e.GetType().Name; } }
+        Check("WAV tag 1 under FileType ogg decodes", Dec(Wav(true, true, 1, 1, 22050, 16, 100, 100), "ogg") == "ok");
+        Check("WAV tag 3 is a fatal Invalid sound format", Dec(Wav(true, true, 3, 1, 22050, 16, 100, 100), "WAV") == "InvalidDataException");
+        Check("WAV tag 0x11 / 0x55 stop (Galaxy decoders not ported)",
+            Dec(Wav(true, true, 0x11, 1, 22050, 4, 100, 100), "WAV") == "NotSupportedException"
+            && Dec(Wav(true, true, 0x55, 1, 22050, 16, 100, 100), "WAV") == "NotSupportedException");
     }
 
     // ── B7: UTexture::Update (Engine 0x10421070): dt = Time − LastUpdateTime on the viewport WALL clock and
@@ -391,8 +400,9 @@ static class Program
     }
 
     // ── D-39: UObject::SetLanguage (Core 0x10164d60, disasm): stricmp, GLanguage, five LocalizeGeneral words,
-    //    LanguageChange on all objects. Caller: appInit BEFORE StaticInit (no objects). Port: the language
-    //    changes; a Core.<language> [General] word that differs beyond case is a STOP (the port keeps literals).
+    //    LanguageChange on all objects. Caller: appInit BEFORE StaticInit (no objects). D03 (live original
+    //    2026-11-15, tools/origprobe/run_d03.sh): GTrue/GFalse take Core.<language> [General] True/False, Core.int as
+    //    the fallback; their readers (StringToBool, BoolToString, UBoolProperty::ImportText) follow.
     static void SetLanguageShipped(string tmp)
     {
         string sys = Path.Combine(tmp, "lang");
@@ -401,6 +411,7 @@ static class Program
         File.WriteAllText(Path.Combine(sys, "Core.int"), "[General]\r\nTrue=True\r\nFalse=False\r\nNone=None\r\nYes=Yes\r\nNo=No\r\n");
         File.WriteAllBytes(Path.Combine(sys, "Core.rus"), U16("[General]\r\nTrue=TRUE\r\nFalse=FALSE\r\nNone=None\r\nYes=Yes\r\nNo=No\r\n"));
         File.WriteAllText(Path.Combine(sys, "Core.spa"), "[General]\r\nTrue=Verdadero\r\n");
+        File.WriteAllBytes(Path.Combine(sys, "Core.fin"), U16("[General]\r\nTrue=Tosi\r\nFalse=Ep\u00e4tosi\r\n"));
         File.WriteAllBytes(Path.Combine(sys, "LangTest.rus"), U16("[S]\r\nK=Привет\r\n"));   // non-Latin test input
         File.WriteAllText(Path.Combine(sys, "LangTest.int"), "[S]\r\nK=Hello\r\nOnlyInt=Fallback\r\n");
         string prev = UELocalization.SystemDir;
@@ -409,11 +420,22 @@ static class Program
         {
             Check("SetLanguage: no packages (as in appInit before StaticInit)",
                 HP1.Core.UEClassRegistry.Shared is not { Packages.Count: > 0 });
-            bool stop = false;
-            try { UELocalization.SetLanguage("spa"); } catch (NotSupportedException) { stop = true; }
-            Check("SetLanguage spa: True=Verdadero — STOP, the language did not change", stop && UELocalization.Language == "int");
             UELocalization.SetLanguage("INT");
             Check("SetLanguage INT: stricmp — no change", UELocalization.Language == "int");
+            UELocalization.SetLanguage("spa");
+            Check("SetLanguage spa: GLanguage = spa, GTrue = Verdadero, GFalse from Core.int",
+                UELocalization.Language == "spa" && UELocalization.GTrue == "Verdadero" && UELocalization.GFalse == "False",
+                UELocalization.GTrue + "/" + UELocalization.GFalse);
+            Check("spa: StringToBool(\"verdadero\") = true, (\"True\") = true, (\"2\") = true, (\"x\") = false",
+                UELocalization.StringToBool("verdadero") && UELocalization.StringToBool("True") && UELocalization.StringToBool("2")
+                && !UELocalization.StringToBool("x"));
+            Check("spa: UBoolProperty::ImportText words: VERDADERO -> true, 0 -> false, si -> none",
+                UELocalization.ImportBoolWord("VERDADERO") == true && UELocalization.ImportBoolWord("0") == false
+                && UELocalization.ImportBoolWord("si") is null);
+            UELocalization.SetLanguage("fin");
+            Check("SetLanguage fin: GFalse = Epätosi (UTF-16 file)", UELocalization.GFalse == "Ep\u00e4tosi", UELocalization.GFalse);
+            Check("fin: appStricmp folds A..Z only: EPäTOSI -> false, EPÄTOSI -> not a word",
+                UELocalization.ImportBoolWord("EP\u00e4TOSI") == false && UELocalization.ImportBoolWord("EP\u00c4TOSI") is null);
             string why = "";
             try { UELocalization.SetLanguage("rus"); } catch (Exception e) { why = e.Message; }
             Check("SetLanguage rus: GLanguage = rus", UELocalization.Language == "rus", why == "" ? UELocalization.Language : why);

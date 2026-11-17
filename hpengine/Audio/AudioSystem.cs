@@ -15,6 +15,10 @@ namespace HPEngine.Audio
         public readonly AudioMixer Mixer;
         readonly SoundBank _bank;
         readonly IMusicSource _music;
+        readonly ISoundSource _sounds;
+        // HP2: the executor of Core's OpenAL calls (WorldFrame.ALCommands), made by the first frame that carries them; its
+        // sources are mixed into the same frame queue as the Galaxy voices (HP1 frames carry none: AL stays null).
+        public ALExecutor AL;
 
         // Reverb struct words last delivered (Galaxy this+0x70f), and the number of their changes (glxSetSampleReverb).
         ReverbState _reverbApplied;
@@ -30,6 +34,7 @@ namespace HPEngine.Audio
         {
             Mixer = new AudioMixer(Channels, outputRate);
             _bank = new SoundBank(sounds);
+            _sounds = sounds;
             _music = music ?? throw new ArgumentNullException(nameof(music));
             _lastFrameTick = firstTick == int.MinValue ? int.MinValue : firstTick - 1;
         }
@@ -58,6 +63,8 @@ namespace HPEngine.Audio
         public void Update(WorldFrame frame, IAudioWorld world)
         {
             if (frame == null) return;
+            if (frame.ALCommands is { } al)
+                lock (Gate) (AL ??= new ALExecutor(UEALAudio.MaxSources, Mixer.Rate, _sounds, _music)).Execute(al);
             ApplyFrame(frame.Tick, frame.AudioCallStops, frame.AudioMixDt, frame.AudioChannels, frame.AudioResumeSerial,
                        frame.Reverb, world);
         }
@@ -77,6 +84,7 @@ namespace HPEngine.Audio
                     _clocked += n;
                     if (_frame.Length < 2 * n) _frame = new float[2 * n];
                     Mixer.Mix(_frame, n);
+                    AL?.MixAdd(_frame, n);
                     for (int k = 0; k < 2 * n; k++) _queue.Enqueue(_frame[k]);
                     // ponytail: a device that stalls lets the queue grow; past a quarter second the oldest audio is dropped
                     while (_queue.Count > Mixer.Rate / 2) { _queue.Dequeue(); _queue.Dequeue(); QueueDropped++; }

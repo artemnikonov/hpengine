@@ -17,7 +17,9 @@ public sealed class App : Application
         {
             var exeDir = Path.GetDirectoryName(Environment.ProcessPath) ?? AppContext.BaseDirectory;
             var game = DataDir.Game(DataDir.Current, Environment.GetEnvironmentVariable, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
-            d.MainWindow = new MainWindow(game, exeDir, Program.Version, true);
+            var w = new MainWindow(game, exeDir, Program.Version, true);
+            w.StartGamepad();   // the SDL3 library beside the engine (Gamepad.cs); none: mouse and keyboard only
+            d.MainWindow = w;
         }
         base.OnFrameworkInitializationCompleted();
     }

@@ -573,6 +573,7 @@ namespace HP1.UEScript
         // fires nothing. A Pawn with no HitWall probe (and not falling) aborts
         // its move by setting MoveTimer=-1 so the next moveToward poll
         // completes; otherwise the HitWall(Normal, HitActor) event fires. ──
+        // Original: Engine.dll ?processHitWall@AActor@@QAEXVFVector@@PAV1@@Z [HP1 0x103ecf20] [HP2 0x103f9d30]
         public void ProcessHitWall(UEInterpreter interp, UEObject actor, Vector3 normal,
             UEObject hitActor)
         {
@@ -599,7 +600,8 @@ namespace HP1.UEScript
                 if (UEInterpreter.AsFloat(actor.GetProp(PK.MinHitWall)) < dot) return;
                 if (!probing && physics != 2)
                 {
-                    actor.Props["MoveTimer"] = -1f;
+                    // HP2 sets bFromWall only [HP2 0x103f9e93]; HP1 also MoveTimer = -1 [HP1 0x103ed0b0].
+                    if (UEGameProfile.Current.Game != UEEdition.Game.HP2) actor.Props["MoveTimer"] = -1f;
                     actor.Props["bFromWall"] = true;
                     return;
                 }

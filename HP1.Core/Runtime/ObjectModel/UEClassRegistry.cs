@@ -140,7 +140,7 @@ namespace HP1.Core
                         + "one linker name");
                 return existing;                       // the file is NOT reopened
             }
-            var package = UnrealLoader.LoadPackage(path, System.IO.FileAccess.Read);
+            var package = HP1.UEScript.UEPackageOpen.Load(path, System.IO.FileAccess.Read);
             package.InitializePackage(flags);
             RegisterPackage(package);
             return package;
@@ -523,7 +523,7 @@ namespace HP1.Core
             string path = root is null ? null : HP1.UEScript.UEInstallPath.PackageFile(root, packageName);
             // Tables only (UELib reads them in LoadPackage): objects are not materialised;
             // the registry need not know the import classes of a resource package.
-            if (path is not null) pkg = UnrealLoader.LoadPackage(path, System.IO.FileAccess.Read);
+            if (path is not null) pkg = HP1.UEScript.UEPackageOpen.Load(path, System.IO.FileAccess.Read);
             _resourcePackages[packageName] = pkg;
             return pkg;
         }

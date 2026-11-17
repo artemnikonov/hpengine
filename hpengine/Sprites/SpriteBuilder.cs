@@ -34,7 +34,7 @@ namespace HPEngine.Sprites
         public readonly SpriteReport Report = new();
         // AnimNext chain frame at draw time: UTexture::Get(Viewport->CurrentTime) = Update + AnimCur
         // (DrawActorSprite Render.dll.c:12024, Engine 0x103040f7; Update is UTexture vtable 0x1046df90 +0x7c). In game this is
-        // UETextureAnim.CurrentFrame, same as for BSP batches (SdlRenderer.AnimateWorld); flags and size come from that frame.
+        // Core's WorldFrame.TextureFrames, same as for BSP batches (SdlRenderer.AnimateWorld); flags and size come from that frame.
         // Unset: the chain head.
         public Func<string, string> FrameOf = static p => p;
 

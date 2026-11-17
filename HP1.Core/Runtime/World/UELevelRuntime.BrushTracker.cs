@@ -79,15 +79,17 @@ namespace HP1.UEScript
                     || sr.Pitch != rot.Pitch || sr.Yaw != rot.Yaw || sr.Roll != rot.Roll;
             }
             public HeadlessBspModel.TrackedBrushModel ModelOf(object a) => _rt.TrackedBrushModelOf((UEObject)a);
-            public HeadlessBspModel.BrushPlacement PlacementOf(object a)
-            {
-                var o = (UEObject)a;
-                UERotator rot = UEInterpreter.AsRotator(o.GetProp(PK.Rotation));
-                return new HeadlessBspModel.BrushPlacement(UEInterpreter.AsVector3(o.GetProp(PK.Location)),
-                    rot.Pitch, rot.Yaw, rot.Roll, UEInterpreter.AsVector3(o.GetProp(PK.PrePivot)),
-                    BrushScaleOf(o, "MainScale"), BrushSheerOf(o, "MainScale"), BrushSheerAxisOf(o, "MainScale"),
-                    BrushScaleOf(o, "PostScale"), BrushSheerOf(o, "PostScale"), BrushSheerAxisOf(o, "PostScale"));
-            }
+            public HeadlessBspModel.BrushPlacement PlacementOf(object a) => BrushPlacementOf((UEObject)a);
+        }
+
+        // The ABrush fields ABrush::BuildCoords and FPoly::Transform read (the tracker's AddBrush, UEMovingBrushTracker).
+        internal static HeadlessBspModel.BrushPlacement BrushPlacementOf(UEObject o)
+        {
+            UERotator rot = UEInterpreter.AsRotator(o.GetProp(PK.Rotation));
+            return new HeadlessBspModel.BrushPlacement(UEInterpreter.AsVector3(o.GetProp(PK.Location)),
+                rot.Pitch, rot.Yaw, rot.Roll, UEInterpreter.AsVector3(o.GetProp(PK.PrePivot)),
+                BrushScaleOf(o, "MainScale"), BrushSheerOf(o, "MainScale"), BrushSheerAxisOf(o, "MainScale"),
+                BrushScaleOf(o, "PostScale"), BrushSheerOf(o, "PostScale"), BrushSheerAxisOf(o, "PostScale"));
         }
 
         IReadOnlyList<object> TrackerActors()

@@ -94,9 +94,9 @@ static class Program
         // Empty mesh slot (Lev2_Inc_A GreenhouseHPlant0: material 0 -> Textures[1] empty, the original draws
         // GreenhouseHPlant1Tex0): disasm Render.dll 0x10b1174b-0x10b1183f takes the last non-null GetTexture of the
         // slots, overridden by Actor.Texture, Zone.EnvironmentMap, Level.EnvironmentMap (in that order).
-        Check("d15.mesh_fallback", RenderRules.MeshFallbackTexture("None", null, "None", "P.Tex0") == "P.Tex0"
-            && RenderRules.MeshFallbackTexture("A", "Z", "L", "P.Tex0") == "A" && RenderRules.MeshFallbackTexture(null, "Z", "L", "P.Tex0") == "Z"
-            && RenderRules.MeshFallbackTexture("", "None", "L", "P.Tex0") == "L" && RenderRules.MeshFallbackTexture(null, null, null, null) == null,
+        Check("d15.mesh_fallback", UEWorldFrameProducer.MeshFallbackTexture("None", null, "None", "P.Tex0") == "P.Tex0"
+            && UEWorldFrameProducer.MeshFallbackTexture("A", "Z", "L", "P.Tex0") == "A" && UEWorldFrameProducer.MeshFallbackTexture(null, "Z", "L", "P.Tex0") == "Z"
+            && UEWorldFrameProducer.MeshFallbackTexture("", "None", "L", "P.Tex0") == "L" && UEWorldFrameProducer.MeshFallbackTexture(null, null, null, null) == null,
             "Actor.Texture > Zone.EnvironmentMap > Level.EnvironmentMap > last slot texture");
         // D-13: Actor.bNoSmooth -> PF_NoSmooth (FUN_10b338f0, Render.dll.c:39787-39789) -> D3DDrv POINT (D3DDrv.dll.c:860-865).
         foreach (bool ns in new[] { true, false })

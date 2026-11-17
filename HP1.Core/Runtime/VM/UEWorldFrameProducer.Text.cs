@@ -84,7 +84,7 @@ namespace HP1.UEScript
                 // Only the name/export tables (read by LoadPackage) and the raw bytes are used: the font body is
                 // parsed from the bytes below, so the package objects are not constructed (perf: a full
                 // InitializePackage of HPBase.u cost ~30 ms / 20 MB on the first HUD text).
-                var pkg = UnrealLoader.LoadPackage(pkgPath, FileAccess.Read);
+                var pkg = HP1.UEScript.UEPackageOpen.Load(pkgPath, FileAccess.Read);
                 loaded = (pkg, File.ReadAllBytes(pkgPath));
                 _packages[pkgName] = loaded;
             }
@@ -98,20 +98,24 @@ namespace HP1.UEScript
             }
             if (export is null)
                 throw new InvalidDataException($"shipped font not found: {path}");
-            var metrics = ReadSerialized(path, loaded.Pkg, loaded.Bytes, export);
+            var names = new string[loaded.Pkg.Names.Count];
+            for (int i = 0; i < names.Length; i++) names[i] = loaded.Pkg.Names[i].Name;
+            var metrics = ReadSerialized(path, names, (int)loaded.Pkg.Version, loaded.Bytes, export.SerialOffset, export.SerialSize);
             _cache[path] = metrics;
             return metrics;
         }
 
         // UFont::Serialize body (Engine.dll.c:59215-59273) over the export bytes:
-        // object properties (shipped fonts have only the None terminator), Pages,
+        // object properties (UObject::Serialize: tagged properties up to None, skipped by their sizes — shipped fonts
+        // have only the None terminator; a font property is not read by the text bodies), Pages,
         // CharactersPerPage (a power of two — assert UnFont.cpp:0x1c), and for
         // version >= 0x45 CharRemap + IsRemapped, otherwise IsRemapped = 0. UELib
         // does not keep CharactersPerPage and reads the native font tail in a
         // different order, so the layout is read from the bytes in shipped order.
-        static Hp1FontMetrics ReadSerialized(string path, UnrealPackage pkg, byte[] b, UELib.UExportTableItem e)
+        internal static Hp1FontMetrics ReadSerialized(string path, IReadOnlyList<string> names, int version, byte[] b,
+                                                      int offset, int size)
         {
-            int p = e.SerialOffset, end = e.SerialOffset + e.SerialSize;
+            int p = offset, end = offset + size;
             int Compact()
             {
                 byte b0 = b[p++];
@@ -130,11 +134,9 @@ namespace HP1.UEScript
                 return (b0 & 0x80) != 0 ? -v : v;
             }
             int Int() { int v = BitConverter.ToInt32(b, p); p += 4; return v; }
-            int none = Compact();
-            if (none < 0 || none >= pkg.Names.Count
-                || !string.Equals(pkg.Names[none].Name, "None", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException(
-                    $"font {path}: export properties are not empty — parsing of font property tags is not ported");
+            var tags = new RawReader(b) { Position = p };
+            UEPackageReader.SkipTaggedProperties(tags, names);
+            p = tags.Position;
             int pageCount = Compact();
             var pages = new Hp1FontPage[pageCount];
             for (int i = 0; i < pageCount; i++)
@@ -151,7 +153,7 @@ namespace HP1.UEScript
                 throw new InvalidDataException($"font {path}: Assertion failed: !(CharactersPerPage&(CharactersPerPage-1)) [UnFont.cpp:28]");
             var remap = new Dictionary<int, int>();
             bool isRemapped = false;
-            if (pkg.Version >= 0x45)
+            if (version >= 0x45)
             {
                 // TMap::Rehash inserts pairs in ascending index order at the chain HEAD,
                 // and Find returns the last inserted pair with that key —
@@ -318,6 +320,9 @@ namespace HP1.UEScript
                                 h = UELevelRuntime.Ftol((float)((double)clipY - gy));
                         }
                     }
+                    // HP2: the glyph's texture row is Clamp(V - 1, 0, 9999) [HP2 0x10390b1c..0x10390b55] (after the clip's
+                    // V -= Y); HP1 passes V (0x1038891a-0x1038897e). Judge: validate_canvas.py --hp2 (canvas_corpus_hp2.txt).
+                    if (draw && UEGameProfile.Current.Game == UEEdition.Game.HP2) v = Math.Clamp(v - 1, 0, 9999);
                     if (draw)                                               // 0x1038891a-0x1038897e
                         GlyphToDevice(glyphs, canvas, flags, page,
                             UELevelRuntime.Ftol((float)((double)gx + orgX)),
@@ -377,6 +382,7 @@ namespace HP1.UEScript
             }
             var glyphs = new List<HudGlyph>();
             DrawFontText(flags, canvas, _fonts.Get(fontPath), x, y, text, clip: true, hotkey: checkHotKey, glyphs);
+            if (glyphs.Count > 0) NoteCanvasZ(canvas);
             _hud.Add(new HudCommand(HudKind.Text, x + orgX, y + orgY,
                 0f, 0f, 0f, 0f, 0f, 0f, null, text, fontPath, color, style, smooth, true,
                 glyphs.ToArray(), polyFlags: flags));
@@ -391,7 +397,10 @@ namespace HP1.UEScript
         // the new one), CurX = 0, CurYL = 0. There is NO "CurY -= YL" compensation: CurY was
         // already moved by WrappedPrint itself for EVERY line, including the last, and CR
         // moves it once more.
-        public void DrawText(UEObject canvas, string text, bool cr)
+        // HP2: DrawText(coerce string Text, optional bool CR, optional int numChars, optional bool bCursor) — execDrawText
+        // [HP2 0x10391590] passes numChars and bCursor on to WrappedPrint (its two new arguments); WrappedPrint never
+        // reads bCursor (no [ebp+0x28] reference in [HP2 0x1038fe30..0x1039055d]).
+        public void DrawText(UEObject canvas, string text, bool cr, int numChars = 0)
         {
             object font = canvas.GetProp(PK.Font);
             if (font is null)
@@ -404,7 +413,7 @@ namespace HP1.UEScript
             if (style != 0)                                      // 0x10389429-0x10389434
             {
                 bool center = UEValue.ToBool(canvas.GetProp(PK.bCenter));
-                WrappedPrint(canvas, style, ref xl, ref yl, font, center, text, emit: true);
+                WrappedPrint(canvas, style, ref xl, ref yl, font, center, text, emit: true, numChars);
             }
             // 0x10389465-0x10389498
             canvas.Props["CurX"] = (float)((double)xl + CanvasF(canvas, "CurX"));
@@ -451,6 +460,24 @@ namespace HP1.UEScript
             canvas.Props["CurX"] = (float)curX;
             canvas.Props["ClipX"] = (float)clipX;
             outXL = xl; outYL = yl;
+            return true;
+        }
+
+        // ── UScriptedTexture::execTextSize (0x10419410) ── the font metrics only, no texture state (ScriptedTexture.TextSize).
+        // Without a font: log "TextSize: No font" and return, the out parameters untouched (0x10419535). A native font
+        // (CreateNativeFont: no pages, CharactersPerPage 0) reaches the idiv by CharactersPerPage (0x104195af): the
+        // original faults — a loud stop here.
+        public bool ScriptedTextureTextSize(object font, string text, out float outXL, out float outYL)
+        {
+            outXL = 0f; outYL = 0f;
+            if (font is null)
+            {
+                HP1.Core.UETrace.Warn("TextSize: No font");   // shipped log text
+                return false;
+            }
+            if (UENativeFonts.Of(font) is not null)
+                throw new DivideByZeroException("UScriptedTexture::execTextSize on a native font: idiv by CharactersPerPage 0 (0x104195af) — the original faults");
+            ScriptedTexture.TextSize(text, _fonts.Get(FontPathOf(font)), out outXL, out outYL);
             return true;
         }
 
@@ -509,7 +536,7 @@ namespace HP1.UEScript
         // DrawText(DT_CALCRECT|DT_WORDBREAK) in (0, 0, ftol(ClipX), ftol(ClipY)) gives the box w × h; X += w, Y += h;
         // unless flags & 1 (STY_None) the text is drawn in (ftol(X - w + OrgX), ftol(Y - h + OrgY), ftol(X + OrgX),
         // ftol(Y + OrgY)), with 0x100 shifted left by (right - left) / 2 and DT_CENTER; DrawText clips to that box
-        // (no DT_NOCLIP). GDI pixels are opaque text colour: the command is PF_Masked with the font's aliased coverage.
+        // (no DT_NOCLIP). GDI pixels are opaque text colour: the command is PF_Masked with the font's glyph coverage (antialiased, NOT ORIGINAL).
         // Layout and glyphs come from the substitute font (UENativeFont, NOT ORIGINAL).
         void NativeDrawString(UEObject canvas, int flags, int style, UENativeFont nf, ref int x, ref int y, string text)
         {
@@ -558,9 +585,13 @@ namespace HP1.UEScript
         // The native-font branch (0x10387d80-0x10387e08) leaves the pen where Viewport->DrawString moved it (CurX/CurY
         // written back, XL/YL its offsets). xl/yl — shipped's output INT&. emit — whether the caller draws (in shipped
         // this is Style != STY_None, 0x10387ff5).
+        // Original: Engine.dll ?WrappedPrint@UCanvas@@AAAXW4ERenderStyle@@AAH1PAVUFont@@HPBG@Z [HP1 0x10387c50]
+        // Original: Engine.dll ?WrappedPrint@UCanvas@@AAAXW4ERenderStyle@@AAH1PAVUFont@@HPBGHH@Z [HP2 0x1038fe30]
+        // numChars: HP2's eighth argument (0 for every caller but DrawText's numChars; HP1 has none).
         internal void WrappedPrint(UEObject canvas, int style, ref int xl, ref int yl,
-                          object font, bool center, string text, bool emit)
+                          object font, bool center, string text, bool emit, int numChars = 0)
         {
+            bool hp2 = UEGameProfile.Current.Game == UEEdition.Game.HP2;
             // A shipped string is a TCHAR*, ending at the first NUL.
             char Ch(int k) => k < text.Length ? text[k] : '\0';
 
@@ -644,6 +675,9 @@ namespace HP1.UEScript
                 // A '\n' at the start of a line also lands here: shipped does NOT print
                 // text after a line feed.
                 if (cutIdx == 0) return;
+                // HP2 [HP2 0x103901de..0x103901ef]: numChars != 0 and cutIdx > numChars (signed) -> cutIdx = numChars; the
+                // line's width cutX and height stay the measured ones.
+                if (hp2 && numChars != 0 && cutIdx > numChars) cutIdx = numChars;
                 if (emit)
                 {
                     // 0x10388003-0x10388033: a line is output only if it
@@ -661,7 +695,8 @@ namespace HP1.UEScript
                         int drawX = center ? UELevelRuntime.Ftol((float)((double)cx - cutX / 2)) : UELevelRuntime.Ftol(cx);
                         int drawY = UELevelRuntime.Ftol(CanvasF(canvas, "CurY"));   // 0x103880ff
                         int x0 = center ? 0 : UELevelRuntime.Ftol(cx);
-                        string line = text.Substring(pos, cutIdx);
+                        // FString::Left [Core 0x10107b60]: Clamp(Count, 0, Len) characters — a negative HP2 numChars gives "".
+                        string line = text.Substring(pos, Math.Clamp(cutIdx, 0, text.Length - pos));
                         var glyphs = new List<HudGlyph>();
                         // 0x10388113: line helper, clip = 0, hotkey = 0.
                         int drawn = DrawFontText(flags, canvas, m, drawX, drawY, line,
@@ -669,18 +704,22 @@ namespace HP1.UEScript
                         // 0x103881a7-0x103881b3: CurX = X + width of the output
                         // (overwritten below at 0x10388291 — kept for ordering).
                         canvas.Props["CurX"] = (float)(drawX + drawn);
+                        if (glyphs.Count > 0) NoteCanvasZ(canvas);
                         _hud.Add(new HudCommand(HudKind.Text, drawX + orgX, drawY + orgY,
                             cutX - x0, cutH, 0f, 0f, 0f, 0f, null, line, fontPath,
                             color, style, smooth, false, glyphs.ToArray(), polyFlags: flags));
                     }
                 }
-                // 0x10388291-0x103882ca: after EVERY line, including the last.
-                canvas.Props["CurX"] = center ? savedCurX : 0f;
+                // 0x10388291-0x103882ca: after EVERY line, including the last. HP2 [HP2 0x1039048e..0x10390497]: CurX =
+                // the saved CurX whether centred or not (HP1: 0 unless centred).
+                canvas.Props["CurX"] = center || hp2 ? savedCurX : 0f;
                 canvas.Props["CurY"] = (float)((double)cutH + CanvasF(canvas, "CurY"));
                 yl += cutH;
                 if (xl < cutX) xl = cutX;
-                // 0x103882cc-0x103882e3: skip ALL spaces; continue until NUL.
+                // 0x103882cc-0x103882e3: skip ALL spaces; continue until NUL. HP2 [HP2 0x103904bc..0x103904d1]: before the
+                // skip, numChars != 0 -> numChars -= cutIdx, and 0 left returns.
                 pos += cutIdx;
+                if (hp2 && numChars != 0 && (numChars -= cutIdx) == 0) return;
                 while (Ch(pos) == ' ') pos++;
             } while (Ch(pos) != '\0');
         }

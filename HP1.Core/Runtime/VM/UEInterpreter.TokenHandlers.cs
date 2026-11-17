@@ -459,16 +459,14 @@ namespace HP1.UEScript
                         // Native execStringToBool (Core.dll.c:66327-66352): "True"/"False"
                         // (case-insensitive, incl. localized GTrue/GFalse) → true/false, else
                         // appAtoi(str)!=0. The old heuristic made "hello"/"00" → true.
-                        string sbv = v as string ?? "";
-                        if ("true".Equals(sbv, StringComparison.OrdinalIgnoreCase)) converted = true;
-                        else if ("false".Equals(sbv, StringComparison.OrdinalIgnoreCase)) converted = false;
-                        else converted = LeadingAtoi(sbv) != 0;
+                        converted = UELocalization.StringToBool(v as string ?? "");
                         break; }
                     // `%i` (appSprintf) is locale-independent; .NET ToString() without
                     // InvariantCulture uses the culture's minus sign (U+2212 in some locales).
                     case CastToken.ByteToString:    converted = AsByte(v).ToString(System.Globalization.CultureInfo.InvariantCulture); break;
                     case CastToken.IntToString:     converted = ToInt(v).ToString(System.Globalization.CultureInfo.InvariantCulture); break;
-                    case CastToken.BoolToString:    converted = ToBool(v) ? "True" : "False"; break;
+                    // execBoolToString (Core 0x10134eb0, thunk 0x10101663): GTrue / GFalse (D03: localized by SetLanguage).
+                    case CastToken.BoolToString:    converted = ToBool(v) ? UELocalization.GTrue : UELocalization.GFalse; break;
                     case CastToken.FloatToString:
                         // UE1 FString::Printf("%f") = 6 fixed decimals
                         // (Core.dll.c:35345). Was default ToString ("1.5"), inconsistent with the
@@ -525,6 +523,8 @@ namespace HP1.UEScript
             };
             Register<Tok.PrimitiveCastToken>(castHandler);
             Register<Tok.PrimitiveInlineCastToken>(castHandler);
+            // HP2 casts 0x3A..0x46 (UELib HP2 build): CastOpCode is already the kind (byte - 1), same bodies.
+            Register<Tok.PrimitiveShiftedCastToken>(castHandler);
 
             // execDynamicCast (Core.dll.c:28229, body 0x10134330): class from the stream,
             // then the value; IsA along the SuperField chain by class IDENTITY
@@ -857,7 +857,7 @@ namespace HP1.UEScript
             //     [StructMemberToken{Property}, ParentExpr, ...]
             //
             // Runtime model: UE1 structs are represented as UEObject bags
-            // (Props dict) or as IDictionary<string,object>. Look up by field
+            // (Props dict) or intrinsic Vector/Rotator/Plane. Look up by field
             // name. If parent is null/wrong type, return null (loud at next
             // unmodelled token if it matters).
             Register<Tok.StructMemberToken>((interp, frame, tok) => {
@@ -876,9 +876,6 @@ namespace HP1.UEScript
                 {
                     case UEObject ueo:
                         val = ueo.Props.Get(pr.NameKeyId);
-                        break;
-                    case System.Collections.Generic.IDictionary<string, object> d:
-                        d.TryGetValue(fieldName, out val);
                         break;
                     case Vector3 vec:
                         // UE1 Vector intrinsic component access (X/Y/Z).

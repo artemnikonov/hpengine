@@ -70,7 +70,7 @@ namespace HP1.UEScript
                             string cat = Parse(value, "Category=", 0x40);
                             Preferences.Add(new PreferencesInfo(Parse(value, "Caption=", 0x1000), Parse(value, "Parent=", 0x1000),
                                 Parse(value, "Class=", 0x1000), cat.Length == 0 ? "None" : cat,
-                                imm is not null && (Stricmp(imm, "On") || Stricmp(imm, "True") || Stricmp(imm, "1"))));
+                                imm is not null && (Stricmp(imm, "On") || Stricmp(imm, "True") || UELocalization.Eq(imm, UELocalization.GTrue) || Stricmp(imm, "1"))));
                         }
                     }
                 }
@@ -94,6 +94,46 @@ namespace HP1.UEScript
             foreach (ObjectInfo d in Drivers)
                 if (Stricmp(d.Class, className) && Stricmp(d.MetaClass, metaClassPath ?? "")) list.Add(d);
             return list;
+        }
+
+        // Original: Engine.dll.c:155656 AActor::execGetNextSkin (export 0x4ae3, body 0x103d42b0).
+        // List = GetRegistryObjects(UTexture, MetaClass NULL). Over the entries whose Object starts with Prefix
+        // (appStrnicmp, Prefix's length): the one after the entry equal to CurrentSkin (appStricmp) for any Dir but -1
+        // and 0, wrapping to the first prefixed one; Dir == -1 the prefixed one before it (none before the first ->
+        // ""), Dir == 0 the entry itself; CurrentSkin not among them -> the last prefixed one. Out of range -> "", "".
+        // Answer: (Object, Description) of the chosen entry.
+        public static (string Name, string Desc) NextSkin(string prefix, string current, int dir)
+        {
+            List<ObjectInfo> list = GetRegistryObjects("Texture", "");
+            int first = -1, prev = -1, result = -1;
+            bool found = false, done = false;
+            for (int i = 0; i < list.Count && !done; i++)
+            {
+                if (!StartsWithI(list[i].Object, prefix)) continue;
+                if (found) { result = i; done = true; break; }
+                if (first == -1) first = i;
+                if (Stricmp(list[i].Object, current))
+                {
+                    if (dir == -1) { result = prev; done = true; break; }
+                    if (dir == 0) { result = i; done = true; break; }
+                    found = true;
+                }
+                prev = i;
+            }
+            if (!done) result = found ? first : -1;
+            if (result == -1) result = prev;
+            return result < 0 || result >= list.Count ? ("", "") : (list[result].Object, list[result].Description);
+        }
+
+        // appStrnicmp(s, prefix, prefix.Length) == 0: a shorter s compares its terminator.
+        static bool StartsWithI(string s, string prefix) => s.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+
+        // Judge seam (file_natives_judge.py): the driver list as given, CacheDrivers then sees the current language.
+        internal static void SeedDriversForJudge(IEnumerable<ObjectInfo> drivers)
+        {
+            _cachedLanguage = UELocalization.Language;
+            Drivers.Clear();
+            Drivers.AddRange(drivers);
         }
 
         static List<string> FindFiles(string dir, Func<string, bool> match)

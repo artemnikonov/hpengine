@@ -45,6 +45,17 @@ namespace HP1.UEScript
             return null;
         }
 
+        // AActor::PlayAnim(Sequence, bLoop false, Rate, TweenTime, MinRate, AT_Replace, None) called from C++ (HP2 ALAudio's
+        // lip-sync player, UEALAudio.LipSyncPlayer): the same body as the natives' (route, lookup, writes), with MinRate.
+        // Original: Engine.dll ?PlayAnim@AActor@@QAEHVFName@@_NMMMW4EAnimType@@0@Z [HP1 0x10408E20] [HP2 0x10416830]
+        public void PlayAnimFromCode(UEInterpreter interp, UEObject self, string sequence, float rate, float tweenTime, float minRate)
+        {
+            if (RefusesNoMesh(self)) return;
+            if (!PrepareBaseAnimationRoute(interp, Array.Empty<object>(), typeIndex: 0, rootIndex: 1, ref self, sequence)) return;
+            if (!ResolveAnimSequence(self, sequence, "PlayAnim", out UEAnimSequenceInfo seq, out bool clear) && !clear) return;
+            SetAnimation(self, seq, rate, tweenTime, minRate, loop: false);
+        }
+
         // ── native(260) LoopAnim(name Sequence, float Rate, float TweenTime,
         //    float MinRate, optional EAnimType Type, optional name RootBone) ──
         public object LoopAnimNative(UEInterpreter interp, UEFrame frame, object[] args)
@@ -115,10 +126,13 @@ namespace HP1.UEScript
         }
 
         // ── native(261) FinishAnim — LATENT ─────────────────────────────────
+        // Original: Engine.dll ?execFinishAnim@AActor@@QAEXAAUFFrame@@QAX@Z [HP1 0x10408250]
+        // Judged: se_harness/bsp_diff/anim_exec_oracle.py (the real body under unicorn), SelfTest
+        // anim_exec_natives_match_shipped_oracle.
         public object FinishAnimNative(UEInterpreter interp, UEFrame frame, object[] args)
         {
             UEObject self = frame.Context ?? frame.Object;
-            // Optional bone argument (execFinishAnim, Engine.dll.c:110531-110561):
+            // Optional bone argument (disasm 0x1040828c..0x104082fe):
             //   Mesh (+0x164) == NULL                       -> return;
             //   Mesh not IsA(USkeletalMesh)                 -> return;
             //   idx = BoneIndex(Bone); first AuxAnims channel (+0x6c, count +0x70)
@@ -126,48 +140,69 @@ namespace HP1.UEScript
             //   (idx −1 never matches a byte — as in IsAnimatingNative);
             //   channel == this                             -> return.
             // All these exits are SILENT: no log, no bAnimLoop/bAnimFinished write,
-            // no wait — disasm 0x10408290..0x1040834d: every exit jumps to the
-            // epilogue 0x1040834d (or 0x104082ee), with no calls or writes on the way.
+            // no wait — every exit jumps to the epilogue 0x1040834d (or 0x104082ee),
+            // with no calls or writes on the way.
             // The mesh class is checked by walking Super up to USkeletalMesh (IsA); here, as in
-            // IsAnimatingNative, by the resource class name. For a found channel shipped continues with THE SAME
-            // tail but on the CHANNEL: channel flags and LatentAction = 0x181 in the CHANNEL's StateFrame
-            // (+0xc), not the caller's. That branch is not ported — loud STOP (C3); all 162 campaign calls
-            // pass no argument.
+            // IsAnimatingNative, by the resource class name (the port has no mesh subclasses).
+            // A found channel takes THE SAME tail as the boneless call (0x10408300, ecx = the channel): the
+            // CHANNEL's flags and LatentAction = 0x181 in the CHANNEL's StateFrame (+0xc). The caller's own
+            // frame is not touched: its script continues at once.
+            UEObject target = self;
+            UEFrame latent = frame;
             string bone = AnimNameArg(args, 0);
             if (!string.IsNullOrEmpty(bone) && !bone.Equals("None", StringComparison.OrdinalIgnoreCase))
             {
                 if (self?.GetProp(PK.Mesh) is not UEResourceRef meshRef) return null;
                 if (!meshRef.Class.Equals("SkeletalMesh", StringComparison.OrdinalIgnoreCase)) return null;
                 int boneIndex = BoneLookupOf(meshRef, self, bone).Index;
+                target = null;
                 foreach (AnimChannelEntry e in AnimChannelsOf(self))
                     if ((UEInterpreter.ToInt(e.Object.GetProp(PK.AnimBone)) & 0xff) == boneIndex)
                     {
                         if (ReferenceEquals(e.Object, self)) return null;
-                        throw new NotSupportedException(
-                            $"FinishAnim on channel bone={bone} actor={self.GetProp(PK.Name)}: waiting on the "
-                            + "channel StateFrame (Engine.dll.c:110563-110570) is not ported (STOP, C3)");
+                        target = e.Object;
+                        break;
                     }
-                return null;   // no channel with this bone — silent exit
+                if (target is null) return null;   // no channel with this bone — silent exit
+                // The original's StateFrame always exists (UObject::InitExecution, Core 0x1015a1d0) and the write is
+                // only observable while the frame has code (AActor::ProcessState polls only then; GotoState and
+                // GotoLabel clear LatentAction): the port's channel without a frame, or with its code stopped
+                // (LatentRunState.Stop, the port's Code = NULL), takes no write.
+                latent = target.StateFrame is UEFrame sf && sf.LatentState != LatentRunState.Stop ? sf : null;
             }
-            // execFinishAnim (Engine.dll.c:110563-110573): a looping animation
-            // drops bAnimLoop AND bAnimFinished; the latent arms ONLY while the
-            // animation is running (AnimRate or TweenRate nonzero) and short of
-            // AnimLast — otherwise the script continues immediately. The poll
+            // The tail (0x10408300..0x10408346): a looping animation drops bAnimLoop AND bAnimFinished
+            // (and al, 0xe7); the latent arms only while AnimSequence != None, AnimRate or TweenRate is nonzero
+            // (fcomp 0.0; test ah, 0x40: an unordered compare counts as zero) and AnimFrame < AnimLast
+            // (test ah, 1: unordered counts as less) — otherwise the script continues immediately. The poll
             // (execPollFinishAnim, 61024) completes on bAnimFinished.
-            if (UEInterpreter.ToBool(self?.GetProp(PK.bAnimLoop)))
+            if (UEInterpreter.ToBool(target?.GetProp(PK.bAnimLoop)))
             {
-                self.Props["bAnimLoop"] = false;
-                self.Props["bAnimFinished"] = false;
+                target.Props["bAnimLoop"] = false;
+                target.Props["bAnimFinished"] = false;
             }
-            string seq = self?.GetProp(PK.AnimSequence)?.ToString();
+            static bool Nonzero(float v) => !(v == 0f) && !float.IsNaN(v);
+            string seq = target?.GetProp(PK.AnimSequence)?.ToString();
             bool armed = !string.IsNullOrEmpty(seq)
                 && !seq.Equals("None", StringComparison.OrdinalIgnoreCase)
-                && (UEInterpreter.AsFloat(self.GetProp(PK.AnimRate)) != 0f
-                    || UEInterpreter.AsFloat(self.GetProp(PK.TweenRate)) != 0f)
-                && UEInterpreter.AsFloat(self.GetProp(PK.AnimFrame))
-                   < UEInterpreter.AsFloat(self.GetProp(PK.AnimLast));
-            if (armed) frame.LatentState = LatentRunState.FinishAnim;
-            Journal?.Invoke($"anim_finish_wait actor={self?.GetProp(PK.Name)} armed={armed} frame={self?.GetProp(PK.AnimFrame)} last={self?.GetProp(PK.AnimLast)} rate={self?.GetProp(PK.AnimRate)}");
+                && (Nonzero(UEInterpreter.AsFloat(target.GetProp(PK.AnimRate)))
+                    || Nonzero(UEInterpreter.AsFloat(target.GetProp(PK.TweenRate))))
+                && !(UEInterpreter.AsFloat(target.GetProp(PK.AnimFrame))
+                   >= UEInterpreter.AsFloat(target.GetProp(PK.AnimLast)));
+            if (armed && latent is not null) latent.LatentState = LatentRunState.FinishAnim;
+            Journal?.Invoke(ReferenceEquals(target, self)
+                ? $"anim_finish_wait actor={self?.GetProp(PK.Name)} armed={armed} frame={self?.GetProp(PK.AnimFrame)} last={self?.GetProp(PK.AnimLast)} rate={self?.GetProp(PK.AnimRate)}"
+                : $"anim_finish_channel actor={self.GetProp(PK.Name)} channel={target.GetProp(PK.Name)} bone={bone} armed={armed}");
+            return null;
+        }
+
+        // ── LinkSkelAnim(Animation Anim) — Actor native, no index ────────────
+        // Original: Engine.dll ?execLinkSkelAnim@AActor@@QAEXAAUFFrame@@QAX@Z [HP1 0x1040a700]
+        // P_GET_OBJECT, P_FINISH, then `SkelAnim (+0x68) = Anim` (disasm 0x1040a735..0x1040a745: both branches store
+        // the argument, None included). No mesh or class check. Judged by anim_exec_oracle.py.
+        public object LinkSkelAnimNative(UEInterpreter interp, UEFrame frame, object[] args)
+        {
+            UEObject self = frame.Context ?? frame.Object;
+            self.Props["SkelAnim"] = args is { Length: > 0 } ? args[0] : null;
             return null;
         }
 

@@ -21,19 +21,11 @@ namespace HP1.UEScript
             // there is no parameter, because a parameter would be a second owner of the decision.
             bool paused = !string.IsNullOrEmpty(
                 interp.GetLevelInfo()?.GetProp(PK.Pauser)?.ToString());
-            bool playersOnly = UEInterpreter.ToBool(interp.GetLevelInfo()?.GetProp(PK.bPlayersOnly));
-            // The bPlayersOnly gate below is the port's model, not a shipped contract:
-            // shipped only turns the flag into TickType = 1 (Engine.dll.c:262645) and cuts off
-            // inside AActor::Tick (LAB_103b41e5, :128546); what runs before that point with
-            // TickType == 1 needs the disassembly. The only source is a cheat command; if the
-            // flag comes alive, say so loudly.
-            if (playersOnly && !_playersOnlyWarned)
-            {
-                _playersOnlyWarned = true;
-                HP1.Core.UETrace.Warn("[Core] bPlayersOnly ACTIVE: per-actor gate is the "
-                    + "SE model (PlayerPawn||bAlwaysTick); the shipped bit identity "
-                    + "(XLevel+0x111c / flag2&2) is UNRESOLVED (§8)");
-            }
+            // Original: ULevel::Tick 0x103b70ea `test byte [edi+0x438], 4` (LevelInfo.bPlayersOnly) sets TickType =
+            // LEVELTICK_ViewportsOnly (1) for the pass, otherwise it stays LEVELTICK_All (2). Every actor still gets
+            // AActor::Tick(DeltaSeconds, TickType); the cut-off for everyone but the local player is inside it
+            // (TickActorBody).
+            int tickType = UEInterpreter.ToBool(interp.GetLevelInfo()?.GetProp(PK.bPlayersOnly)) ? 1 : 2;
             // Pass sets are reused: a fresh HashSet per tick regrew to ~2k actors
             // (array garbage on every growth).
             // The game tick is outside the render window (appEnableFastMath(0)); reset in case
@@ -105,19 +97,16 @@ namespace HP1.UEScript
                     // same actor it runs AFTER paused-input, as in shipped.
                     if (!UEInterpreter.ToBool(actor.GetProp(PK.bAlwaysTick))) continue;
                 }
-                else if (playersOnly
-                    && !UEInterpreter.ToBool(actor.GetProp(PK.bAlwaysTick))
-                    && !UEInterpreter.ClassIsA(actor.Class, "PlayerPawn")) continue;
                 long t0 = ProfileTicks ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                 if (exceptionSink is not null)
                 {
                     // IMMEDIATE STOP: the policy must match headless, where such an
                     // exception ends the run, so the pass is aborted on the spot instead of
                     // letting later actors keep changing a world already declared stopped.
-                    try { TickActor(interp, actor, levelDelta, visiting); }
+                    try { TickActor(interp, actor, levelDelta, visiting, tickType); }
                     catch (Exception e) { FatalStop(e); return; }
                 }
-                else TickActor(interp, actor, levelDelta, visiting);
+                else TickActor(interp, actor, levelDelta, visiting, tickType);
                 if (ProfileTicks)
                 {
                     string cls = actor.Class?.Name?.ToString() ?? "?";
@@ -180,13 +169,28 @@ namespace HP1.UEScript
             }
         }
 
+        // tickType: ELevelTick of the pass, 2 = LEVELTICK_All, 1 = LEVELTICK_ViewportsOnly (bPlayersOnly).
+        // Original: Engine.dll ?Tick@AActor@@UAEHMW4ELevelTick@@@Z [HP1 0x103b3840] [HP2 0x103c0e10] (the parent and owner ticks)
         public void TickActor(UEInterpreter interp, UEObject actor, float dt,
-            HashSet<UEObject> visiting)
+            HashSet<UEObject> visiting, int tickType = 2)
         {
             if (actor is null || actor.Destroyed) return;
+            // AParticleFX::Tick [HP1 0x103c3c80, HP2 0x103d10f0]: its Age/budget prelude, then AActor::Tick
+            // (call at HP1 0x103c3d7d) — so the prelude runs on EVERY Tick call, also when AActor::Tick then returns at a
+            // gate (bTicked: an emitter already ticked as an owner/parent this frame ages again; stasis; special pause).
+            // No RNG. With TickType 1 and GIsEditor 0 the prelude is skipped (0x103c3c89..0x103c3c96).
+            if (FrameProducer is not null && tickType != 1 && UEInterpreter.ClassIsA(actor.Class, "ParticleFX"))
+                TickParticleFxOf(interp, actor, dt);
             if (!visiting.Add(actor))
                 throw new InvalidDataException("Owner cycle at " + actor.GetProp(PK.Name));
-            if (actor.GetProp(PK.Owner) is UEObject owner && !owner.Destroyed)
+            // HP2 [0x103c0e3a..0x103c0e79]: TickParent->Tick and TickParent2->Tick first, then Owner->Tick unless the
+            // owner's TickParent or TickParent2 is this actor (each callee's bTicked gate prevents a second tick).
+            bool hp2 = UEGameProfile.Current.Game == UEEdition.Game.HP2;
+            if (hp2)
+                foreach (string parent in new[] { "TickParent", "TickParent2" })
+                    if (actor.GetProp(parent) is UEObject tp && !tp.Destroyed) TickActor(interp, tp, dt, visiting, tickType);
+            if (actor.GetProp(PK.Owner) is UEObject owner && !owner.Destroyed
+                && !(hp2 && (ReferenceEquals(owner.GetProp("TickParent"), actor) || ReferenceEquals(owner.GetProp("TickParent2"), actor))))
             {
                 // Shipped AActor::Tick calls Owner->Tick() DIRECTLY
                 // (Engine.dll.c:128329-128331) — no array-membership test; the
@@ -201,30 +205,85 @@ namespace HP1.UEScript
                         $"[Core] owner outside ULevel.Actors ticks owner-first "
                         + $"(shipped 128329): owner class={owner.Class?.Name} "
                         + $"of actor={actor.GetProp(PK.Name)}");
-                TickActor(interp, owner, dt, visiting);
+                // Original: the owner's Tick gets this tick's DeltaSeconds and TickType (0x103b386f..0x103b3879).
+                TickActor(interp, owner, dt, visiting, tickType);
             }
             visiting.Remove(actor);
-            if (actor.Destroyed) return;
-            if (UEInterpreter.ToBool(actor.GetProp(PK.bTicked)) == LevelTicked) return;
-            actor.Props.SetUnversioned(PK.bTicked, LevelTicked ? BoxTrue : BoxFalse);   // not a projected value (UEProps.Version)
-            TickActorBody(interp, actor, dt);
-            // AWind::Tick: wind body after AActor::Tick (Engine.dll.c:100425).
-            if (!actor.Destroyed && UEInterpreter.ClassIsA(actor.Class, "Wind")) TickWind(actor, dt);
+            if (!actor.Destroyed && TickActorGates(interp, actor, dt))
+            {
+                actor.Props.SetUnversioned(PK.bTicked, LevelTicked ? BoxTrue : BoxFalse);   // not a projected value (UEProps.Version)
+                TickActorBody(interp, actor, dt, tickType);
+            }
+            // AWind::Tick (0x10430dc2..0x10430dc7): the result of AActor::Tick is discarded, so the fluctuation runs
+            // after EVERY return of it — the bTicked/special-pause/stasis exits and an actor destroyed in its body.
+            if (UEInterpreter.ClassIsA(actor.Class, "Wind")) TickWind(actor, dt);
+        }
+
+        // The gates of AActor::Tick between Owner->Tick and the bTicked write (0x103b387c..0x103b393c); false = `return 1`
+        // with bTicked untouched.
+        //   0x103b387c..0x103b3893: bTicked (+0x28 bit 0x800) == ULevel::Ticked -> return.
+        //   0x103b3899..0x103b38b4: ULevel+0x111c (special pause, SpecialPause) != 0: !bCanMoveInSpecialPause (+0x2c bit 2)
+        //     -> return, else bInSpecialPause (+0x2c bit 4) = 1; == 0: bInSpecialPause = 0. +0x111c has no writer in any HP1
+        //     module (Engine.asm: only the ULevel copies 0x1034d1a8 / 0x1034da77 and this read; none in HP.exe or the other
+        //     DLLs): HP1's level keeps it 0. HP2 toggles it (UEInput.InputEvent) and, with it on, first gives a PlayerPawn
+        //     with a Player its input [HP2 0x103c0ea3..0x103c0f0f] (SpecialPauseGate).
+        //   0x103b38b7..0x103b3936: bStasis (bit 0x800000) && (bForceStasis (bit 0x1000000) || Physics (+0x30) is 0 or 5):
+        //     L = _ftol(Model->Zones[Region.ZoneNumber].LastRenderTime · 2^32) (0x103b38f6..0x103b38ff, exact: power of two,
+        //     truncation), d = (ULevel::TimeSeconds − L) · 2^-32 (FUN_103b4d00: int64 sub, fild, fmul — exact), fcomp 5.0f,
+        //     `test ah, 0x41` -> return only when d > 5 (not unordered), AND LevelInfo.NetMode (+0x464) == 0 (standalone).
+        // Original: Engine.dll ?Tick@AActor@@UAEHMW4ELevelTick@@@Z [HP1 0x103b3840] [HP2 0x103c0e10]
+        bool TickActorGates(UEInterpreter interp, UEObject actor, float dt)
+        {
+            if (UEInterpreter.ToBool(actor.GetProp(PK.bTicked)) == LevelTicked) return false;
+            if (SpecialPause)
+            {
+                var (input, tick, inPause) = SpecialPauseGate(UEGameProfile.Current.Game == UEEdition.Game.HP2, true,
+                    UEInterpreter.ClassIsA(actor.Class, "PlayerPawn") && actor.GetProp(PK.Player) is not null,
+                    UEInterpreter.ToBool(actor.GetProp("bCanMoveInSpecialPause")));
+                if (input)
+                {
+                    // Player->ReadInput(DeltaTime) (vtable +0x58), eventPlayerInput(DeltaTime), Player->ReadInput(-1.0f): the
+                    // local-player branch's calls (TickActorBody) without PlayerTick.
+                    Input.ViewportReadInput(interp, ViewportConsole, actor, dt);
+                    if (interp.FindEventFunction(actor, "PlayerInput") is UFunction inputFn) GuardInvoke(interp, actor, inputFn, dt, "PlayerInput");
+                    ResetPlayerInputAxes(actor);
+                }
+                if (!tick) return false;
+                if (!UEInterpreter.ToBool(actor.GetProp(PK.bInSpecialPause))) actor.Props["bInSpecialPause"] = inPause ? BoxTrue : BoxFalse;
+            }
+            else if (UEInterpreter.ToBool(actor.GetProp(PK.bInSpecialPause))) actor.Props["bInSpecialPause"] = BoxFalse;
+            if (UEInterpreter.ToBool(actor.GetProp(PK.bStasis)))
+            {
+                int physics = UEInterpreter.ToInt(actor.GetProp(PK.Physics)) & 0xff;
+                if (UEInterpreter.ToBool(actor.GetProp(PK.bForceStasis)) || physics == 0 || physics == 5)
+                {
+                    // The zone times are written only by the frame's OccludeBsp: without a frame producer they stay 0.
+                    if (FrameProducer is null)
+                        throw new NotSupportedException($"AActor::Tick stasis gate on {actor.GetProp(PK.Name)} without a frame producer: "
+                            + "Model->Zones[].LastRenderTime has no writer");
+                    int zone = UEInterpreter.ToInt((actor.GetDeclared("Actor", "Region") as UEObject)?.GetProp(PK.ZoneNumber)) & 0xff;
+                    float lastRender = (Bsp ?? throw new InvalidOperationException("AActor::Tick stasis: the level has no model"))
+                        .ZoneLastRenderTime[zone];
+                    long renderFixed = (long)((double)lastRender * 4294967296.0);   // _ftol truncates; exact in double
+                    UEObject level = actor.GetProp(PK.Level) as UEObject
+                        ?? throw new InvalidOperationException("AActor::Tick stasis: actor without Level");
+                    if (_clockFixed - renderFixed > 5L * 4294967296L
+                        && (UEInterpreter.ToInt(level.GetProp(PK.NetMode)) & 0xff) == 0)
+                        return false;
+                }
+            }
+            return true;
         }
 
         // The shipped AActor::Tick body order (Engine.dll.c:128667-128855):
         // particle prelude → animation → Tick/PlayerInput+PlayerTick events →
         // ProcessState → Timer → LifeSpan → performPhysics → root motion.
         // An expiring actor never runs physics that tick.
-        public void TickActorBody(UEInterpreter interp, UEObject actor, float dt)
+        public void TickActorBody(UEInterpreter interp, UEObject actor, float dt, int tickType = 2)
         {
             if (DetailedJournal)
                 Log($"tick_actor name={actor.GetProp(PK.Name)} class={actor.Class?.Name} begin");
-            // AParticleFX::Tick prelude (Engine.dll.c:14138) — the shipped
-            // virtual runs its Age/budget-destroy body and then falls into
-            // AActor::Tick; it consumes NO RNG (emission is render-side).
-            if (FrameProducer is not null && UEInterpreter.ClassIsA(actor.Class, "ParticleFX"))
-                TickParticleFxOf(interp, actor, dt);
+            // (The AParticleFX::Tick prelude runs before AActor::Tick: TickActor.)
             if (actor.Destroyed) return;
             // LOGICAL ANIMATION TICKS UNCONDITIONALLY: AnimEnd, the notify scan and frame
             // advance are Core's and must not depend on a frontend setting a hook.
@@ -262,6 +321,12 @@ namespace HP1.UEScript
                 bool localPlayer = role >= 2
                     && UEInterpreter.ClassIsA(actor.Class, "PlayerPawn")
                     && actor.GetProp(PK.Player) is not null;
+                // Original: the class walk that finds the local PlayerPawn continues to ACamera (0x103b411c, Engine.dll.c:
+                // 128614-128621): a Camera (the editor view actor) whose ShowFlags (+0x4e4) lacks 0x800 returns 1 here —
+                // after animation, before input, the Tick event, state, Timer, LifeSpan and physics.
+                if (localPlayer && UEInterpreter.ClassIsA(actor.Class, "Camera")
+                    && (UEInterpreter.ToInt(actor.GetProp(PK.ShowFlags)) & 0x800) == 0)
+                    return;
                 if (localPlayer)
                 {
                     // Shipped AActor::Tick local-player branch (Engine.dll.c:
@@ -284,6 +349,10 @@ namespace HP1.UEScript
                     // property (metadata-driven, both frontends).
                     ResetPlayerInputAxes(actor);
                 }
+                // Original: every other actor of this branch passes 0x103b41e5 `cmp [ebp+0xc], 1; je 0x103b4311`:
+                // with TickType 1 (bPlayersOnly) AActor::Tick returns 1 here, after animation: no Tick event, state,
+                // Timer, LifeSpan, physics or tail.
+                else if (tickType == 1) return;
                 // Early exit of shipped AActor::Tick (Engine.dll.c:128551): the probe mask
                 // is checked BEFORE the function lookup. Same gate as in the central dispatch
                 // (UELifecycle.CallEvent) — repeated here because the tick dispatches the
@@ -376,9 +445,9 @@ namespace HP1.UEScript
             //
             // Placed AFTER physics and BEFORE root motion, as in the original
             // (performPhysics 128728 → these counters → tail 128808). The branch runs only
-            // for a PAWN and only with Role == ROLE_Authority; the original's second
-            // condition (param_2 == LEVELTICK_All) holds by construction: the port has one
-            // full tick.
+            // for a PAWN and only with Role == ROLE_Authority and TickType == LEVELTICK_All
+            // (0x103b44fa `cmp byte [esi+0x31], 4`, 0x103b4504 `cmp [ebp+0xc], 2`): under
+            // bPlayersOnly not even the local player counts down.
             //
             // WHY: PainTime is pit death. The original chain: Pawn.FootZoneChange sets
             // PainTime = 0.01 when a foot enters a pain zone (and -1 on leaving) → the
@@ -393,7 +462,7 @@ namespace HP1.UEScript
             // Block order — disasm 0x103b450e..0x103b4682: sight
             // (SightCounter/ShowSelf/CheckEnemyVisible, PawnSightTick) ->
             // PainTime -> SpeechTime -> UpdateTactics.
-            if (!actor.Destroyed && role == 4 && UEInterpreter.ClassIsA(actor.Class, "Pawn"))
+            if (!actor.Destroyed && role == 4 && tickType == 2 && UEInterpreter.ClassIsA(actor.Class, "Pawn"))
             {
                 PawnSightTick(interp, actor, dt);
                 PawnCountdown(interp, actor, dt, "PainTime", "PainTimer");

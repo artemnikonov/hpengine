@@ -31,7 +31,19 @@ namespace HP1.UEScript
             public int LodSet;                 // LODSet tag, else 1
             public int MipCount;               // number of mips in the package
             public byte[] Palette;             // 256×RGBA as in the package (EXPORTED; null for EXPORTED_RGBA)
-            public (int U, int V, byte[] P8)[] Levels;   // mips with data, from 0; the chain stops at a mip without data (EXPORTED_RGBA: R,G,B,A bytes)
+            public (int U, int V, byte[] P8)[] Levels;   // every mip from 0; P8 null for a mip without full data (EXPORTED_RGBA: one mip of R,G,B,A bytes)
+            public int LastUndefinedMip = -1;  // last P8 mip whose bulk data is missing or shorter than USize*VSize (-1: none)
+
+            // B30. The device uploads every mip from the first one it draws (UD3DRenderDevice::SetTexture, loop
+            // 0x10009fdb..0x1000a2b0: source mip pFVar9+0x34 + i); a mip whose DataPtr is null is skipped
+            // (0x1000a09e cmp [Mips[i]],0 / je), leaving that surface level as the driver memory held it, and a short
+            // non-empty one is read for USize*VSize bytes past its allocation (DataPtr = TArray data,
+            // FTextureInfo::Load 0x10424fb0 `*puVar1 = puVar1[7]`). Either way the drawn picture is not defined by the
+            // original: the texture is undefined from such a first mip (shipped: no P8 texture has one, census
+            // texture_short_p8_chain).
+            // Original: D3DDrv.dll ?SetTexture@UD3DRenderDevice@@QAEXKAAUFTextureInfo@@KH@Z [HP1 0x10009a80]
+            // Original: Engine.dll ?Load@FTextureInfo@@QAEXXZ [HP1 0x10424fb0]
+            public bool DrawsUndefinedMip(int firstMip) => firstMip <= LastUndefinedMip;
         }
 
         readonly string _root;
@@ -64,7 +76,7 @@ namespace HP1.UEScript
             var super = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (string pkgPath in UEInstallPath.PackageFiles(_root, "System").OrderBy(x => System.IO.Path.GetFileName(x), StringComparer.Ordinal))
             {
-                UnrealPackage pkg = UnrealLoader.LoadPackage(pkgPath, FileAccess.Read);
+                UnrealPackage pkg = HP1.UEScript.UEPackageOpen.Load(pkgPath, FileAccess.Read);
                 pkg.InitializePackage(UnrealPackage.InitFlags.All);
                 foreach (var exp in pkg.Exports)
                 {
@@ -113,7 +125,7 @@ namespace HP1.UEScript
         {
             if (_open.TryGetValue(pkgPath, out var pkg)) return pkg;
             EnsureClasses();
-            pkg = UnrealLoader.LoadPackage(pkgPath, FileAccess.Read);
+            pkg = HP1.UEScript.UEPackageOpen.Load(pkgPath, FileAccess.Read);
             foreach (string tc in _textureClasses) pkg.AddClassType(tc, typeof(UELib.Engine.UTexture));
             pkg.InitializePackage(UnrealPackage.InitFlags.All);
             _open[pkgPath] = pkg;
@@ -278,8 +290,9 @@ namespace HP1.UEScript
             {
                 var mk = tex.Mips[k];
                 byte[] dk = ReadBulk(pkgPath, mk.Data.StorageOffset, mk.Data.StorageSize);
-                if (dk == null || dk.Length < mk.USize * mk.VSize) break;   // the chain stops, as in the exporter
-                levels.Add((mk.USize, mk.VSize, dk));
+                bool full = dk != null && dk.Length >= mk.USize * mk.VSize;
+                if (!full) d.LastUndefinedMip = k;   // TextureData.DrawsUndefinedMip
+                levels.Add((mk.USize, mk.VSize, full ? dk : null));
             }
             d.Levels = levels.ToArray();
             return d;
@@ -393,8 +406,10 @@ namespace HP1.UEScript
                 bw.Write(1);
                 bw.Write(d.Masked ? 1 : 0);
                 bw.Write(d.Palette);
-                bw.Write(d.Levels.Length);
-                foreach (var (u, v, p8) in d.Levels) { bw.Write(u); bw.Write(v); bw.Write(p8, 0, u * v); }
+                int n = 0;   // the exporter's chain stops at the first mip without data
+                while (n < d.Levels.Length && d.Levels[n].P8 is not null) n++;
+                bw.Write(n);
+                for (int i = 0; i < n; i++) { var (u, v, p8) = d.Levels[i]; bw.Write(u); bw.Write(v); bw.Write(p8, 0, u * v); }
             }
             return ms.ToArray();
         }

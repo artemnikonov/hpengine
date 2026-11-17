@@ -35,6 +35,13 @@ namespace HP1.UEScript
             // UParticle +0x88: the draw priority EmitParticles gives each born particle (PriorityTable below); read by the
             // Render.dll particle drawer's density fade.
             public int Priority;
+            // UParticle +0x84: the ctor's -1 (0x103bfbb0); AParticleFX::AddParticle (native 432) stores its Id argument. The
+            // list's find-by-Id (vtable +0x90, 0x103c75f0) returns the first particle from the head with it.
+            public int Id = -1;
+            // A particle born by native 432: its ChaosTimer (+0x78) and SpinPos (+0x7c) are not game values (AddParticle
+            // writes neither, they hold the rand()/__getptd frames GetParams left under execAddParticle). The port keeps
+            // 0 and stops where they would become visible (UParticle::Update chaos, the rotated billboard).
+            public bool NativeResidue;
         }
 
         // NATIVE-ONLY emitter state. Every DECLARED ParticleFX var — Age,
@@ -199,44 +206,120 @@ namespace HP1.UEScript
         // +0x300 at all (disasm scan), so nothing in the renderer writes it.
         static float PropF(UEObject o, string p) => UEValue.AsFloat(o.GetProp(p));
 
-        float SampleRange(UEObject src, string prop)
+        // The parameter block GetParams reads (AParticleFX +0x264..+0x2f4), from the emitter, its parent class defaults or
+        // the blended copy GetSysParams builds: FloatParams {Base, Rand}, ColorParams {Base, Rand} as FColor dwords
+        // (R | G << 8 | B << 16 | A << 24). Read once per EmitParticles call: nothing in its loop writes these fields.
+        internal struct FxRange { public float Base, Rand; }
+        internal struct FxSysParams
         {
-            // GetParams quirk (Engine.dll.c:30726): appFrand is consumed ONLY
-            // when Rand != 0; Rand == 0 returns Base with NO call.
-            if (src.GetProp(prop) is not UEObject bag) return 0f;
-            float b = UEValue.AsFloat(bag.GetProp(PK.Base));
-            float r = UEValue.AsFloat(bag.GetProp(PK.Rand));
-            if (r == 0f) return b;
-            return Frand() * r + b;
+            public FxRange SourceW, SourceH, SourceD, SpreadW, SpreadH, Speed, Lifetime, AlphaStart, AlphaEnd,
+                           SizeWidth, SizeLength, SizeEndScale, SpinRate, DripTime;
+            public uint ColorStartBase, ColorStartRand, ColorEndBase, ColorEndRand;
+
+            static FxRange R(UEObject o, string p) => o.GetProp(p) is UEObject bag
+                ? new FxRange { Base = UEValue.AsFloat(bag.GetProp(PK.Base)), Rand = UEValue.AsFloat(bag.GetProp(PK.Rand)) } : default;
+            static uint C(UEObject o, string p, bool rand)
+            {
+                if (o.GetProp(p) is not UEObject bag || bag.GetProp(rand ? PK.Rand : PK.Base) is not UEObject c) return 0;
+                return UEValue.AsByte(c.GetProp(PK.R)) | (uint)UEValue.AsByte(c.GetProp(PK.G)) << 8
+                     | (uint)UEValue.AsByte(c.GetProp(PK.B)) << 16 | (uint)UEValue.AsByte(c.GetProp("A")) << 24;
+            }
+            public static FxSysParams Of(UEObject o) => new FxSysParams
+            {
+                SourceW = R(o, "SourceWidth"),
+                SourceH = R(o, "SourceHeight"),
+                SourceD = R(o, "SourceDepth"),
+                SpreadW = R(o, "AngularSpreadWidth"),
+                SpreadH = R(o, "AngularSpreadHeight"),
+                Speed = R(o, "Speed"),
+                Lifetime = R(o, "Lifetime"),
+                AlphaStart = R(o, "AlphaStart"),
+                AlphaEnd = R(o, "AlphaEnd"),
+                SizeWidth = R(o, "SizeWidth"),
+                SizeLength = R(o, "SizeLength"),
+                SizeEndScale = R(o, "SizeEndScale"),
+                SpinRate = R(o, "SpinRate"),
+                DripTime = R(o, "DripTime"),
+                ColorStartBase = C(o, "ColorStart", false),
+                ColorStartRand = C(o, "ColorStart", true),
+                ColorEndBase = C(o, "ColorEnd", false),
+                ColorEndRand = C(o, "ColorEnd", true),
+            };
         }
 
-        UEVector SampleColor(UEObject src, string prop)
+        // fistp of a float at round-to-nearest-even; outside int the integer indefinite 0x80000000.
+        static int Fistp(float v) => v >= -2147483648f && v < 2147483648f ? (int)MathF.Round(v, MidpointRounding.ToEven) : int.MinValue;
+
+        // One FColor channel times a float through fild; fmul dword; fstp dword; fistp, clamped to 0..255 (cmp 0xff; jl).
+        static int ColorChannel(int b, float k) { int v = Fistp(b * k); return v < 0 ? 0 : v > 254 ? 255 : v; }
+
+        // Original: Engine.dll ?GetSysParams@AParticleFX@@QBEPBV1@PAD@Z [HP1 0x103C42C0]
+        // ParentBlend (+0x2fc) <= 0 or NaN -> the emitter's own block (fcomp 0.0; test ah,0x41; je, 0x103c42cb..0x103c42dc);
+        // >= 1 -> the parent class defaults (Class +0x24 -> SuperField +0x28 -> +0x4dc, read once ParentBlend > 0); in between
+        // the blended copy (0x3cc bytes copied, then 0x103c4332..): w = (float)(1 - ParentBlend); every float field
+        // (parent·ParentBlend + w·own) in the caller's x87 window, one float store; every colour channel (A, B, G, R)
+        // ColorChannel(parent, ParentBlend) + ColorChannel(own, w), saturated at 255. Only GetParams' fields are blended.
+        FxSysParams GetSysParams<V>(UEObject fx) where V : struct, IFpuMode<V>
         {
-            // ColorParams {Base:{R,G,B}, Rand:{R,G,B}} — one conditional
-            // appFrand for the whole color (byte components / 255).
-            if (src.GetProp(prop) is not UEObject bag) return default;
-            var bs = bag.GetProp(PK.Base) as UEObject;
-            var rn = bag.GetProp(PK.Rand) as UEObject;
-            float br = UEValue.AsByte(bs?.GetProp(PK.R)), bg = UEValue.AsByte(bs?.GetProp(PK.G)), bb = UEValue.AsByte(bs?.GetProp(PK.B));
-            float rr = UEValue.AsByte(rn?.GetProp(PK.R)), rg = UEValue.AsByte(rn?.GetProp(PK.G)), rb = UEValue.AsByte(rn?.GetProp(PK.B));
-            // The "no random" test compares the whole FColor dword, alpha included (`cmp [esi+0x2b4], ebx` 0x103c554c,
-            // `[esi+0x2bc]` 0x103c5704).
-            // The sample stays an FColor (bytes) in FParams; EmitParticles converts it (ColorByteScale below).
-            if (rr == 0f && rg == 0f && rb == 0f && UEValue.AsByte(rn?.GetProp("A")) == 0)
-                return new UEVector(br, bg, bb);
-            // AParticleFX::GetParams (Engine.dll.c:30836-30945): channel addend —
-            // ROUND(Rand·f), clamped to 0..255, the sum with Base saturates at 255.
-            // The original particle colour never exceeds 1.
-            float f = Frand();
-            static float Sat(float rand, float bas, float f)
+            float pb = PropF(fx, "ParentBlend");
+            if (!(pb > 0f)) return FxSysParams.Of(fx);
+            FxSysParams par = FxSysParams.Of(ParentClassDefaults(fx));
+            if (!(pb < 1f)) return par;
+            FxSysParams s = FxSysParams.Of(fx);
+            float w = (V.L(1f) - V.L(pb)).F;
+            FxRange B(FxRange own, FxRange p) => new FxRange
             {
-                int add = (int)MathF.Round(rand * f);   // fistp: round to nearest even
-                if (add < 0) add = 0; else if (add > 254) add = 255;
-                int sum = (int)bas + add;
-                if (sum > 254) sum = 255;
-                return sum;
+                Base = (V.L(p.Base) * V.L(pb) + V.L(w) * V.L(own.Base)).F,
+                Rand = (V.L(p.Rand) * V.L(pb) + V.L(w) * V.L(own.Rand)).F,
+            };
+            uint Col(uint own, uint p)
+            {
+                uint r = 0;
+                for (int sh = 0; sh < 32; sh += 8)
+                {
+                    int sum = ColorChannel((int)(p >> sh) & 0xff, pb) + ColorChannel((int)(own >> sh) & 0xff, w);
+                    r |= (uint)(sum > 254 ? 255 : sum) << sh;
+                }
+                return r;
             }
-            return new UEVector(Sat(rr, br, f), Sat(rg, bg, f), Sat(rb, bb, f));
+            return new FxSysParams
+            {
+                SpreadW = B(s.SpreadW, par.SpreadW),
+                SpreadH = B(s.SpreadH, par.SpreadH),
+                SourceW = B(s.SourceW, par.SourceW),
+                SourceD = B(s.SourceD, par.SourceD),
+                SourceH = B(s.SourceH, par.SourceH),
+                Speed = B(s.Speed, par.Speed),
+                Lifetime = B(s.Lifetime, par.Lifetime),
+                AlphaStart = B(s.AlphaStart, par.AlphaStart),
+                AlphaEnd = B(s.AlphaEnd, par.AlphaEnd),
+                SpinRate = B(s.SpinRate, par.SpinRate),
+                DripTime = B(s.DripTime, par.DripTime),
+                ColorStartBase = Col(s.ColorStartBase, par.ColorStartBase),
+                ColorStartRand = Col(s.ColorStartRand, par.ColorStartRand),
+                ColorEndBase = Col(s.ColorEndBase, par.ColorEndBase),
+                ColorEndRand = Col(s.ColorEndRand, par.ColorEndRand),
+                SizeWidth = B(s.SizeWidth, par.SizeWidth),
+                SizeLength = B(s.SizeLength, par.SizeLength),
+                SizeEndScale = B(s.SizeEndScale, par.SizeEndScale),
+            };
+        }
+
+        // GetParams' range sample: Rand == 0 or NaN (fcomp 0.0; test ah,0x40: C3) returns Base with NO appFrand; else
+        // appFrand's register · Rand + Base in the caller's window, one float store.
+        static float SampleRange<V>(in FxRange r, Func<V> frand) where V : struct, IFpuMode<V>
+            => r.Rand == 0f || float.IsNaN(r.Rand) ? r.Base : (frand() * V.L(r.Rand) + V.L(r.Base)).F;
+
+        // ColorParams: a zero Rand dword (alpha included, `cmp [esi+0x2b4], ebx` 0x103c554c, `[esi+0x2bc]` 0x103c5704)
+        // returns Base with no appFrand; else ONE appFrand stored to a float (fstp, 0x103c5564) and per channel
+        // Base + ColorChannel(Rand, f), saturated at 255 (0x103c563f..0x103c56f6). The sample stays an FColor (bytes) in
+        // FParams; EmitParticles converts it (ColorByteScale below).
+        static UEVector SampleColor<V>(uint bas, uint rand, Func<V> frand) where V : struct, IFpuMode<V>
+        {
+            if (rand == 0) return new UEVector(bas & 0xff, (bas >> 8) & 0xff, (bas >> 16) & 0xff);
+            float f = frand().F;
+            int Ch(int sh) { int sum = (int)((bas >> sh) & 0xff) + ColorChannel((int)(rand >> sh) & 0xff, f); return sum > 254 ? 255 : sum; }
+            return new UEVector(Ch(0), Ch(8), Ch(16));
         }
 
         // The per-particle FParams sample (GetParams, Engine.dll.c:30726). SpreadW, SpreadH, SourceW, SourceD, SourceH,
@@ -254,38 +337,36 @@ namespace HP1.UEScript
             public float Width, Length, SizeEndScale, SpinRate, DripTime;
         }
 
-        FParams GetParams(UEObject src)
+        // Original: Engine.dll ?GetParams@AParticleFX@@QBEXAAUFParams@@@Z [HP1 0x103C52F0]
+        // frand: appFrand()'s register in the caller's window (render path: the render stream at PC24; native 432: the
+        // game stream, PC24 or PC64).
+        static FParams GetParams<V>(in FxSysParams s, Func<V> frand) where V : struct, IFpuMode<V>
         {
             FParams p;
-            p.SpreadW = SampleRange(src, "AngularSpreadWidth");
-            p.SpreadH = SampleRange(src, "AngularSpreadHeight");
-            p.SourceW = SampleRange(src, "SourceWidth");
-            p.SourceD = SampleRange(src, "SourceDepth");
-            p.SourceH = SampleRange(src, "SourceHeight");
-            p.Speed = SampleRange(src, "Speed");
-            p.Lifetime = SampleRange(src, "Lifetime");
-            p.AlphaStart = SampleRange(src, "AlphaStart");
-            p.AlphaEnd = SampleRange(src, "AlphaEnd");
-            p.SpinRate = SampleRange(src, "SpinRate");
-            p.DripTime = SampleRange(src, "DripTime");
-            p.ColorStart = SampleColor(src, "ColorStart");
-            p.ColorEnd = SampleColor(src, "ColorEnd");
-            // Width/Length: ONE shared UNCONDITIONAL appFrand (30870 tail).
-            float f = Frand();
-            float wb = 0f, wr = 0f, lb = 0f, lr = 0f;
-            if (src.GetProp(PK.SizeWidth) is UEObject wbag)
-            { wb = UEValue.AsFloat(wbag.GetProp(PK.Base)); wr = UEValue.AsFloat(wbag.GetProp(PK.Rand)); }
-            if (src.GetProp(PK.SizeLength) is UEObject lbag)
-            { lb = UEValue.AsFloat(lbag.GetProp(PK.Base)); lr = UEValue.AsFloat(lbag.GetProp(PK.Rand)); }
-            p.Width = f * wr + wb;
-            p.Length = f * lr + lb;
-            p.SizeEndScale = SampleRange(src, "SizeEndScale");
+            p.SpreadW = SampleRange(s.SpreadW, frand);
+            p.SpreadH = SampleRange(s.SpreadH, frand);
+            p.SourceW = SampleRange(s.SourceW, frand);
+            p.SourceD = SampleRange(s.SourceD, frand);
+            p.SourceH = SampleRange(s.SourceH, frand);
+            p.Speed = SampleRange(s.Speed, frand);
+            p.Lifetime = SampleRange(s.Lifetime, frand);
+            p.AlphaStart = SampleRange(s.AlphaStart, frand);
+            p.AlphaEnd = SampleRange(s.AlphaEnd, frand);
+            p.SpinRate = SampleRange(s.SpinRate, frand);
+            p.DripTime = SampleRange(s.DripTime, frand);
+            p.ColorStart = SampleColor(s.ColorStartBase, s.ColorStartRand, frand);
+            p.ColorEnd = SampleColor(s.ColorEndBase, s.ColorEndRand, frand);
+            // Width/Length: ONE shared UNCONDITIONAL appFrand, its register used twice (fst; fld st0, 0x103c58c1..0x103c58e7).
+            V f = frand();
+            p.Width = (f * V.L(s.SizeWidth.Rand) + V.L(s.SizeWidth.Base)).F;
+            p.Length = (f * V.L(s.SizeLength.Rand) + V.L(s.SizeLength.Base)).F;
+            p.SizeEndScale = SampleRange(s.SizeEndScale, frand);
             return p;
         }
 
         // AParticleFX::EmitParticles (Engine.dll.c:23044) — the banked RE map.
-        // Default, Pattern and OwnerMesh distributions are ported; ColorPalette
-        // and a fractional ParentBlend STOP loudly (no carriers in the campaign).
+        // Default, Pattern and OwnerMesh distributions are ported; ColorPalette STOPs loudly.
+        // Original: Engine.dll ?EmitParticles@AParticleFX@@QAEHM@Z [HP1 0x103C2170]
         void EmitParticles(UEObject fx, FxState s, float dt)
         {
             float emitDelay = PropF(fx, "EmitDelay") + dt;
@@ -302,36 +383,22 @@ namespace HP1.UEScript
             // by exactly this offset — `this = *(UStruct**)(this + 0x28)`.
             //
             // The two forks are DIFFERENT and must not be merged:
-            //   * the pps counter is blended when ParentBlend != 0 (23246), and the
-            //     SECOND appFrand is spent unconditionally, even with blend outside [0,1];
-            //   * the particle parameter source (GetSysParams) is chosen by
-            //     `<= 0` -> the emitter itself, `>= 1` -> the parent default, in between ->
-            //     a blended copy of the whole property block.
+            //   * the pps counter is blended when ParentBlend != 0 (`fcomp 0.0; test ah,0x40; jne`, 0x103c223b..0x103c224c:
+            //     zero or NaN skips), and the SECOND appFrand is spent then, even with blend outside [0,1]: the chain
+            //     ((f·parent.Rand + parent.Base) − pps)·ParentBlend + pps in the register (0x103c224e..0x103c226f);
+            //   * the particle parameter source is GetSysParams (once before the loop, 0x103c271a): `<= 0` -> the emitter
+            //     itself, `>= 1` -> the parent default, in between -> the blended copy.
             float parentBlend = PropF(fx, "ParentBlend");
-            UEObject sysParams = fx;
-            if (parentBlend != 0f)
+            if (!(parentBlend == 0f || float.IsNaN(parentBlend)))
             {
                 UEObject parentDef = ParentClassDefaults(fx);
                 float pf = Frand();
                 float parentPps = pf * RangeRandRaw(parentDef, "ParticlesPerSec")
                                 + RangeBase(parentDef, "ParticlesPerSec");
                 pps = (parentPps - pps) * parentBlend + pps;
-                if (parentBlend > 0f)
-                {
-                    // FRACTIONAL BLENDING IS NOT PORTED — MEASURED, NOT DEFERRED
-                    // BLINDLY: across the whole campaign ParentBlend takes
-                    // only 0 or 1 (SpellLearnTrigger.uc:710-723 switches
-                    // two systems, ParticleFadeFX.uc:8-14 likewise, and
-                    // BroomHarry.uc:273 uses Min(Speed/200, 1), an integer).
-                    // Nobody sets intermediate values.
-                    if (parentBlend < 1f)
-                        throw new NotSupportedException(
-                            $"ParticleFX ParentBlend={parentBlend} ({fx.Class?.Name}) — fractional "
-                            + "blending copies the whole property block (0x3cc) and lerps ~22 fields "
-                            + "plus colors (17096-17535); the campaign has no such value");
-                    sysParams = parentDef;
-                }
             }
+            FxSysParams sysParams = GetSysParams<FpuPc24>(fx);
+            Func<FpuPc24> frand24 = () => FpuPc24.L(Frand());
             int distribution = UEValue.ToInt(fx.GetProp(PK.Distribution));
             // ── DIST_Pattern / DIST_Path (23252-23281) ────────────────────
             //
@@ -382,14 +449,14 @@ namespace HP1.UEScript
             // inverse of the input ones (UELevelRuntime.EvaluatePosePoints, disasm there).
             UEVector[] meshPoints = null;
             int[] meshTris = null;
-            if (distribution == 2)
+            // Without an Owner or its Mesh the mesh branch is skipped here (0x103c269c..0x103c26af) and per particle
+            // (0x103c2819..0x103c2839 -> 0x103c2a3e): the particles take the plain spread/volume path.
+            var owner = distribution == 2 ? fx.GetProp(PK.Owner) as UEObject : null;
+            var meshRef = owner?.GetProp(PK.Mesh) as UEResourceRef;
+            if (meshRef is not null)
             {
-                var owner = fx.GetProp(PK.Owner) as UEObject;
-                var meshRef = owner?.GetProp(PK.Mesh) as UEResourceRef;
-                if (owner is null || meshRef is null)
-                    throw new NotSupportedException(
-                        $"ParticleFX DIST_OwnerMesh ({fx.Class?.Name}): no Owner or it has no Mesh — "
-                        + "shipped does not emit from the mesh in this case, and the port must see it");
+                // HP2: the same branch [HP2 0x103cfb4a..] (layout only; GetNumTris / GetTriVerts identical, GetFrame's HP2
+                // lines in PosePoints): tools/hp2/particle_body_judge.py EmitOwnerMesh, skel_shipped's skBroomHoopMesh.
                 if (MeshCatalog is null)
                     throw new NotSupportedException(
                         $"ParticleFX DIST_OwnerMesh ({fx.Class?.Name}): mesh catalog not supplied to the producer");
@@ -409,7 +476,8 @@ namespace HP1.UEScript
                 meshTris = sk.TriVerts;
                 if (meshTris.Length == 0)
                     throw new NotSupportedException(
-                        $"ParticleFX DIST_OwnerMesh ({fx.Class?.Name}): mesh {meshRef.Name} has no faces");
+                        $"ParticleFX DIST_OwnerMesh ({fx.Class?.Name}): mesh {meshRef.Name} has no faces — shipped's appRandRange(0, -1) "
+                        + "returns 0 and GetTriVerts (vtable +0x84) reads Faces(0) of the empty array (STOP)");
             }
             float count;
             if (distribution == 1)
@@ -503,9 +571,14 @@ namespace HP1.UEScript
             UEVector ownerVel = velRelative && fx.GetProp(PK.Owner) is UEObject own
                 ? UEValue.AsVector3(own.GetProp(PK.Velocity)) : default;
             int renderPrimitive = UEValue.ToInt(fx.GetProp(PK.RenderPrimitive));
+            // The palette branch (ColorPalette && its Palette, 0x103c3221..0x103c32bb): Color = Palette.Colors[0] / 255, and
+            // AlphaDelta (+0x34) and ColorDelta (+0x48..+0x54) are NOT written: every particle of the call carries the
+            // stack particle's (ebp-0x17c) residue from before the call — no game value (the D-73 class; an author
+            // decision, not a port default). A ColorPalette without a Palette takes the plain branch: not resolved here.
             if (fx.GetProp(PK.ColorPalette) is not null)
                 throw new NotSupportedException(
-                    $"ParticleFX ColorPalette reached ({fx.Class?.Name}) — the palette ramp is not ported yet");
+                    $"ParticleFX ColorPalette ({fx.Class?.Name}): EmitParticles leaves the born particles' AlphaDelta/ColorDelta "
+                    + "to the stack residue (0x103c323a..0x103c32bb skips 0x103c32c0..0x103c33f4) — not a game value, STOP");
             var rot = UEValue.AsRotator(fx.GetProp(PK.Rotation));
             // The emitter coords (0x103c249a..0x103c2519: GMath.UnitCoords, Origin -= Location, FCoords::operator*=(Rotation)
             // through the Core import [0x10608cd0], render window PC24; kept at ebp-0x248): the spread direction
@@ -530,7 +603,7 @@ namespace HP1.UEScript
                 // emitter itself: shipped calls it ONCE before the loop and feeds it to
                 // GetParams for every particle. Other fields (LOD, Rotation,
                 // Location) are still read from `fx`, as in the body.
-                FParams fp = GetParams(sysParams);
+                FParams fp = GetParams(sysParams, frand24);
                 // fraction: with Distribution==1 it is DETERMINISTIC — (i+1)/count
                 // (23407-23415), and the appFrand at the loop head is NOT SPENT AT ALL.
                 // That is the only difference of this mode's RNG stream from the normal one:
@@ -741,6 +814,17 @@ namespace HP1.UEScript
                 // Setup BoundVisible residue (GetRenderBoundingBox path) or the chain (render path).
                 if (!carryKnown)
                 {
+                    // HP2: the bSystemRelative residue (SysRelResidue, tools/hp2/pfx_slot_judge.py), the render-path chain
+                    // with HP2's game writers (Hp2RenderSlotGameWrite; D-73 HP2 (5), tools/hp2/d73_replay_judge.py) and the
+                    // GetRenderBoundingBox path's slot (Setup BoundVisible residue, its own chain, the shadow BoundVisible,
+                    // the frame start; D-73 HP2 (7), the same judge's setup part) are HP2's own. Refused where it decides
+                    // anything — Chaos (the first kick's time) or a spinning particle that does not draw its spin phase
+                    // (RenderPrimitive 3) — only while that slot is unknown (a child-frame Setup, a degenerate box).
+                    if (UEGameProfile.Current.Game == UEEdition.Game.HP2 && _slotKind is SlotKind.SessionStart
+                        && (PropF(fx, "Chaos") != 0f
+                        || (renderPrimitive != 3 && (sysParams.SpinRate.Base != 0f || sysParams.SpinRate.Rand != 0f))))
+                        UEGameProfile.Stop(UEEdition.Game.HP2, $"EmitParticles' first newborn ChaosTimer/SpinPos stack slot (D-73) "
+                            + $"of {fx.GetProp(PK.Name)} (Chaos {PropF(fx, "Chaos")}, SpinRate {sysParams.SpinRate.Base}/{sysParams.SpinRate.Rand}) on the GetRenderBoundingBox path ({_slotKind})");
                     carryChaos = _slotChaos; carrySpin = _slotSpin;
                     // Validation seam only (headless, InternalsVisibleTo): the live comparison supplies the value the
                     // original's first particle read where the original's slot did not come from game code (D-73: the
@@ -750,6 +834,7 @@ namespace HP1.UEScript
                     if (_slotKind == SlotKind.Chain) ChainParticleSlot++;
                     else if (_slotKind == SlotKind.SetupBoundVisible) SetupResidueParticleSlot++;
                     else if (_slotKind == SlotKind.SysRel) SysRelParticleSlot++;
+                    else if (_slotKind == SlotKind.Wind) WindParticleSlot++;
                 }
                 p.ChaosTimer = carryChaos;
                 p.SpinRate = fp.SpinRate;
@@ -764,6 +849,7 @@ namespace HP1.UEScript
                 if (birthOffset > 0f) AdvanceNewborn(fx, p, birthOffset);
                 carryKnown = true; carryChaos = p.ChaosTimer; carrySpin = p.SpinPos;
                 if (!_grbbPath) { RenderSlotChaos = p.ChaosTimer; RenderSlotSpin = p.SpinPos; }
+                else Hp2SetupSlotChain(p.ChaosTimer, p.SpinPos);
                 // After the catch-up, before AddParticle (0x103c34f8..0x103c3529): CurrentPriorityTag (+0x3c4) += 1, wrapped
                 // to 0 above 9 (`cmp eax, 9; jle`), and the particle takes PriorityTable[CurrentPriorityTag].
                 int tag = UEValue.ToInt(fx.GetProp(PK.CurrentPriorityTag)) + 1;
@@ -782,6 +868,9 @@ namespace HP1.UEScript
             => o.GetProp(p) is UEObject bag ? UEValue.AsFloat(bag.GetProp(PK.Rand)) : 0f;
 
         internal UEObject ParentClassDefaultsForTest(UEObject fx) => ParentClassDefaults(fx);
+        // Validation seams (particle judge batch): a synthetic parent default object for a class, GetSysParams by window.
+        internal void ParentClassDefaultsForTest(UELib.Core.UClass cls, UEObject def) => _parentDefaults[cls] = def;
+        internal FxSysParams GetSysParamsForTest(UEObject fx, bool pc24) => pc24 ? GetSysParams<FpuPc24>(fx) : GetSysParams<FpuPc64>(fx);
 
         UEObject ParentClassDefaults(UEObject fx)
         {
@@ -792,6 +881,12 @@ namespace HP1.UEScript
                 ?? throw new NotSupportedException(
                     $"ParticleFX ParentBlend ({cls.Name}): the class has no parent, while shipped "
                     + "dereferences SuperField unconditionally");
+            // The class ParticleFX itself: its parent's default object is an Actor's, smaller than the +0x25c..+0x2f4
+            // block GetSysParams and the pps blend read from it — memory past that object.
+            if (!UEInterpreter.ClassIsA(super, "ParticleFX"))
+                throw new NotSupportedException(
+                    $"ParticleFX ParentBlend ({cls.Name}): the parent class {super.Name} is not a ParticleFX — shipped reads "
+                    + "its emitter fields past the default object (STOP)");
             var def = new UEObject { Class = super, Interp = fx.Interp };
             def.LoadDefaults();
             _parentDefaults[cls] = def;
@@ -851,7 +946,31 @@ namespace HP1.UEScript
         //     appExp (Core 0x10126060, Damping > 0) is register-only; its return address lands at UpdateParticles'
         //     ebp-0x60, not at the slot. Session start: 0, 0 (no game write yet; the original holds a loader/platform
         //     residue there — D-73).
-        enum SlotKind { Chain, SetupBoundVisible, SysRel, SessionStart }
+        //   * GetTotalWind (UpdateParticles, list not empty, Damping·WindModifier > 0, at least one AWind): GetWind's saved
+        //     esi/edi — SpinPos = the last list index (ported), ChaosTimer = &Location (a heap address: 0, not original
+        //     in the bits, decided 2026-11-16).
+        enum SlotKind { Chain, SetupBoundVisible, SysRel, SessionStart, Wind }
+
+        // HP2's game code between two render-path emissions that reaches the render slot (live hp2slot4 captures, D-73 HP2,
+        // tools/hp2/d73_live_writers.py): the frame's tail and the next frame's Setup pass (HUD, tick, FDynamicSprite::Setup
+        // / BoundVisible: heap pointers, small ints), a mesh draw (DrawMesh's pushes for DrawLodMesh, then DrawLodMesh's
+        // reused argument slots: a texture-cache address, &GStat+0x2c [HP2 0x10b116a9, 0x10b11872]) and a sprite tile
+        // (UCanvas::DrawTile -> RenDev vtable+0x88: the callee's saved ebp and return address 0x1038fa9e [HP2 Engine
+        // 0x1038fa98]). Every such value is a pointer or a small int: floats below 2^-63 in both halves, behaviour-equal to
+        // (0, 0) — ChaosTimer below every nonzero step (the first step zeroes it and kicks, as 0 does), SpinPos rounds to
+        // angle 0 and vanishes in the first SpinPos += SpinRate·dt. NOT ORIGINAL in the bits (decided 2026-11-16).
+        // The platform's own writes there (CrossOver's wined3d: a return address 0x7e76f053 as SpinPos — asynchronous to the
+        // game code) are not emulated, as D-73's "always chain".
+        // The same writers lie over the GetRenderBoundingBox path's slot (the draw loop's DrawActorSprite frames, the frame's
+        // tail: live Adv11aCorridor, pointer bits at every frame start), so it reads (0, 0) at the next frame's first Setup.
+        internal void Hp2RenderSlotGameWrite()
+        {
+            if (UEGameProfile.Current.Game != UEEdition.Game.HP2) return;
+            RenderSlotChaos = 0f; RenderSlotSpin = 0f;
+            Hp2SetupSlotGameWrite();
+            Hp2RenderSlotGameWrites++;
+        }
+        internal int Hp2RenderSlotGameWrites;
         internal bool GrbbPath { set => _grbbPath = value; }
         internal (bool Known, float Y, float Z) SetupResidue => (_setupResidueKnown, _setupResY, _setupResZ);
     }

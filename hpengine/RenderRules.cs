@@ -76,11 +76,5 @@ namespace HPEngine
         // PF_Modulated: D3DDrv DrawTriangles puts diffuse 0xFFFFFFFF (D3DDrv.dll.c:1017-1020), light has no effect.
         // An Unlit mesh uses the same mode 2: vertex light = GUnlitColor (UEActorLighting.UnlitColor), D3DDrv MODULATE without x2.
         public static int ActorFrag(bool modulated) => modulated ? 1 : 2;
-
-        // Texture of an empty mesh slot: URender::DrawLodMesh/DrawMesh (disassembly 0x10b11811-0x10b1183f): Actor.Texture,
-        // else Zone.EnvironmentMap, else Level.EnvironmentMap, else the last non-null texture of the mesh slots.
-        public static string MeshFallbackTexture(string actorTexture, string zoneEnvMap, string levelEnvMap, string lastSlotTexture)
-            => Tex(actorTexture) ?? Tex(zoneEnvMap) ?? Tex(levelEnvMap) ?? Tex(lastSlotTexture);
-        static string Tex(string path) => string.IsNullOrEmpty(path) || path == "None" ? null : path;
     }
 }

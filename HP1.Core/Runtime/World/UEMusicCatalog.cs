@@ -56,7 +56,7 @@ namespace HP1.UEScript
                 // Tables only (LoadPackage reads names/imports/exports): the index needs each Music export's path.
                 // Its object is constructed with its package on the first Payload of that package (perf/spikes:
                 // constructing every .umx and all of Engine.u here cost 30-100 ms on the first song).
-                UnrealPackage package = UnrealLoader.LoadPackage(file, FileAccess.Read);
+                UnrealPackage package = HP1.UEScript.UEPackageOpen.Load(file, FileAccess.Read);
                 foreach (var export in package.Exports)
                 {
                     if (!string.Equals(export.Class?.ObjectName?.ToString(), "Music", StringComparison.OrdinalIgnoreCase)) continue;
@@ -107,6 +107,51 @@ namespace HP1.UEScript
             return s;
         }
 
+        // HP2 music (UALAudioSubsystem::PlayMusic [HP2 ALAudio 0x10004c70]) is no Music export: a transient USound whose
+        // file "..\music\<name>.ogg" FFileStream::CreateStream opens with fopen relative to the game's working
+        // directory, System. The stream is the shipped vorbisfile's (UEOggVorbis); a looping music lap restarts as
+        // ov_time_seek(0.0) does (FFileStream::Read type 2).
+        public UEOggVorbis OpenOggStream(string file)
+        {
+            if (string.IsNullOrEmpty(file)) throw new ArgumentException("empty music file");
+            string root = _root ?? throw new InvalidOperationException("music catalog without an install root — the frontend did not set the source");
+            string path = UEInstallPath.File(Path.GetFullPath(Path.Combine(root, "System", file.Replace('\\', '/'))))
+                ?? throw new FileNotFoundException($"HP2 music file {file} is not in the install (fopen fails: no stream)");
+            return new UEOggVorbis(File.ReadAllBytes(path), file);
+        }
+
+        // The music's FileType name (UMusic +0x58, the FName Galaxy compares with 'MP2'); the export is loaded as Payload does.
+        public string FileType(string objectPath)
+        {
+            string path = Canonical(objectPath);
+            lock (_lock) return LoadLocked(path, out _).FileType?.ToString() ?? "None";
+        }
+
+        // The UMusic's Data bytes whatever its format (Update's module block hands them to glxLoadMusic, 0x10609331-0x10609374).
+        public byte[] Data(string objectPath)
+        {
+            string path = Canonical(objectPath);
+            lock (_lock)
+            {
+                UMusic music = LoadLocked(path, out UnrealPackage package);
+                music.RawData.LoadData(package.Stream);
+                return music.RawData.ElementData ?? throw new InvalidDataException($"{path}: the music has no data");
+            }
+        }
+
+        UMusic LoadLocked(string path, out UnrealPackage package)
+        {
+            var (pkg, export) = _byPath[path];
+            package = pkg;
+            if (export.Object is null) pkg.InitializePackage(UnrealPackage.InitFlags.RegisterClasses | UnrealPackage.InitFlags.Construct);
+            UMusic music = export.Object as UMusic
+                ?? throw new InvalidDataException($"{pkg.FullPackageName}: Music export {export.ObjectName} parsed as {export.Object?.GetType().Name}");
+            if (!string.Equals(music.GetPath(), path, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException($"music index path {path} is not the object path {music.GetPath()}");
+            music.Load<UObjectRecordStream>();
+            return music;
+        }
+
         // UMusic::Serialize (Engine.dll.c:80249-80312): after the data — +0x48 (version > 0x46), +0x44 (> 0x47),
         // +0x50 (> 0x49), +0x4c (> 0x4a, Data.mUncompressedLength; 0 at that version — assert 0x80f).
         byte[] Payload(string objectPath, out string path, out int endBytes)
@@ -115,13 +160,7 @@ namespace HP1.UEScript
             byte[] payload; string format;
             lock (_lock)
             {
-                var (package, export) = _byPath[path];
-                if (export.Object is null) package.InitializePackage(UnrealPackage.InitFlags.RegisterClasses | UnrealPackage.InitFlags.Construct);
-                UMusic music = export.Object as UMusic
-                    ?? throw new InvalidDataException($"{package.FullPackageName}: Music export {export.ObjectName} parsed as {export.Object?.GetType().Name}");
-                if (!string.Equals(music.GetPath(), path, StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidDataException($"music index path {path} is not the object path {music.GetPath()}");
-                music.Load<UObjectRecordStream>();
+                UMusic music = LoadLocked(path, out UnrealPackage package);
                 music.RawData.LoadData(package.Stream);
                 payload = music.RawData.ElementData
                     ?? throw new InvalidDataException($"{path}: the music has no data");

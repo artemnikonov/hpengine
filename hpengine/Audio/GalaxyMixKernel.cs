@@ -44,8 +44,9 @@ namespace HPEngine.Audio
             return (int)((f / r) * 0x10000u + ((f % r) << 16) / r);
         }
 
-        // Voice send from the dry gain.
-        public static int Send(int gain) => (gain * SendLevel) >> 7;
+        // Voice send from the dry gain; the caller computes it from the positive gain and the surround flag negates the
+        // word after (0x106200fe), so a negative (surround) gain gives the negated send.
+        public static int Send(int gain) => gain < 0 ? -((-gain * SendLevel) >> 7) : (gain * SendLevel) >> 7;
 
         // Caller's advance of the voice position after the call (0x10612e19-0x10612e37):
         // t = step·n + frac (32 bits), frac = t & 0xffff, pos += t >> 16 (arithmetic).

@@ -108,10 +108,28 @@ namespace HP1.UEScript
         // AnimBone=0. Keep the skeletal-bone branch loud until the native mesh
         // GetBoneCoords path is available in Core; using a bone from the frontend
         // would invert the architecture boundary.
+        // Original: Engine.dll ?physTrailer@AActor@@QAEXM@Z [HP1 0x103f5f80] [HP2 0x10402470]
         public void PhysTrailer(UEInterpreter interp, UEObject actor)
         {
             UEObject owner = actor.GetProp(PK.Owner) as UEObject;
             if (owner is null || owner.Destroyed) return;
+            // The placement of a non-sprite trailer (bone or owner frame). HP1: FarMove(bNoCheck), then a zero-delta MoveActor
+            // with the rotation. HP2 [0x10402844..0x104029ae]: a trailer that collides with the world or blocks actors is
+            // FarMoved and then moved by (0.01, 0, 0) with the rotation; otherwise one MoveActor by NewLocation − Location.
+            void Place(Vector3 location, UERotator rotation)
+            {
+                if (UEGameProfile.Current.Game == UEEdition.Game.HP2
+                    && !(UEInterpreter.ToBool(actor.GetProp(PK.bCollideWorld)) || UEInterpreter.ToBool(actor.GetProp(PK.bBlockActors))))
+                {
+                    Vector3 cur = UEInterpreter.AsVector3(actor.GetProp(PK.Location));
+                    MoveActor(interp, actor, new Vector3(location.x - cur.x, location.y - cur.y, location.z - cur.z), rotation,
+                        bTest: false, bIgnorePawns: false, bIgnoreBases: false, bNoFail: false);
+                    return;
+                }
+                FarMove(interp, actor, location, bTest: false, bNoCheck: true);
+                MoveActor(interp, actor, UEGameProfile.Current.Game == UEEdition.Game.HP2 ? new Vector3(0.01f, 0f, 0f) : Vector3.zero,
+                    rotation, bTest: false, bIgnorePawns: false, bIgnoreBases: false, bNoFail: false);
+            }
 
             bool prePivot = UEInterpreter.ToBool(actor.GetProp(PK.bTrailerPrePivot));
             bool sameRotation = UEInterpreter.ToBool(actor.GetProp(PK.bTrailerSameRotation));
@@ -157,9 +175,7 @@ namespace HP1.UEScript
                 // Core's (UELevelRuntime.SkeletalPose).
                 BoneWorld bone = BoneWorldOf(owner, animBone - 1);
                 UERotator boneRotation = OrthoRotation(bone);
-                FarMove(interp, actor, bone.Origin, bTest: false, bNoCheck: true);
-                MoveActor(interp, actor, Vector3.zero, boneRotation,
-                    bTest: false, bIgnorePawns: false, bIgnoreBases: false, bNoFail: false);
+                Place(bone.Origin, boneRotation);
                 if (DetailedJournal)
                     Journal?.Invoke($"trailer_bone actor={actor.GetProp(PK.Name)} owner={owner.GetProp(PK.Name)} "
                         + $"bone={animBone - 1} location={actor.GetProp(PK.Location)} rotation={actor.GetProp(PK.Rotation)}");
@@ -191,9 +207,7 @@ namespace HP1.UEScript
                     newRotation = UEValue.RotatorFromVector(-ownerVelocity);
             }
 
-            FarMove(interp, actor, newLocation, bTest: false, bNoCheck: true);
-            MoveActor(interp, actor, Vector3.zero, newRotation,
-                bTest: false, bIgnorePawns: false, bIgnoreBases: false, bNoFail: false);
+            Place(newLocation, newRotation);
             if (DetailedJournal)
                 Journal?.Invoke($"trailer actor={actor.GetProp(PK.Name)} owner={owner.GetProp(PK.Name)} "
                     + $"location={actor.GetProp(PK.Location)} rotation={actor.GetProp(PK.Rotation)}");
@@ -310,9 +324,25 @@ namespace HP1.UEScript
             public void Dispose() => PerformPhysicsTap?.Invoke(_rt, _a, _p, _dt, false);
         }
 
+        // Actor.AutonomousPhysics (native 3971). Original: AActor::execAutonomousPhysics 0x103e4b40: each Acceleration
+        // component `fld; fmul 10.0f (0x104737f4); fstp dword; fld; fistp; fild; fmul 0.1f (0x104737fc); fstp`
+        // (0x103e4b72..0x103e4bdd), then Physics != PHYS_None (0x103e4bd2) -> performPhysics(DeltaSeconds) (vtable +0xa8).
+        public void AutonomousPhysics(UEInterpreter interp, UEObject actor, float deltaSeconds)
+        {
+            static float Tenths(float c) => HP1.Core.X87Ext.Round64(
+                HP1.Core.X87Ext.From(MeshTriangleOrder.Fistp(c * 10f)) * HP1.Core.X87Ext.From(0.1f)).ToFloat();
+            Vector3 a = UEInterpreter.AsVector3(actor.GetProp(PK.Acceleration));
+            actor.Props["Acceleration"] = new Vector3(Tenths(a.x), Tenths(a.y), Tenths(a.z));
+            int physics = UEInterpreter.ToInt(actor.GetProp(PK.Physics));
+            if (physics != 0)
+                PerformPhysics(interp, actor, physics, deltaSeconds, UEInterpreter.AsVector3(actor.GetProp(PK.Velocity)));
+        }
+
         // The performPhysics body — Core-owned (was Runtime.PhysicsHook): the shipped mode
         // dispatch plus the performPhysics tail (rotation toward DesiredRotation,
         // MoveTimer decrement, PostTouch). Runs only for Physics != PHYS_None.
+        // Original: Engine.dll ?performPhysics@APawn@@UAEXM@Z [HP1 0x103e5520] [HP2 0x103f2b80]
+        // Original: Engine.dll ?performPhysics@AActor@@UAEXM@Z [HP1 0x103e52c0] [HP2 0x103f2740]
         public void PerformPhysics(UEInterpreter interp, UEObject actor, int physics,
             float dt, Vector3 preStepVelocity)
         {
@@ -366,7 +396,7 @@ namespace HP1.UEScript
                 actor.Props["Velocity"] = Vector3.zero;
             }
             else if (physics == 8 && UEInterpreter.ClassIsA(actor.Class, "InterpolationManager"))
-                PhysInterpolating(interp, actor, dt);
+                PhysInterpolating(interp, actor, dt);   // both games: HP2's lines are profile branches inside
             else if (physics == 8)
             {
                 // PHYS_Interpolating on a NON-manager: the AActor::performPhysics switch
@@ -397,16 +427,24 @@ namespace HP1.UEScript
             // after the mode, is PHYS_Spider (0x103e55e5 `cmp byte [esi+0x30], 0xa; je`),
             // and MoveTimer decrements. PHYS_None pawns never reach performPhysics.
             // (PostTouch dispatch lives here too; PendingTouch is not tracked.)
+            // HP2 [0x103f2c45..0x103f2cc8]: the step smoothing first (Hp2SmoothStep), PHYS_Interpolating skips the turn
+            // too, and a non-player turns when (Rotation != DesiredRotation && bRotateToDesired) or (!bRotateToDesired
+            // && bFixedRotationDir) — RotationRate.Roll no longer counts.
             if (!actor.Destroyed)
             {
                 if (UEInterpreter.ClassIsA(actor.Class, "Pawn"))
                 {
+                    bool hp2 = UEGameProfile.Current.Game == UEEdition.Game.HP2;
+                    if (hp2) Hp2SmoothStep(actor);
                     UERotator rot = UEInterpreter.AsRotator(actor.GetProp(PK.Rotation));
                     UERotator desired = UEInterpreter.AsRotator(actor.GetProp(PK.DesiredRotation));
-                    if (UEInterpreter.ToInt(actor.GetProp(PK.Physics)) != 10
-                        && (UEInterpreter.ClassIsA(actor.Class, "PlayerPawn")
-                            || rot.Pitch != desired.Pitch || rot.Yaw != desired.Yaw || rot.Roll != desired.Roll
-                            || UEInterpreter.AsRotator(actor.GetProp(PK.RotationRate)).Roll > 0))
+                    int physicsAfter = UEInterpreter.ToInt(actor.GetProp(PK.Physics));
+                    bool differs = rot.Pitch != desired.Pitch || rot.Yaw != desired.Yaw || rot.Roll != desired.Roll;
+                    bool rtd = UEInterpreter.ToBool(actor.GetProp(PK.bRotateToDesired));
+                    bool turn = UEInterpreter.ClassIsA(actor.Class, "PlayerPawn") || (hp2
+                        ? (differs && rtd) || (!rtd && UEInterpreter.ToBool(actor.GetProp(PK.bFixedRotationDir)))
+                        : differs || UEInterpreter.AsRotator(actor.GetProp(PK.RotationRate)).Roll > 0);
+                    if (physicsAfter != 10 && !(hp2 && physicsAfter == 8) && turn)
                         PhysicsRotation(actor, dt, preStepVelocity);
                     UEPawnMovement.DecrementMoveTimer(actor, dt);
                 }
@@ -432,6 +470,47 @@ namespace HP1.UEScript
                     }
                 }
             }
+        }
+
+        // HP2's step smoothing of a walking pawn: SavedPrePivotZ (read by USkeletalMesh::GetMeshCoords [HP2 0x10429a96])
+        // decays by s = Min(|(Location - OldLocation).XY| · StepHeight / StepWidth, StepHeight) toward 0 and takes
+        // ±(StepHeight - s) when the pawn moved up or down by more than StepHeight - 1 and less than (float)(StepHeight + 1).
+        // Every step at PC64 as the disassembly: dx, dy, the sum stored as a double for appSqrt, the root, ·StepHeight,
+        // /StepWidth in the register; compares on the register value (`fst` then `fcomp`).
+        // Original: Engine.dll not exported: FUN_103f29a0 [HP2 0x103f29a0] (HP2 only; APawn::performPhysics calls it through
+        // the thunk 0x10302cfc after the mode switch [HP2 0x103f2c45])
+        internal static void Hp2SmoothStep(UEObject pawn)
+        {
+            const int C0 = X87Ext.C0, C3 = X87Ext.C3;
+            if (UEInterpreter.ToInt(pawn.GetProp(PK.Physics)) != 1) { pawn.Props["SavedPrePivotZ"] = 0f; return; }
+            Vector3 loc = UEInterpreter.AsVector3(pawn.GetProp(PK.Location)), old = UEInterpreter.AsVector3(pawn.GetProp(PK.OldLocation));
+            float stepH = UEInterpreter.AsFloat(pawn.GetProp("StepHeight")), stepW = UEInterpreter.AsFloat(pawn.GetProp("StepWidth"));
+            X87Ext dx = R64(X87(loc.x) - X87(old.x)), dy = R64(X87(loc.y) - X87(old.y));
+            X87Ext s = X87Ext.Sqrt64(X87Ext.From(R64(R64(dy * dy) + R64(dx * dx)).ToDouble()));   // 0x103f29af..0x103f29db
+            s = X87Ext.Div64(R64(s * X87(stepH)), X87(stepW));                                     // 0x103f29e1..0x103f29ea
+            if ((X87Ext.Fcom(s, X87(stepH)) & (C0 | C3)) == 0) s = X87(stepH);                    // `test ah, 0x41; jne`
+            float spz = UEInterpreter.AsFloat(pawn.GetProp("SavedPrePivotZ"));
+            if ((X87Ext.Fcom(X87(spz), X87(0f)) & C0) != 0)                                       // < 0 or NaN: 0x103f2a18
+            {
+                X87Ext v = R64(s + X87(spz));
+                spz = v.ToFloat();
+                if ((X87Ext.Fcom(v, X87(0f)) & (C0 | C3)) == 0) spz = 0f;                           // passed 0: 0x103f2a63
+            }
+            else if ((X87Ext.Fcom(X87(spz), X87(0f)) & (C0 | C3)) == 0)                            // > 0: 0x103f2a48
+            {
+                X87Ext v = R64(X87(spz) - s);
+                spz = v.ToFloat();
+                if ((X87Ext.Fcom(v, X87(0f)) & C0) != 0) spz = 0f;
+            }
+            float band = R64(X87(stepH) + X87(1f)).ToFloat();                                     // fstp [esp+8]
+            X87Ext lo = R64(X87(stepH) - X87(1f));
+            X87Ext down = R64(X87(old.z) - X87(loc.z));                                            // 0x103f2a6d
+            if ((X87Ext.Fcom(down, X87(band)) & C0) != 0 && (X87Ext.Fcom(down, lo) & (C0 | C3)) == 0)
+                spz = R64(X87(stepH) - s).ToFloat();                                               // 0x103f2aab
+            X87Ext up = R64(X87(loc.z) - X87(old.z));                                              // 0x103f2abd
+            if ((X87Ext.Fcom(up, X87(band)) & C0) != 0 && (X87Ext.Fcom(up, lo) & (C0 | C3)) == 0)
+                spz = (-R64(X87(stepH) - s)).ToFloat();                                            // fchs, 0x103f2af3
+            pawn.Props["SavedPrePivotZ"] = spz;
         }
 
         // AActor::fixedTurn (Engine.dll.c:120438): step a 16-bit angle from cur toward
@@ -540,13 +619,27 @@ namespace HP1.UEScript
         // else), clamped to ±RotationRate.Roll, blended at t=min(5dt,1) after
         // normalizing the current roll for continuity. Lateral = dv/dt projected
         // on the new-rotation world Y basis (the shipped GMath /= FRotator coords).
+        // Original: Engine.dll ?physicsRotation@APawn@@QAEXMVFVector@@@Z [HP1 0x103e5950] [HP2 0x103f2fe0]
         public void PhysicsRotation(UEObject pawn, float dt, Vector3 oldVelocity)
         {
             UERotator rate = UEInterpreter.AsRotator(pawn.GetProp(PK.RotationRate));
             UERotator desired = UEInterpreter.AsRotator(pawn.GetProp(PK.DesiredRotation));
             UERotator rot = UEInterpreter.AsRotator(pawn.GetProp(PK.Rotation));
-            pawn.Props["bFixedRotationDir"] = false; // 0x1f8 &~2 |4 (64092)
-            pawn.Props["bRotateToDesired"] = true;
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2)
+            {
+                // HP2 [0x103f3022..0x103f304b]: !bRotateToDesired && bFixedRotationDir -> AActor::physicsRotation(DeltaTime)
+                // and return; the flags are never forced.
+                if (!UEInterpreter.ToBool(pawn.GetProp(PK.bRotateToDesired)) && UEInterpreter.ToBool(pawn.GetProp(PK.bFixedRotationDir)))
+                {
+                    ActorPhysicsRotation(pawn.Interp, pawn, dt);
+                    return;
+                }
+            }
+            else
+            {
+                pawn.Props["bFixedRotationDir"] = false; // 0x1f8 &~2 |4 (64092)
+                pawn.Props["bRotateToDesired"] = true;
+            }
             int yaw = rot.Yaw, pitch = rot.Pitch, roll = rot.Roll;
             int yawStep = (int)Math.Round(rate.Yaw * dt, MidpointRounding.ToEven);
             if (desired.Yaw != rot.Yaw) yaw = FixedTurn(rot.Yaw, desired.Yaw, yawStep);
@@ -659,6 +752,51 @@ namespace HP1.UEScript
                 ? UEInterpreter.AsRotator(list[idx]) : new UERotator(0, 0, 0);
         }
 
+        // HP2's bCollideWorld mover fall: KeyPos / OldPos add Location − before as the register holds it.
+        // Original: Engine.dll ?physMovingBrush@AActor@@QAEXM@Z [HP2 0x104137a0] (the fall's key update [HP2 0x10413a48..0x10413aae])
+        internal static float Hp2MoverFallAdd(float after, float before, float v) => R64(R64(X87(after) - X87(before)) + X87(v)).ToFloat();
+
+        // HP2's mover target Z: ((KeyPos + BasePos − OldPos)·t + OldPos) − Location in the register, one fstp.
+        // Original: Engine.dll ?physMovingBrush@AActor@@QAEXM@Z [HP2 0x104137a0] (the target's Z [HP2 0x10413dbc..0x10413e68])
+        internal static float Hp2MoverTargetZ(float keyZ, float baseZ, float oldZ, float t, float locZ)
+            => R64(R64(R64(R64(R64(X87(keyZ) + X87(baseZ)) - X87(oldZ)) * X87(t)) + X87(oldZ)) - X87(locZ)).ToFloat();
+
+        // HP2's spring glide (MoverGlideType 2): the mover reaches the key at s0 = (MoveTime − MoverSpringTime) / MoveTime of
+        // the alpha (s0 outside (0, 1) is 0.75), then overshoots back in MoverFluctuations half-waves of width
+        // w = (1 − s0) / 2n, each a linear dip to 1 − amp / 2^i at its centre c = s0 + (2i + 1)·w (amp outside (0, 1) is 0.1).
+        // Every step as the disassembly: c in the register with its float copy, lo = c − w unrounded, hi = float(c + w), the
+        // compares against the float alpha, each t one fstp.
+        // Original: Engine.dll ?physMovingBrush@AActor@@QAEXM@Z [HP2 0x104137a0] (the spring glide [HP2 0x10413b94..0x10413cf7])
+        internal static float Hp2SpringAlpha(float a, float moveTime, float springTime, float maxAmplitude, byte fluctuations)
+        {
+            const int C0 = X87Ext.C0, C3 = X87Ext.C3;
+            static X87Ext D(double v) => X87Ext.From(v);
+            float s0 = X87Ext.Div64(R64(X87(moveTime) - X87(springTime)), X87(moveTime)).ToFloat();
+            float amp = maxAmplitude;
+            int n = fluctuations == 0 ? 1 : fluctuations;
+            if (!((X87Ext.Fcom(X87(s0), D(0.0)) & (C0 | C3)) == 0 && (X87Ext.Fcom(X87(s0), D(1.0)) & C0) != 0)) s0 = 0.75f;
+            if (!((X87Ext.Fcom(X87(amp), D(0.0)) & (C0 | C3)) == 0 && (X87Ext.Fcom(X87(amp), D(1.0)) & C0) != 0)) amp = 0.1f;
+            if ((X87Ext.Fcom(X87(a), X87(s0)) & (C0 | C3)) != 0) return X87Ext.Div64(X87(a), X87(s0)).ToFloat();   // a <= s0, NaN
+            float w = X87Ext.Div64(R64(D(1.0) - X87(s0)), X87Ext.From(n) + X87Ext.From(n)).ToFloat();
+            for (int i = 0; i < n; i++)
+            {
+                X87Ext c = R64(R64(R64(X87Ext.From(i) + X87Ext.From(i) + D(1.0)) * X87(w)) + X87(s0));
+                float cf = c.ToFloat();
+                X87Ext lo = R64(c - X87(w));
+                float hi = R64(X87(cf) + X87(w)).ToFloat();
+                X87Ext ai = X87Ext.Div64(X87(amp), X87Ext.From(1 << i));
+                float aif = ai.ToFloat();
+                float slope = X87Ext.Div64(ai, X87(w)).ToFloat();
+                int aboveLo = X87Ext.Fcom(X87(a), lo) & (C0 | C3), toC = X87Ext.Fcom(X87(a), X87(cf)) & (C0 | C3);
+                if (aboveLo == 0 && toC != 0)                                  // lo < a <= c: the falling half
+                    return R64(R64(R64(D(1.0) - R64(X87(slope) * X87(a))) - X87(aif)) + R64(X87(slope) * X87(cf))).ToFloat();
+                if (toC != 0) continue;                                         // a <= c (or NaN) and not above lo
+                if ((X87Ext.Fcom(X87(a), X87(hi)) & (C0 | C3)) == 0) continue;  // a > hi
+                return R64(R64(R64(R64(X87(slope) * X87(a)) + D(1.0)) - X87(aif)) - R64(X87(slope) * X87(cf))).ToFloat();
+            }
+            return 1f;
+        }
+
         // ── APawn::physMovingBrush integrator (Engine.dll.c:92396) — advance
         // PhysAlpha at PhysRate, ease with MoverGlideType (1 = smoothstep
         // 3t²−2t³, else linear), interpolate the pose from OldPos/OldRot toward
@@ -672,8 +810,10 @@ namespace HP1.UEScript
         // never advance it. Moved verbatim (the body was already plain C# over
         // Core objects, ported from the decompile); only the journal sink and
         // the event call were rebound to Core's own. ──
+        // Original: Engine.dll ?physMovingBrush@AActor@@QAEXM@Z [HP1 0x104061f0] [HP2 0x104137a0]
         public void PhysMovingBrush(UEInterpreter interp, UEObject actor, float dt)
         {
+            bool hp2 = UEGameProfile.Current.Game == UEEdition.Game.HP2;
             Vector3 startLoc = UEInterpreter.AsVector3(actor.GetProp(PK.Location));
             actor.Props["OldLocation"] = startLoc;
 
@@ -738,10 +878,17 @@ namespace HP1.UEScript
                         FindBase(interp, actor);
                     else
                     {
-                        Vector3 moved = UEInterpreter.AsVector3(actor.GetProp(PK.Location)) - before;
+                        Vector3 after = UEInterpreter.AsVector3(actor.GetProp(PK.Location));
+                        Vector3 moved = after - before;
+                        // HP2 [0x10413a48..0x10413aae]: KeyPos[KeyNum] and OldPos add Location − before as the register
+                        // holds it (fsub, then fadd of the stored value); HP1 adds the float difference.
+                        Vector3 Add(Vector3 v) => hp2
+                            ? new Vector3(Hp2MoverFallAdd(after.x, before.x, v.x), Hp2MoverFallAdd(after.y, before.y, v.y),
+                                Hp2MoverFallAdd(after.z, before.z, v.z))
+                            : v + moved;
                         if (actor.GetProp(PK.KeyPos) is System.Collections.IList kl && keyNum < kl.Count)
-                            kl[keyNum] = KeyVector(actor, "KeyPos", keyNum) + moved;
-                        actor.Props["OldPos"] = UEInterpreter.AsVector3(actor.GetProp(PK.OldPos)) + moved;
+                            kl[keyNum] = Add(KeyVector(actor, "KeyPos", keyNum));
+                        actor.Props["OldPos"] = Add(UEInterpreter.AsVector3(actor.GetProp(PK.OldPos)));
                         fell = true;
                     }
                 }
@@ -750,8 +897,20 @@ namespace HP1.UEScript
                 if (newAlpha <= 1f) remaining = 0f;
                 else if (physAlpha >= 1f) { remaining = 0f; newAlpha = 1f; }
                 else { remaining = (newAlpha - 1f) / (newAlpha - physAlpha) * remaining; newAlpha = 1f; }
-                bool glide = UEInterpreter.ToInt(actor.GetProp(PK.MoverGlideType)) == 1;
-                float t = glide ? 3f * newAlpha * newAlpha - 2f * newAlpha * newAlpha * newAlpha : newAlpha;
+                int glideType = UEInterpreter.ToInt(actor.GetProp(PK.MoverGlideType));
+                if (hp2 && glideType == 2)
+                {
+                    // HP2 [0x10413b29..0x10413b61]: the spring glide only toward the last key, at rest, or back to key 0
+                    int prevKey = UEInterpreter.ToInt(actor.GetProp(PK.PrevKeyNum)) & 0xff, key = UEInterpreter.ToInt(actor.GetProp(PK.KeyNum)) & 0xff;
+                    if (prevKey < key && key != (UEInterpreter.ToInt(actor.GetProp("NumKeys")) & 0xff) - 1) glideType = 0;
+                    else if (prevKey > key && key != 0) glideType = 0;
+                }
+                bool glide = glideType == 1;
+                float t = glide ? 3f * newAlpha * newAlpha - 2f * newAlpha * newAlpha * newAlpha
+                    : hp2 && glideType == 2 ? Hp2SpringAlpha(newAlpha, UEInterpreter.AsFloat(actor.GetProp("MoveTime")),
+                        UEInterpreter.AsFloat(actor.GetProp("MoverSpringTime")), UEInterpreter.AsFloat(actor.GetProp("MoverMaxAmplitude")),
+                        (byte)(UEInterpreter.ToInt(actor.GetProp("MoverFluctuations")) & 0xff))
+                    : newAlpha;
 
                 Vector3 basePos = UEInterpreter.AsVector3(actor.GetProp(PK.BasePos));
                 Vector3 oldPos = UEInterpreter.AsVector3(actor.GetProp(PK.OldPos));
@@ -767,12 +926,16 @@ namespace HP1.UEScript
                     oldRot.Roll + (int)Math.Round((baseRot.Roll + keyRot.Roll - oldRot.Roll) * t, MidpointRounding.ToEven));
 
                 Vector3 curLoc = UEInterpreter.AsVector3(actor.GetProp(PK.Location));
+                Vector3 delta = targetPos - curLoc;
+                // HP2 [0x10413dbc..0x10413e68]: Z runs (KeyPos + BasePos − OldPos)·t + OldPos − Location in the register,
+                // one rounding at the end; X and Y are stored at each step as in HP1.
+                if (hp2) delta.z = Hp2MoverTargetZ(keyPos.z, basePos.z, oldPos.z, t, curLoc.z);
                 // Its own FCheckResult(1.0) for EACH move (Engine.dll.c:92586-92591):
                 // a standing mover (fast path) and a refusal read Time = 1. PhysAlpha
                 // grows only if MoveActor RETURNED 1 (92638-92640): an encroachment
                 // refusal and bStatic/!bMovable do not advance alpha.
                 var interpHit = new MoveCheck();
-                bool moveOk = MoveActor(interp, actor, targetPos - curLoc, targetRot,
+                bool moveOk = MoveActor(interp, actor, delta, targetRot,
                     bTest: false, bIgnorePawns: false, bIgnoreBases: false, bNoFail: false, interpHit);
                 float frac = interpHit.Time;
                 if (moveOk) actor.Props["PhysAlpha"] = physAlpha + (newAlpha - physAlpha) * frac;
@@ -795,6 +958,12 @@ namespace HP1.UEScript
                 else
                 {
                     actor.Props["bInterpolating"] = false; // blocked mid-move
+                    if (hp2)
+                    {
+                        // HP2 [0x10413f0f..0x10413f48]: the blocking hit is kept in Mover.HitPosition / HitNormal
+                        actor.Props["HitPosition"] = interpHit.Location;
+                        actor.Props["HitNormal"] = interpHit.Normal;
+                    }
                     if (HP1.Core.UETrace.Enabled)
                         HP1.Core.UETrace.Log($"mover_blocked actor={actor.GetProp(PK.Name)}"
                             + $" keynum={keyNum} frac={frac} loc={actor.GetProp(PK.Location)}");

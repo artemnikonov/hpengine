@@ -75,7 +75,7 @@ namespace HP1.UEScript
             string key = UEClassRegistry.PhysicalPath(at.Value.PackagePath);
             if (!_resourcePackagesByPath.TryGetValue(key, out UELib.UnrealPackage pkg))
             {
-                pkg = UELib.UnrealLoader.LoadPackage(at.Value.PackagePath, System.IO.FileAccess.Read);
+                pkg = HP1.UEScript.UEPackageOpen.Load(at.Value.PackagePath, System.IO.FileAccess.Read);
                 pkg.InitializePackage(UELib.UnrealPackage.InitFlags.All);
                 _resourcePackagesByPath[key] = pkg;
             }
@@ -254,6 +254,11 @@ namespace HP1.UEScript
         {
             if (cls == null || string.IsNullOrEmpty(name)) return null;
             return _classDefaults.TryGetValue(cls, out var d) ? d.GetProp(name) : UEObject.ClassDefaultVector(cls, name);
+        }
+        public object ClassDefaultScalarNoAlloc(UClass cls, string name)
+        {
+            if (cls == null || string.IsNullOrEmpty(name)) return null;
+            return _classDefaults.TryGetValue(cls, out var d) ? d.GetProp(name) : UEObject.ClassDefaultScalar(cls, name);
         }
 
         public object GetClassDefault(UClass cls, string name)

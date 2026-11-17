@@ -31,19 +31,19 @@
 // order M_local·M_parent, 492/492 vertices). Here it is applied to the
 // animated bone places.
 //
-// WHAT IS NOT HERE, STATED OUT LOUD:
-//  * the pose of a CHANNEL actor itself (AnimBone ≠ 0 && Physics ≠ Trailer) — LOUD
-//    STOP: a channel has no pose of its own. Overlaying channels onto the OWNER's pose
-//    is ported (OverlayChannel);
-//  * the animation StartBone offset (walking parents of the animation root above
-//    the mesh root, 142380-142600) — STOP when parent ≠ self at the root;
-//  * bAnimByOwner in GetFrame — STOP (no carriers in the campaign);
-//  * GetFrame of a drawn mesh is ported (RenderMeshFrame): a full ApplyAnim of
-//    every DT_Mesh actor drawn by DrawActorSprite, in DrawFrame order
-//    (RenderLevelPass.DrawMeshSprite).
+// THE ANIMATION ROOT'S ANCESTORS (StartBone walk, 142364-142560; RootInit walk 142567-142730): the mesh root's
+// track may have parents in the animation's RefBones; they are sampled and composed onto the root place
+// (RootParentChain, ParentPoint).
+// CHANNELS: overlaying them onto the OWNER's pose is ported (OverlayChannel; a channel at bone 0 runs the full
+// body on the channel and copies every place to the owner). The pose of a CHANNEL actor itself (AnimBone ≠ 0 &&
+// Physics ≠ Trailer) stays a LOUD STOP: the original reads bone 0 of the channel's own cache, which the
+// channel-mode body never writes (FMemCache leftovers; skelanim_oracle scenario channel_direct).
+// bAnimByOwner: GetFrame takes the pose of the OWNER (AnimSourceOf).
+// GetFrame of a drawn mesh is ported (RenderMeshFrame): a full ApplyAnim of every DT_Mesh actor drawn by
+// DrawActorSprite, in DrawFrame order (RenderLevelPass.DrawMeshSprite).
 //
 // ORACLE: the real ApplyAnim/GetRootMovement/AdjustRootMovement/
-// GetBoneCoords/GetMeshCoords under unicorn.
+// GetBoneCoords/GetMeshCoords/GetRenderBoundingBox/GetFrame under unicorn (skelanim_oracle.py).
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -144,10 +144,10 @@ namespace HP1.UEScript
         }
 
         // Reference to the mesh DefaultAnimation — ApplyAnim WRITES it into an empty SkelAnim
-        // (142119-142121). The mesh animation object lives in the mesh package (the reader
-        // stops loudly on a cross-package reference).
+        // (142119-142121). An export of the mesh package, or an import with its own full path.
         internal static UEResourceRef DefaultAnimationRef(UEResourceRef meshRef, Hp1SkeletalMesh mesh)
         {
+            if (mesh.AnimObjectPath is not null) return new UEResourceRef("Animation", mesh.AnimObject, mesh.AnimObjectPath);
             string path = meshRef.ObjectPath;
             int dot = path is null ? -1 : path.IndexOf('.');
             return new UEResourceRef("Animation", mesh.AnimObject,
@@ -183,34 +183,45 @@ namespace HP1.UEScript
         //     block, then tween with the previous buffer (weight 1−TweenAlpha if a pose
         //     already existed and TweenRate≠0);
         //  7. full call: header = (Seq, Frame, Alpha), HasPose, channels.
-        internal SkelCache ApplyAnim(UEObject actor, bool rootOnly)
+        // mesh — `this` of the original call when it is not the actor's own Mesh (GetFrame's bAnimByOwner route applies
+        // the drawn mesh to the owner; a channel overlay applies the owner's mesh to the channel). copyTo — param_2 of the
+        // original when it is another actor's header (a channel at bone 0): every place written into this actor's cache
+        // is copied there too (0x1041d51f..0x1041d541, 0x1041d6xx), a memoised call copies nothing.
+        // HP2 [HP2 0x1042a520]: the same body over a header with one more dword at +8 (the AnimBone its bone->track map was
+        // built for: the map is rebuilt when the animation OR the actor's AnimBone changed [HP2 0x1042a7db..0x1042a7ea,
+        // 0x1042a944..0x1042a94f]; the port finds the track by name on every call, which is that rebuilt map); its key
+        // samplers call FAnimVec::Quat (Hp1AnimTrack.DecodeKeyQuaternion) and the position blend (LerpPosition), whose HP2
+        // bodies differ.
+        // Original: Engine.dll ?ApplyAnim@USkeletalMesh@@ABEXPAVAActor@@PAUCFSkelHeader@1@_N@Z [HP1 0x1041ba60] [HP2 0x1042A520]
+        internal SkelCache ApplyAnim(UEObject actor, bool rootOnly, UEResourceRef mesh = null, BonePlace[] copyTo = null)
         {
             if (actor is null) throw new ArgumentNullException(nameof(actor));
             if (MeshCatalog is null)
                 throw new InvalidOperationException("skeletal pose without a mesh catalog — LoadMeshCatalogFromInstall not called");
-            if (actor.GetProp(PK.Mesh) is not UEResourceRef meshRef
+            if ((mesh ?? actor.GetProp(PK.Mesh)) is not UEResourceRef meshRef
                 || !meshRef.Class.Equals("SkeletalMesh", StringComparison.OrdinalIgnoreCase))
                 throw new NotSupportedException(
                     $"skeletal pose requires a SkeletalMesh actor={actor.GetProp(PK.Name)}");
-            // Channel animation (AnimBone on a non-trailer) — the owner's pose
-            // is overlaid FROM the channel (OverlayChannel); a channel has no pose of its own.
-            // Unreachable: campaign channels are AnimChannel (DrawType=0), cHarryAnimChannel
-            // and fluffyHead* without DrawType/Physics/BonePos in scripts: DrawActorSprite does
-            // not draw them and nothing asks their BonePos (7 calls of 257 in .uc — all on
-            // self, on non-channels).
+            // ApplyAnim on a CHANNEL actor itself (AnimBone on a non-trailer: the cStack_1d branch, 0x1041ba9a): the body
+            // writes only the channel's bone range into the channel's own cache, never bone 0, so every consumer
+            // (GetFrame, GetBoneCoords, GetRenderBoundingBox with a sequence box) reads FMemCache leftovers there — the
+            // original's result is undefined (skelanim_oracle channel_direct: the NaN fill of bone 0 survives every call).
+            // The owner's pose takes the channel through OverlayChannel. Campaign channels are AnimChannel (DrawType=0),
+            // cHarryAnimChannel and fluffyHead* without DrawType/Physics/BonePos in scripts.
             if (UEInterpreter.ToInt(actor.GetProp(PK.AnimBone)) != 0
                 && UEInterpreter.ToInt(actor.GetProp(PK.Physics)) != 11)
                 throw new NotSupportedException(
-                    $"skeletal pose: AnimChannel routing (AnimBone={actor.GetProp(PK.AnimBone)}) not ported actor={actor.GetProp(PK.Name)}");
+                    $"skeletal pose of a channel actor itself (AnimBone={actor.GetProp(PK.AnimBone)}): the original reads bone 0 of the "
+                    + $"channel's cache, never written in channel mode — undefined (STOP) actor={actor.GetProp(PK.Name)}");
 
-            Hp1SkeletalMesh mesh = MeshCatalog.Get(meshRef);
-            int n = mesh.Bones.Length;
-            if (n == 0) throw new InvalidDataException($"skeletal pose: mesh {mesh.Name} has no bones");
+            Hp1SkeletalMesh skel = MeshCatalog.Get(meshRef);
+            int n = skel.Bones.Length;
+            if (n == 0) throw new InvalidDataException($"skeletal pose: mesh {skel.Name} has no bones");
 
             // A cache of another mesh is dropped and recreated (FMemCache::Flush).
             if (!_skelCache.TryGetValue(actor, out SkelCache cache)
-                || !string.Equals(cache.Mesh, mesh.Name, StringComparison.OrdinalIgnoreCase))
-                _skelCache[actor] = cache = new SkelCache { Mesh = mesh.Name, Places = new BonePlace[n] };
+                || !string.Equals(cache.Mesh, skel.Name, StringComparison.OrdinalIgnoreCase))
+                _skelCache[actor] = cache = new SkelCache { Mesh = skel.Name, Places = new BonePlace[n] };
 
             string seq = SequenceNameOf(actor);
             if (!SameName(cache.Seq, seq) && !rootOnly)
@@ -218,27 +229,31 @@ namespace HP1.UEScript
                 cache.RootInit = false;
                 cache.RootFrame = 0f;
             }
-            cache.MeshCoords = MeshCoordsMemo(actor, cache);
+            cache.MeshCoords = MeshCoordsMemo(actor, cache, meshRef);
 
             float frame = UEInterpreter.AsFloat(actor.GetProp(PK.AnimFrame));
             float alpha = UEInterpreter.AsFloat(actor.GetProp(PK.TweenAlpha));
             bool memo = SameName(cache.Seq, seq) && cache.Frame == frame && cache.Alpha == alpha;
             if (!memo)
             {
-                if (actor.GetProp(PK.SkelAnim) is not UEResourceRef && mesh.AnimObject is not null)
-                    actor.Props["SkelAnim"] = DefaultAnimationRef(meshRef, mesh);
-                IReadOnlyDictionary<string, Hp1AnimSequence> anim = AnimationOf(actor, mesh);
+                if (actor.GetProp(PK.SkelAnim) is not UEResourceRef && skel.AnimObject is not null)
+                    actor.Props["SkelAnim"] = DefaultAnimationRef(meshRef, skel);
+                IReadOnlyDictionary<string, Hp1AnimSequence> anim = AnimationOf(actor, skel);
                 Hp1AnimSequence sequence = anim is not null && anim.TryGetValue(seq, out Hp1AnimSequence found) ? found : null;
                 int count = rootOnly ? 1 : n;
                 if (sequence is null)
                 {
-                    for (int i = 0; i < count; i++) cache.Places[i] = RefPlace(mesh.Bones[i]);
+                    for (int i = 0; i < count; i++)
+                    {
+                        cache.Places[i] = RefPlace(skel.Bones[i]);
+                        if (copyTo is not null) copyTo[i] = cache.Places[i];
+                    }
                     if (rootOnly) return cache;
                 }
                 else
                 {
                     if (sequence.Movement.Tracks.Length != 0)
-                        SampleBones(actor, mesh, sequence, cache, seq, frame, alpha, count);
+                        SampleBones(actor, skel, sequence, cache, seq, frame, alpha, count, copyTo);
                     if (rootOnly) return cache;
                 }
             }
@@ -257,13 +272,21 @@ namespace HP1.UEScript
             // ULevel::DestroyActor (XLevel vtable +0x98) and removed from the array.
             // ONLY a full call does this — i.e. drawing the owner (GetFrame),
             // GetBoneCoords(bone ≠ 0) and pose points; not a per-tick sweep of all owners.
+            OverlayChannelsOf(actor, meshRef, skel, cache.Places);
+            return cache;
+        }
+
+        // The tail's AuxAnims pass (0x1041d5a9..0x1041d746) over `places`, the buffer of the actor's own header; a channel
+        // call runs the same tail on the channel's header (its own AuxAnims).
+        void OverlayChannelsOf(UEObject actor, UEResourceRef meshRef, Hp1SkeletalMesh skel, BonePlace[] places)
+        {
             if (_animChannels.TryGetValue(actor, out List<AnimChannelEntry> channels))
             {
                 bool reaped = false;
                 for (int i = 0; i < channels.Count; i++)
                 {
                     UEObject ch = channels[i].Object;
-                    OverlayChannel(ch, meshRef, mesh, cache.Places);
+                    OverlayChannel(ch, meshRef, skel, places);
                     if (!UEInterpreter.ToBool(ch.GetProp(PK.bAnimTransient)) || UEInterpreter.ToBool(ch.GetProp(PK.bAnimLoop))
                         || UEInterpreter.AsFloat(ch.GetProp(PK.AnimLast)) > UEInterpreter.AsFloat(ch.GetProp(PK.AnimFrame)))
                         continue;
@@ -279,10 +302,9 @@ namespace HP1.UEScript
                     SyncAuxAnims(actor);
                 }
             }
-            return cache;
         }
 
-        // GetMeshCoords (MeshCoordsOf) reads exactly these actor properties, the shipped mesh scalars of the Mesh
+        // GetMeshCoords (MeshCoordsOf) reads exactly these actor properties (HP2: and CoordsInputsHp2), the shipped mesh scalars of the Mesh
         // reference (through MeshHashFieldsHook: a pure lookup in production; the delegate is part of the key) and
         // the caller's precision window; nothing else.
         // HP1_FRAME_CACHE_VERIFY=1 recomputes every hit.
@@ -291,28 +313,34 @@ namespace HP1.UEScript
             PK.Mesh, PK.DrawScale, PK.Wideness, PK.PrePivot, PK.Rotation, PK.Location,
             PK.bAlignBottom, PK.bCollideWorld, PK.Physics, PK.CollideType, PK.CollisionHeight,
         };
+        // HP2's GetMeshCoords reads two more (SavedPrePivotZ, bAlignBottomAlways: MeshCoordsOf, AlignBottomActive).
+        static readonly string[] CoordsInputsHp2 = { "SavedPrePivotZ", "bAlignBottomAlways" };
 
-        BrushCoords MeshCoordsMemo(UEObject actor, SkelCache cache)
+        // meshRef — the mesh the original's GetMeshCoords(this, actor) uses (input 0 of the memo, PK.Mesh's slot).
+        BrushCoords MeshCoordsMemo(UEObject actor, SkelCache cache, UEResourceRef meshRef)
         {
             bool pc24 = UEWorldFrameProducer.FastMathWindow;
             object[] inputs = cache.CoordsInputs;
-            bool same = inputs is not null && cache.CoordsPc24 == pc24 && ReferenceEquals(cache.CoordsHook, MeshHashFieldsHook);
-            for (int i = 0; same && i < CoordsInputKeys.Length; i++)
-                same = ReferenceEquals(inputs[i], actor.GetProp(CoordsInputKeys[i]));
+            int nInputs = CoordsInputKeys.Length + (UEGameProfile.Current.Game == UEEdition.Game.HP2 ? CoordsInputsHp2.Length : 0);
+            object Input(int i) => i == 0 ? meshRef : i < CoordsInputKeys.Length ? actor.GetProp(CoordsInputKeys[i])
+                : actor.GetProp(CoordsInputsHp2[i - CoordsInputKeys.Length]);
+            bool same = inputs is not null && inputs.Length == nInputs && cache.CoordsPc24 == pc24 && ReferenceEquals(cache.CoordsHook, MeshHashFieldsHook);
+            for (int i = 0; same && i < nInputs; i++)
+                same = ReferenceEquals(inputs[i], Input(i));
             if (same)
             {
                 if (FrameCacheVerify.Enabled)
                 {
-                    BrushCoords fresh = MeshCoordsOf(actor), memo = cache.MeshCoords;
+                    BrushCoords fresh = MeshCoordsOf(actor, meshRef), memo = cache.MeshCoords;
                     FrameCacheVerify.Hit("mesh_coords", SameCoords(fresh, memo) ? null
                         : $"{actor.GetProp(PK.Name)} memo={memo.Origin} fresh={fresh.Origin}");
                 }
                 return cache.MeshCoords;
             }
             if (FrameCacheVerify.Enabled) FrameCacheVerify.Miss("mesh_coords");
-            BrushCoords c = MeshCoordsOf(actor);
-            inputs ??= cache.CoordsInputs = new object[CoordsInputKeys.Length];
-            for (int i = 0; i < CoordsInputKeys.Length; i++) inputs[i] = actor.GetProp(CoordsInputKeys[i]);
+            BrushCoords c = MeshCoordsOf(actor, meshRef);
+            if (inputs is null || inputs.Length != nInputs) inputs = cache.CoordsInputs = new object[nInputs];
+            for (int i = 0; i < nInputs; i++) inputs[i] = Input(i);
             cache.CoordsPc24 = pc24;
             cache.CoordsHook = MeshHashFieldsHook;
             return c;
@@ -327,7 +355,7 @@ namespace HP1.UEScript
         }
 
         void SampleBones(UEObject actor, Hp1SkeletalMesh mesh, Hp1AnimSequence sequence, SkelCache cache,
-            string seq, float frame, float alpha, int count)
+            string seq, float frame, float alpha, int count, BonePlace[] copyTo)
         {
             float trackTime = sequence.Movement.TrackTime;
             float t = Math.Min(frame, 1f) * trackTime;
@@ -346,17 +374,63 @@ namespace HP1.UEScript
                     place = SampleTrack(tr, t, trackTime);
                     if (i == 0)
                     {
-                        // The animation root must be self-parented — otherwise it
-                        // needs the StartBone walk (142380-142560), not ported.
-                        if (sequence.Movement.RefBones[track].ParentIndex != track)
-                            throw new NotSupportedException(
-                                $"skeletal pose: animation root parent chain unsupported {mesh.Name}.{sequence.Name}");
-                        if (animMove) RootBlock(mesh, tr, cache, seq, frame, ref place);
+                        RootParentChain(sequence, track, t, trackTime, ref place);
+                        if (animMove) RootBlock(mesh, sequence, track, cache, seq, frame, ref place);
                     }
                 }
                 if (wOld != 0f) place = BlendPlace(place, cache.Places[i], wOld);
                 cache.Places[i] = place;
+                if (copyTo is not null) copyTo[i] = place;
             }
+        }
+
+        // StartBone walk (Engine.dll.c:142364-142560, disasm 0x1041c3f7..0x1041ca9e): bone 0's track may have ancestors
+        // in the animation's RefBones (+0x28, stride 0xc, Parent +8); from its parent up to the self-parented one each
+        // ancestor's track is sampled at the same time (the main sampling body) and composed onto the place:
+        //   quaternion, inline 0x1041c928..0x1041ca07 (p = ancestor, c = place; one register chain per component):
+        //     x = ((py·cz − cx·pw) − px·cw) − pz·cy        y = ((cx·pz − pw·cy) − py·cw) − px·cz
+        //     z = ((px·cy − pw·cz) − pz·cw) − cx·py        w = ((pz·cz + py·cy) + cx·px) − pw·cw
+        //   position = FCoords(ancestor place) applied as a point (ParentPoint, 0x1041ca0d..0x1041ca71).
+        // A parent outside the tracks reads past the array and a chain that never reaches a self-parented bone does
+        // not end in the original: both are refused.
+        // HP2 [HP2 0x1042b41c..0x1042b516]: x, y, z the same chains (commuted products), w = ((cx·px + cz·pz) + cy·py) −
+        // cw·pw; the position through ParentPoint's HP2 StartBone order.
+        static void RootParentChain(Hp1AnimSequence sequence, int track, float sampleTime, float trackTime, ref BonePlace place)
+        {
+            Hp1AnimBone[] refBones = sequence.Movement.RefBones;
+            Hp1AnimTrack[] tracks = sequence.Movement.Tracks;
+            for (int k = track, parent = refBones[k].ParentIndex, steps = 0; parent != k; k = parent, parent = refBones[k].ParentIndex)
+            {
+                if (parent < 0 || parent >= tracks.Length || parent >= refBones.Length || ++steps > refBones.Length)
+                    throw new InvalidDataException(
+                        $"skeletal pose: animation root ancestor {parent} of {sequence.Name} outside the tracks or a cycle (the original reads past the array or does not end)");
+                BonePlace p = SampleTrack(tracks[parent], sampleTime, trackTime), c = place;
+                bool pc24 = UEWorldFrameProducer.FastMathWindow;
+                X87Ext R(X87Ext v) => pc24 ? X87Ext.Round24(v) : X87Ext.Round64(v);
+                X87Ext M(float a, float b) => R(X87Ext.From(a) * X87Ext.From(b));
+                place.QX = R(R(R(M(p.QY, c.QZ) - M(c.QX, p.QW)) - M(p.QX, c.QW)) - M(p.QZ, c.QY)).ToFloat();
+                place.QY = R(R(R(M(c.QX, p.QZ) - M(p.QW, c.QY)) - M(p.QY, c.QW)) - M(p.QX, c.QZ)).ToFloat();
+                place.QZ = R(R(R(M(p.QX, c.QY) - M(p.QW, c.QZ)) - M(p.QZ, c.QW)) - M(c.QX, p.QY)).ToFloat();
+                bool hp2 = UEGameProfile.Current.Game == UEEdition.Game.HP2;
+                place.QW = hp2 ? R(R(R(M(c.QX, p.QX) + M(c.QZ, p.QZ)) + M(c.QY, p.QY)) - M(c.QW, p.QW)).ToFloat()
+                    : R(R(R(M(p.QZ, c.QZ) + M(p.QY, c.QY)) + M(c.QX, p.QX)) - M(p.QW, c.QW)).ToFloat();
+                place.Pos = ParentPoint(CoordsOfPlace(p), c.Pos, startBoneHp2: hp2);
+            }
+        }
+
+        // A point through an ancestor's FCoords, ((v.x·X + v.z·Z) + v.y·Y) + Origin per component in the register, one
+        // fstp (StartBone walk 0x1041ca0d..0x1041ca71, RootInit walk 0x1041d01b..0x1041d0ab). The body sets no control
+        // word: PC64 in game logic, PC24 inside the render window. HP2's StartBone walk sums ((v.z·Z + v.y·Y) + v.x·X) +
+        // Origin [HP2 0x1042b3ba..0x1042b3f6]; its RootInit walk keeps HP1's order [HP2 0x1042ba8d..0x1042bb0e].
+        static Vector3 ParentPoint(in BoneWorld f, Vector3 v, bool startBoneHp2 = false)
+        {
+            bool pc24 = UEWorldFrameProducer.FastMathWindow;
+            X87Ext R(X87Ext x) => pc24 ? X87Ext.Round24(x) : X87Ext.Round64(x);
+            X87Ext M(float a, float b) => R(X87Ext.From(a) * X87Ext.From(b));
+            float C(float xa, float ya, float za, float o) => startBoneHp2
+                ? R(R(R(M(v.z, za) + M(v.y, ya)) + M(v.x, xa)) + X87Ext.From(o)).ToFloat()
+                : R(R(R(M(v.x, xa) + M(v.z, za)) + M(v.y, ya)) + X87Ext.From(o)).ToFloat();
+            return new Vector3(C(f.X.x, f.Y.x, f.Z.x, f.Origin.x), C(f.X.y, f.Y.y, f.Z.y, f.Origin.y), C(f.X.z, f.Y.z, f.Z.z, f.Origin.z));
         }
 
         // ── ROOT BLOCK (bAnimMove, Engine.dll.c:142567-142858; disasm
@@ -372,14 +446,22 @@ namespace HP1.UEScript
         //    per-component return within |last − first|·(AnimFrame|1 −
         //    RootFrame), where first/last are the RAW keys 0 and PositionCount−1
         //    (0x1041d1ef-0x1041d402); then RootFrame = AnimFrame.
-        static void RootBlock(Hp1SkeletalMesh mesh, Hp1AnimTrack track, SkelCache cache,
+        // RootInit with ancestors (0x1041cb54..0x1041d0c6): the raw key 0 goes through every ancestor of the root track,
+        // each sampled at time 0, position only (ParentPoint).
+        static void RootBlock(Hp1SkeletalMesh mesh, Hp1AnimSequence sequence, int trackIndex, SkelCache cache,
             string seq, float frame, ref BonePlace place)
         {
+            Hp1AnimTrack track = sequence.Movement.Tracks[trackIndex];
             if (track.PositionCount <= 0)
                 throw new InvalidDataException("bAnimMove root track has no position keys");
             if (!cache.RootInit)
             {
-                cache.RootLocation = track.DecodePosition(0);
+                Vector3 rootLocation = track.DecodePosition(0);
+                Hp1AnimBone[] refBones = sequence.Movement.RefBones;
+                for (int k = trackIndex, parent = refBones[k].ParentIndex; parent != k; k = parent, parent = refBones[k].ParentIndex)
+                    rootLocation = ParentPoint(CoordsOfPlace(SampleTrack(sequence.Movement.Tracks[parent], 0f, sequence.Movement.TrackTime)),
+                        rootLocation);
+                cache.RootLocation = rootLocation;
                 cache.Adjust = Vector3.zero;
                 cache.RootInit = true;
             }
@@ -403,6 +485,17 @@ namespace HP1.UEScript
                 // fld AnimFrame (or 1.0); fsub RootFrame; each fmul |last − first| stored (0x1041d30a..0x1041d33b).
                 double advance = pc24 ? (frame == 0f ? 1f : frame) - cache.RootFrame : (double)(frame == 0f ? 1f : frame) - cache.RootFrame;
                 float lx = (float)(advance * ax), ly = (float)(advance * ay), lz = (float)(advance * az);
+                // HP2 keeps last.z − first.z on the x87 stack (last.z the fimul of the key by the register scale) and
+                // multiplies its absolute value, not a stored float, by the advance [HP2 0x1042bcde..0x1042bd87]; x and y as
+                // HP1. At PC24 the register holds that float anyway.
+                if (!pc24 && UEGameProfile.Current.Game == UEEdition.Game.HP2 && float.IsFinite(track.PositionScale))
+                {
+                    X87Ext scale = R64(X87Ext.From(track.PositionScale) * X87Ext.From(1f / 32767f));
+                    X87Ext lastZ = R64(X87Ext.From((int)track.PositionKeys[(track.PositionCount - 1) * 3 + 2]) * scale);
+                    X87Ext dzR = R64(lastZ - X87Ext.From(first.z)), adv = R64(X87Ext.From(frame == 0f ? 1f : frame) - X87Ext.From(cache.RootFrame));
+                    X87Ext L(X87Ext a) => R64(adv * (a.Sign < 0 ? -a : a));
+                    lx = L(X87Ext.From(ax)).ToFloat(); ly = L(X87Ext.From(ay)).ToFloat(); lz = L(dzR).ToFloat();
+                }
                 static float Clamp(float v, float lim) => v < -lim ? -lim : (v > lim ? lim : v);
                 float cx = Clamp(cache.Adjust.x, lx), cy = Clamp(cache.Adjust.y, ly), cz = Clamp(cache.Adjust.z, lz);
                 cache.RootDelta = new Vector3(cx + cache.RootDelta.x, cy + cache.RootDelta.y, cz + cache.RootDelta.z);
@@ -492,13 +585,16 @@ namespace HP1.UEScript
         {
             if (channel is null || channel.Destroyed) return;
             int root = UEInterpreter.ToInt(channel.GetProp(PK.AnimBone));
-            // Unreachable: campaign channel roots are
-            // 'Harry Spine1', 'bone_head{L,M,R}01' (CreateAnimChannel) and
-            // 'MTROLL Spine1' (PlayAnim with a bone); bone 0 of their meshes is 'Harry',
-            // 'lock_dummy', 'Bip01', 'MTROLL' (--meshspecials, root=).
+            // A channel at bone 0 (AnimBone 0: cStack_1d clear) runs the FULL body on the channel — its own cache, memo,
+            // tween, reference pose for bones without a track, the StartBone walk, its own header and AuxAnims — with the
+            // owner's header as param_2: every place it writes is copied to the owner. Campaign channel roots are
+            // 'Harry Spine1', 'bone_head{L,M,R}01' (CreateAnimChannel) and 'MTROLL Spine1' (PlayAnim with a bone), never
+            // bone 0 of their meshes ('Harry', 'lock_dummy', 'Bip01', 'MTROLL', --meshspecials).
             if (root == 0)
-                throw new NotSupportedException(
-                    $"skeletal pose: channel rooted at bone 0 is a full (non-routed) ApplyAnim — not ported channel={channel.GetProp(PK.Name)}");
+            {
+                ApplyAnim(channel, rootOnly: false, meshRef, copyTo: ownerLocal);
+                return;
+            }
             // 0x1041bcb5..0x1041bcfc, the same body as the owner's: an empty channel SkelAnim gets the mesh
             // DefaultAnimation (0x1041bcc7), the sequence comes from it, and only a missing sequence (GetAnimSeq null)
             // returns without writing; TrackTime 0 still samples key 0.
@@ -531,7 +627,12 @@ namespace HP1.UEScript
                 written[i] = place;
                 ownerLocal[i] = place;
             }
+            // The tail runs on the channel's header as well (0x1041d571..): HasPose, Seq, Frame, Alpha, then the
+            // channel's own AuxAnims into its own buffer (not copied to the owner).
             cache.HasPose = true; cache.Seq = seqName;
+            cache.Frame = UEInterpreter.AsFloat(channel.GetProp(PK.AnimFrame));
+            cache.Alpha = tweenAlpha;
+            OverlayChannelsOf(channel, meshRef, mesh, written);
         }
 
         // ── POSED VERTICES, IN THE WORLD: USkeletalMesh::GetFrame with UnitCoords ──
@@ -548,9 +649,8 @@ namespace HP1.UEScript
         {
             if (actor.GetProp(PK.Mesh) is not UEResourceRef meshRef)
                 throw new NotSupportedException("pose points: actor without Mesh");
-            RefuseAnimByOwner(actor, "pose points");
             Hp1SkeletalMesh mesh = MeshCatalog.Get(meshRef);
-            return PosePointsFromCache(mesh, ApplyAnim(actor, rootOnly: false), lodRequest);
+            return PosePointsFromCache(mesh, ApplyAnim(AnimSourceOf(actor), rootOnly: false, meshRef), lodRequest);
         }
 
         // World vertices from the header a full ApplyAnim (GetFrame) has just filled (a second ApplyAnim in the frame would
@@ -573,6 +673,7 @@ namespace HP1.UEScript
         // count; on the shipped data the two agree on every vertex below that count (every group's records are in
         // ascending point order and FrameVerts == Points).
         [ThreadStatic] static BrushCoords[] _poseBones;
+        // Original: Engine.dll ?GetFrame@USkeletalMesh@@UAEXPAVFVector@@HVFCoords@@PAVAActor@@AAH@Z [HP1 0x1041DF50] [HP2 0x1042C980]
         internal Vector3[] PosePointsFromCache(Hp1SkeletalMesh mesh, SkelCache cache, int lodRequest = int.MaxValue)
         {
             int nb = mesh.Bones.Length;
@@ -622,6 +723,9 @@ namespace HP1.UEScript
             }
             if (groups > nb)
                 throw new InvalidDataException($"GetFrame: {groups} weight groups but {nb} bones in {mesh.Name}");
+            // HP2 sums s = ((Y·p.y + X·p.x) + Z·p.z) + O per component [HP2 0x1042cf03..0x1042cf53], HP1 ((Z·p.z + Y·p.y) +
+            // X·p.x) + O; the accumulation after it is the same in both.
+            bool hp2 = UEGameProfile.Current.Game == UEEdition.Game.HP2;
             for (int i = 0; i < groups; i++)
             {
                 BrushCoords b = bones[i];
@@ -635,15 +739,19 @@ namespace HP1.UEScript
                     if (pc24)
                     {
                         float w = mesh.WeightValue[k] * 1.5259022e-05f;
-                        float sx = ((b.Z.x * v.z + b.Y.x * v.y) + b.X.x * v.x) + b.Origin.x;
-                        float sy = ((b.Z.y * v.z + b.Y.y * v.y) + b.X.y * v.x) + b.Origin.y;
-                        float sz = ((b.Z.z * v.z + b.Y.z * v.y) + b.X.z * v.x) + b.Origin.z;
+                        float S24(float za, float ya, float xa, float o)
+                            => hp2 ? ((ya * v.y + xa * v.x) + za * v.z) + o : ((za * v.z + ya * v.y) + xa * v.x) + o;
+                        float sx = S24(b.Z.x, b.Y.x, b.X.x, b.Origin.x);
+                        float sy = S24(b.Z.y, b.Y.y, b.X.y, b.Origin.y);
+                        float sz = S24(b.Z.z, b.Y.z, b.X.z, b.Origin.z);
                         result[point] = new Vector3(sx * w + acc.x, sy * w + acc.y, w * sz + acc.z);
                     }
                     else
                     {
                         X87Ext w = X87Ext.From(mesh.WeightValue[k]) * X(1.5259022e-05f);   // 16 x 24 bits: exact
-                        X87Ext S(float za, float ya, float xa, float o) => R64(R64(R64(M(za, v.z) + M(ya, v.y)) + M(xa, v.x)) + X(o));
+                        X87Ext S(float za, float ya, float xa, float o) => hp2
+                            ? R64(R64(R64(M(ya, v.y) + M(xa, v.x)) + M(za, v.z)) + X(o))
+                            : R64(R64(R64(M(za, v.z) + M(ya, v.y)) + M(xa, v.x)) + X(o));
                         X87Ext sx = S(b.Z.x, b.Y.x, b.X.x, b.Origin.x);
                         float sy = S(b.Z.y, b.Y.y, b.X.y, b.Origin.y).ToFloat(), sz = S(b.Z.z, b.Y.z, b.X.z, b.Origin.z).ToFloat();
                         float px = R64(sx * w).ToFloat(), py = R64(X(sy) * w).ToFloat();
@@ -654,19 +762,15 @@ namespace HP1.UEScript
             return result;
         }
 
-        // USkeletalMesh::GetFrame (Engine.dll.c:29203-29207): with bAnimByOwner and a
-        // live Owner the pose is taken from the OWNER (ApplyAnim(this mesh, Owner) — the
-        // drawn actor's mesh with the owner's cache and coords). No carriers in the
-        // campaign: no class defaults bAnimByOwner=True (--dumpdefaults over 812
-        // classes), no write in .uc, no name in .unr (only the declaration in
-        // Engine.u). So the branch is a LOUD STOP, not the actor's own pose, which
-        // would be plausible and wrong.
-        static void RefuseAnimByOwner(UEObject actor, string what)
-        {
-            if (UEInterpreter.ToBool(actor.GetProp(PK.bAnimByOwner)) && actor.GetProp(PK.Owner) is UEObject)
-                throw new NotSupportedException(
-                    $"{what}: GetFrame bAnimByOwner route (pose of Owner) not ported actor={actor.GetProp(PK.Name)}");
-        }
+        // The actor GetFrame animates: USkeletalMesh::GetFrame (disasm 0x1041df50..0x1041df7a, Engine.dll.c:29203-29207)
+        // and ULodMesh::GetFrame (0x1035e496..0x1035e4a9) take the OWNER (+0x38) when bAnimByOwner (+0x28 bit 0x80) is
+        // set and Owner is not NULL. The skeletal body then runs ApplyAnim(this mesh, Owner): the owner's animation, cache
+        // and placement with the drawn mesh (skelanim_oracle anim_by_owner); the LOD body reads only the owner's
+        // AnimSequence and AnimFrame. GetBoneCoords and GetRenderBoundingBox keep the actor itself (0x1041b319..0x1041b325).
+        // No carriers in the campaign: no class defaults bAnimByOwner=True (--dumpdefaults over 812 classes), no write in
+        // .uc, no name in .unr (only the declaration in Engine.u).
+        static UEObject AnimSourceOf(UEObject actor)
+            => UEInterpreter.ToBool(actor.GetProp(PK.bAnimByOwner)) && actor.GetProp(PK.Owner) is UEObject owner ? owner : actor;
 
         // ── BONE IN THE WORLD: USkeletalMesh::GetBoneCoords (Engine.dll.c:77972-78050)
         //
@@ -704,7 +808,10 @@ namespace HP1.UEScript
         // FCoords::FCoords(const FPlace&) — Core 0x1014f7a0..0x1014f890, operation order from the disasm: the doublings
         // and six products are stored to float, the three products with w stay on the x87 stack. The body sets no
         // control word: PC64 outside the render window (the w products and the sums wider than float), PC24 inside it
-        // (UEWorldFrameProducer.FastMathWindow: every operation rounds to float).
+        // (UEWorldFrameProducer.FastMathWindow: every operation rounds to float). At PC64 each sum is the 64-bit register
+        // (1 − (zz + yy) rounds twice at 64 bits, xy − w·z once), then one fstp dword: a 53-bit double chain rounded the
+        // same sums otherwise and left reference-pose vertices 1 ulp off (mesh_shipped_oracle.py refpose).
+        // Original: Core.dll ??0FCoords@@QAE@ABVFPlace@@@Z [HP1 0x1014F7A0]
         static BoneWorld CoordsOfPlace(in BonePlace p)
         {
             float x2 = p.QX + p.QX, y2 = p.QY + p.QY, z2 = p.QZ + p.QZ;
@@ -721,13 +828,15 @@ namespace HP1.UEScript
                     Z = new Vector3(xz - fy, fx + yz, 1f - (yy + xx)),
                 };
             }
-            double wx = (double)x2 * p.QW, wy = (double)y2 * p.QW, wz = (double)z2 * p.QW;
+            static X87Ext F(float v) => X87Ext.From(v);
+            X87Ext wx = F(x2) * F(p.QW), wy = F(y2) * F(p.QW), wz = F(z2) * F(p.QW), one = F(1f);   // float products: exact
+            float D(float a, float b) => R64(one - R64(F(a) + F(b))).ToFloat();
             return new BoneWorld
             {
                 Origin = p.Pos,
-                X = new Vector3((float)(1.0 - ((double)zz + yy)), (float)(xy - wz), (float)(wy + xz)),
-                Y = new Vector3((float)(wz + xy), (float)(1.0 - ((double)zz + xx)), (float)(yz - wx)),
-                Z = new Vector3((float)(xz - wy), (float)(wx + yz), (float)(1.0 - ((double)yy + xx))),
+                X = new Vector3(D(zz, yy), R64(F(xy) - wz).ToFloat(), R64(wy + F(xz)).ToFloat()),
+                Y = new Vector3(R64(wz + F(xy)).ToFloat(), D(zz, xx), R64(F(yz) - wx).ToFloat()),
+                Z = new Vector3(R64(F(xz) - wy).ToFloat(), R64(wx + F(yz)).ToFloat(), D(yy, xx)),
             };
         }
 
@@ -855,8 +964,7 @@ namespace HP1.UEScript
             if (mesh.WeaponBoneIndex < 0) return false;
             // GetFrame: ONE full ApplyAnim, the bone coords come from the same
             // header (a repeated ApplyAnim would reapply channels with the tween).
-            RefuseAnimByOwner(pawn, "weapon point");
-            SkelCache cache = ApplyAnim(pawn, rootOnly: false);
+            SkelCache cache = ApplyAnim(AnimSourceOf(pawn), rootOnly: false, meshRef);
             WeaponCoordsFromCache(cache, mesh, frame, out loc, out rot);
             return true;
         }
@@ -878,9 +986,11 @@ namespace HP1.UEScript
         // root reset on sequence change depend on that call.
         //
         // URender::DrawMesh (0x10b0e920): mesh IsA ULodMesh (import 0x10b74740) ->
-        // DrawLodMesh (0x10b0ff00); else the UMesh vertex branch (GetFrame +0x7c,
-        // weapon triangle Render.dll.c:9130-9512) — the campaign has no export of
-        // class Mesh (--meshspecials: 381 skeletal, 4 LodMesh); loud failure here.
+        // DrawLodMesh (0x10b0ff00); else the UMesh branch (0x10b0e996..0x10b0fe8d): GetFrame (vtable +0x7c,
+        // UMeshFramePoints) with Frame->Coords, no LOD; the triangle list is Core's (MeshTriangleOrder.UMeshOrder).
+        // Not ported, loud: RendMap 13/14/15/1 (edges as 3D lines, 0x10b0ebfb..), and the weapon triangle of a pawn
+        // (an accepted PF_Invisible triangle sets the weapon coords, 0x10b0fa4f..0x10b0fd83, read by DrawActorSprite).
+        // No shipped or downloaded-mod package has an export of class Mesh (scan 2026-11-15).
         //
         // URender::DrawLodMesh:
         //  1. fStack_78 = URender+0x3c ≠ 0 or RendMap ∈ {13,14,15,1}
@@ -909,6 +1019,19 @@ namespace HP1.UEScript
                 throw new InvalidOperationException($"DrawMesh: actor {actor.GetProp(PK.Name)} without Mesh");
             if (MeshCatalog is null)
                 throw new InvalidOperationException("DrawMesh without a mesh catalog — LoadMeshCatalogFromInstall not called");
+            if (meshRef.Class.Equals("Mesh", StringComparison.OrdinalIgnoreCase))
+            {
+                if (identityCoords)
+                    throw new NotSupportedException(
+                        $"DrawMesh UMesh branch: RendMap 13/14/15/1 draws the triangle edges as 3D lines (Render 0x10b0ebfb..) — not ported mesh={meshRef.Name}");
+                Hp1VertexMesh vm = MeshCatalog.GetVertexMesh(meshRef.Name, meshRef.ObjectPath);
+                if (UEInterpreter.ClassIsA(actor.Class, "Pawn") && Array.Exists(vm.TriPolyFlags, f => (f & 1) != 0))
+                    throw new NotSupportedException(
+                        $"DrawMesh UMesh branch: weapon triangle (PF_Invisible face) of pawn {actor.GetProp(PK.Name)} (Render 0x10b0fa4f..0x10b0fd83, WeaponLoc/WeaponRot) not ported mesh={meshRef.Name}");
+                lodPoints = UMeshFramePoints(actor, BrushCoords.Identity);
+                level = -1;
+                return false;
+            }
             if (meshRef.Class.Equals("LodMesh", StringComparison.OrdinalIgnoreCase))
             {
                 Hp1VertexMesh vm = MeshCatalog.GetVertexMesh(meshRef.Name, meshRef.ObjectPath);
@@ -918,21 +1041,23 @@ namespace HP1.UEScript
                 // ULodMesh::GetFrame (vtable +0xa4, 0x10b10270): Core keeps the vertex cache (UELevelRuntime.VertexMeshFrame).
                 int n = request < 0 ? vm.ModelVerts : request;
                 lodPoints = EvaluateVertexMeshPoints(actor, ref n);
-                // A draw without LOD (flag [ebp-0xf4] = 0) whose tween GetFrame capped the level below ModelVerts: the
-                // face loop (0x10b11270) keeps faces with FaceLevel <= n but does not collapse their wedges (0x10b112e0),
-                // and wedges at or above n read vertices the transform loop (0x10b103c3, i < n) never wrote.
+                // A draw without LOD (flag [ebp-0xf4] = 0) whose tween GetFrame capped the level below ModelVerts draws
+                // garbage in the original (D05, from the disasm): the FTransTexture buffer is a fresh FMemStack allocation
+                // of (SpecialVerts + request)·0x58 bytes made before GetFrame (0x10b101c8..0x10b1020b), the transform loop
+                // writes only i < n (0x10b103c3..), the face loop keeps faces with FaceLevel <= n (0x10b11270) and the
+                // no-LOD wedge path (0x10b1138f..0x10b11416) indexes the buffer by each wedge's point with no bound, so a
+                // wedge at a point in [n, request) reads FMemStack leftovers. Undefined in the original: a loud STOP.
                 if (request < 0 && n < vm.ModelVerts)
                     throw new NotSupportedException(
-                        $"DrawLodMesh: no-LOD draw of {actor.GetProp(PK.Name)} capped by the tween GetFrame to {n} of {vm.ModelVerts} — uncollapsed wedges read untransformed vertices (Render 0x10b112e0) mesh={meshRef.Name}");
+                        $"DrawLodMesh: no-LOD draw of {actor.GetProp(PK.Name)} capped by the tween GetFrame to {n} of {vm.ModelVerts} — the original draws wedges at points >= {n} from FMemStack leftovers (Render 0x10b1138f, undefined) mesh={meshRef.Name}");
                 level = request < 0 ? -1 : n;
                 return false;
             }
             if (!meshRef.Class.Equals("SkeletalMesh", StringComparison.OrdinalIgnoreCase))
                 throw new NotSupportedException(
-                    $"DrawMesh: mesh of class {meshRef.Class} (UMesh vertex branch, Render.dll.c:9030-9512) not ported mesh={meshRef.Name}");
+                    $"DrawMesh: mesh of class {meshRef.Class} is none of Mesh/LodMesh/SkeletalMesh mesh={meshRef.Name}");
             Hp1SkeletalMesh mesh = MeshCatalog.Get(meshRef);
-            RefuseAnimByOwner(actor, "GetFrame of a drawn mesh");
-            cache = ApplyAnim(actor, rootOnly: false);
+            cache = ApplyAnim(AnimSourceOf(actor), rootOnly: false, meshRef);
             if (mesh.SpecialVerts > 0)
                 throw new NotSupportedException(
                     $"DrawLodMesh: weapon triangle via SpecialVerts={mesh.SpecialVerts} (Render.dll.c:14256-14323) not ported mesh={mesh.Name}");
@@ -1091,6 +1216,22 @@ namespace HP1.UEScript
             return BoneWorldOf(self, mesh.FindBone(boneName ?? "")).Origin;
         }
 
+        // ── NATIVE 328 BoneRot(name) — HP2 only (HP1 registers no 328) ──
+        // Mesh IsA SkeletalMesh → OrthoRotation(GetBoneCoords(actor, BoneIndex(name))) (Core's FCoords::OrthoRotation
+        // through the import [HP2 0x104183f7], at PC64: a script native); else Rotation [HP2 0x1041841a]. BonePos's body
+        // with OrthoRotation in place of the Origin.
+        // Original: Engine.dll ?execBoneRot@AActor@@QAEXAAUFFrame@@QAX@Z [HP2 0x10418350]
+        public UERotator BoneRotNative(UEObject self, string boneName)
+        {
+            if (self.GetProp(PK.Mesh) is not UEResourceRef meshRef
+                || !meshRef.Class.Equals("SkeletalMesh", StringComparison.OrdinalIgnoreCase))
+                return UEValue.AsRotator(self.GetProp(PK.Rotation));
+            if (MeshCatalog is null)
+                throw new InvalidOperationException($"BoneRot {self.GetProp(PK.Name)}: skeletal mesh {meshRef.ObjectPath} but the runtime has no mesh catalog");
+            Hp1SkeletalMesh mesh = MeshCatalog.Get(meshRef);
+            return OrthoRotation(BoneWorldOf(self, mesh.FindBone(boneName ?? "")));
+        }
+
         // ── TRACK SAMPLING (ApplyAnim 142200-142350, disasm 0x1041bf3c-) ──────
         // The key count is the track's KeyTime.Num (+0x18; track layout in
         // UAnimation::Serialize, Engine.dll.c:45418-45431), not the quaternion
@@ -1105,7 +1246,9 @@ namespace HP1.UEScript
                 if (q >= track.QuaternionCount)
                     throw new InvalidDataException($"animation key {q} beyond {track.QuaternionCount} quaternions");
                 var r = new BonePlace();
-                track.DecodeQuaternion(q, out r.QX, out r.QY, out r.QZ, out r.QW);
+                // A single-key track: inline fsin + FQuat::FQuat(x, y, z); more keys: FAnimVec::Quat (HP2: its own w).
+                if (keys == 1) track.DecodeQuaternion(q, out r.QX, out r.QY, out r.QZ, out r.QW);
+                else track.DecodeKeyQuaternion(q, out r.QX, out r.QY, out r.QZ, out r.QW);
                 r.Pos = PositionKey(track, q);
                 return r;
             }
@@ -1169,14 +1312,20 @@ namespace HP1.UEScript
         }
 
         // FUN_1041f5c0: (1 − a) in the register; each component (1 − a)·lo + a·hi, one fstp dword (pc24: float steps).
+        // HP2 (FUN_1042df40) stores (1 − a) with `fst dword` [HP2 0x1042df53] and multiplies x and y by that float, z by the
+        // register value: the same at PC24, where the register already holds a float.
+        // Original: Engine.dll not exported: FUN_1041f5c0 [HP1 0x1041F5C0] [HP2 0x1042DF40] — ApplyAnim's position blend, called
+        // through the thunk [HP1 0x10303c42] [HP2 0x10303c92] from its three key samplers [HP1 0x1041c3f7, 0x1041c8dd, 0x1041cfcd]
+        // [HP2 0x1042aea2, 0x1042b36f, 0x1042ba3f]
         internal static Vector3 LerpPosition(Vector3 lo, Vector3 hi, float a, bool pc24)
         {
             if (pc24 || !float.IsFinite(a) || !float.IsFinite(lo.x) || !float.IsFinite(lo.y) || !float.IsFinite(lo.z)
                 || !float.IsFinite(hi.x) || !float.IsFinite(hi.y) || !float.IsFinite(hi.z))
                 return new Vector3(lo.x * (1f - a) + hi.x * a, lo.y * (1f - a) + hi.y * a, lo.z * (1f - a) + hi.z * a);
             HP1.Core.X87Ext A = HP1.Core.X87Ext.From(a), om = R64(HP1.Core.X87Ext.From(1f) - A);
-            float C(float l, float h) => R64(R64(om * HP1.Core.X87Ext.From(l)) + A * HP1.Core.X87Ext.From(h)).ToFloat();
-            return new Vector3(C(lo.x, hi.x), C(lo.y, hi.y), C(lo.z, hi.z));
+            HP1.Core.X87Ext omXY = UEGameProfile.Current.Game == UEEdition.Game.HP2 ? HP1.Core.X87Ext.From(om.ToFloat()) : om;
+            float C(HP1.Core.X87Ext w, float l, float h) => R64(R64(w * HP1.Core.X87Ext.From(l)) + A * HP1.Core.X87Ext.From(h)).ToFloat();
+            return new Vector3(C(omXY, lo.x, hi.x), C(omXY, lo.y, hi.y), C(om, lo.z, hi.z));
         }
 
         static Vector3 PositionKey(Hp1AnimTrack track, int q)

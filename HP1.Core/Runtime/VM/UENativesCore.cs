@@ -106,6 +106,8 @@ namespace HP1.UEScript
                 yield return n.Name.ToString();
         }
 
+        // Original: Core.dll not exported: FUN_10147c30 [HP1 0x10147c30] [HP2 0x101494c0] (the field walk execGetPropertyText /
+        // execSetPropertyText call through the thunk 0x101011f9 in both builds)
         // FUN_10147c30 (Core): TFieldIterator<UProperty> over the class chain, own fields first, appStricmp on the name.
         internal static UProperty FindPropertyText(UEObject self, string name)
         {
@@ -539,6 +541,7 @@ namespace HP1.UEScript
             // FString::Caps (Core.dll.c:64283): only 'a'..'z' (0x60 < c < 0x7b)
             // are reduced by 0x20; other characters (incl. non-ASCII) stay as-is.
             Pair(235, "Caps", (interp, frame, args) => ShippedCaps(Str(args[0]) ?? ""));
+            // Original: Core.dll ?execSetPropertyText@UObject@@QAEXAAUFFrame@@QAX@Z [HP1 0x10142320] [HP2 0x10143850]
             // UObject::execSetPropertyText (Core.dll.c:4734): the same field walk; RF_Public (+0x1c & 4) and not
             // CPF_Const (PropertyFlags +0x3c & 2), then ImportText(Value, this + Offset, PortFlags 1) via slot +0x88:
             // element 0; a value ImportText does not accept leaves the property unchanged.
@@ -565,6 +568,7 @@ namespace HP1.UEScript
                 if (UEObjectConfig.ImportText(prop, Str(args.Length > 1 ? args[1] : null) ?? "", ref cur)) self.Props[key] = cur;
                 return null;
             });
+            // Original: Core.dll ?execGetPropertyText@UObject@@QAEXAAUFFrame@@QAX@Z [HP1 0x10142050] [HP2 0x101435c0]
             // UObject::execGetPropertyText (Core.dll.c:27996): FUN_10147c30 = UProperty walk of the class chain (own
             // fields, then super, vtable +0x6c), appStricmp on the name; no field or not RF_Public (ObjectFlags +0x1c & 4)
             // -> ""; otherwise ExportText(0, buf, this, this, PortFlags 1) via slot +0x8c: element 0, PPF_Localized.
@@ -578,14 +582,8 @@ namespace HP1.UEScript
                 if (v is System.Collections.IList list && prop.ArrayDim > 1) v = list.Count > 0 ? list[0] : null;
                 if (prop.Type == UELib.Types.PropertyType.BoolProperty)
                 {
-                    // UBoolProperty::ExportTextItem (Core.dll.c:18767): PortFlags & 1 -> GTrue/GFalse. The port keeps the
-                    // global words as literals; a language whose word differs even by case is not established (STOP).
-                    string lit = UEValue.ToBool(v) ? "True" : "False";
-                    string loc = UELocalization.Localize("General", lit, "Core", optional: true);
-                    if (!string.IsNullOrEmpty(loc) && loc != lit)
-                        throw new NotSupportedException($"GetPropertyText bool: Core.{UELocalization.Language} [General] {lit}={loc}; "
-                            + "whether shipped GTrue/GFalse are localized at appInit is not established (STOP)");
-                    return lit;
+                    // UBoolProperty::ExportTextItem (Core.dll.c:18767): PortFlags & 1 -> GTrue/GFalse (D03).
+                    return UEValue.ToBool(v) ? UELocalization.GTrue : UELocalization.GFalse;
                 }
                 return UEObjectConfig.ExportTextItem(prop, v);
             });
@@ -705,17 +703,16 @@ namespace HP1.UEScript
                 UEX87Transcendental.AppTan(X87Ext.From(UEInterpreter.AsFloat(args[0]))).ToFloat());
             Pair(190, "Atan", (interp, frame, args) =>
                 UEX87Transcendental.AppAtan(X87Ext.From(UEInterpreter.AsFloat(args[0]))).ToFloat());
-            // Exp/Loge — Core.dll appExp/appLoge (x87), not std::exp/std::log.
-            // appExp (Core 0x10126060): fldl2e·x, frndint, f2xm1, fscale — the body is modelled (UEX87Transcendental.AppExp,
-            // checked against the original body under unicorn; D-74), but no shipped script calls Exp — proven by the
-            // campaign-wide bytecode scan of all shipped scripts, so the native's
-            // precision window was never established. appLoge (execLoge -> 0x10102d15): fldln2, fyl2x — NOT MODELLED (D-74):
-            // fyl2x has no reference and no shipped script calls Loge (same scan). A call means that proof no longer holds:
-            // refuse loudly.
-            Pair(191, "Exp", (interp, frame, args) =>
-                throw new NotSupportedException("Exp (native 191, appExp: f2xm1) is not modelled: no shipped script calls it (D-74)"));
+            // execExp (Core 0x101398a0) / execLoge (0x10139950): fld dword A; fstp qword; call appExp / appLoge; fstp dword
+            // Result — the 80-bit st0 is rounded to float once. appExp's fmul / fsub / fadd follow the window (PC24 in the
+            // render window); appLoge has no PC-dependent step. Models: UEX87Transcendental.AppExp / AppLoge (judge:
+            // validate_core_math_natives.py, real bodies, f2xm1 / fyl2x correctly rounded by x87_cr).
+            // Original: Core.dll ?execExp@UObject@@QAEXAAUFFrame@@QAX@Z [HP1 0x101398a0] (thunk 0x10102824)
+            Pair(191, "Exp", (interp, frame, args) => UEX87Transcendental.AppExp(
+                X87Ext.From(UEInterpreter.AsFloat(args[0])).ToDouble(), UEWorldFrameProducer.FastMathWindow).ToFloat());
+            // Original: Core.dll ?execLoge@UObject@@QAEXAAUFFrame@@QAX@Z [HP1 0x10139950] (thunk 0x10102144)
             Pair(192, "Loge", (interp, frame, args) =>
-                throw new NotSupportedException("Loge (native 192, appLoge: fyl2x) is not modelled: no shipped script calls it (D-74)"));
+                UEX87Transcendental.AppLoge(X87Ext.From(UEInterpreter.AsFloat(args[0])).ToDouble()).ToFloat());
             // execSqrt (Core.dll.c:43915 / 0x10139a00) / execSquare (:7049 / 0x10139ab0)
             Pair(193, "Sqrt", (interp, frame, args) =>
                 X87.Sqrt(UEInterpreter.AsFloat(args[0])));
@@ -1069,6 +1066,16 @@ namespace HP1.UEScript
                 IsOSVer2kOrXPFor(Environment.OSVersion.Platform,
                                  Environment.OSVersion.Version.Major));
 
+            // Original: Engine.dll ?execIsSoftwareRendering@AActor@@QAEXAAUFFrame@@QAX@Z [HP2 0x10422a50] (HP1: none,
+            // index 329 unregistered). P_FINISH, then GConfig->GetString(TEXT("Engine.Engine"), TEXT("GameRenderDevice"),
+            // Device) (FConfigCache vtable +0xc, Filename NULL: the system ini) and appStricmp(*Device,
+            // TEXT("SoftDrv.SoftwareRenderDevice")) == 0 into the result's low byte (0x10422ae6 sete cl; mov [edx], cl;
+            // every UBOOL result buffer of the VM is zeroed first). A missing key leaves Device empty: false.
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2)
+                Pair(329, "IsSoftwareRendering", (interp, frame, args) =>
+                    AsciiStricmpEquals(UEConfig.Global.TryGetIni(UEConfig.ScopeSystem, "Engine.Engine", "GameRenderDevice",
+                        out string device) ? device : "", "SoftDrv.SoftwareRenderDevice"));
+
             // execClassIsChildOf (Core 0x10141b50..0x10141bc6): NULL -> false, then
             // a walk of the test class's SuperField comparing POINTERS
             // (0x10141bb4 cmp). Import stubs resolve to the real class of
@@ -1138,14 +1145,12 @@ namespace HP1.UEScript
                     Str(args.Length > 2 ? args[2] : null)));
             Pair(0, "GetLanguage", (interp, frame, args) => UELocalization.Language);
             // UObject::execStaticSaveConfig (export 0x1a78): SaveConfig(Class->GetDefaultObject(), CPF_Config 0x4000) — the class
-            // defaults (the port's default.X bag) are written. A PerObjectConfig class names its section after the object:
-            // which name the default object carries there is not established — loud.
+            // defaults (the port's default.X bag) are written. The default object has Index -1, so a PerObjectConfig class
+            // still writes its class section of Class->ConfigName (UEObjectConfig.SaveConfig isInstance).
             Pair(0, "StaticSaveConfig", (interp, frame, args) =>
             {
                 UClass cls = (frame.Context ?? frame.Object)?.Class ?? throw new InvalidOperationException("StaticSaveConfig without a class");
-                if ((UEObjectConfig.ClassFlags(cls) & UEObjectConfig.CLASS_PerObjectConfig) != 0)
-                    throw new NotSupportedException($"StaticSaveConfig on PerObjectConfig class {cls.Name}: the default object's section name is not established (STOP)");
-                UEObjectConfig.SaveConfig(UEConfig.Global, interp.ClassDefaultsBag(cls), interp);
+                UEObjectConfig.SaveConfig(UEConfig.Global, interp.ClassDefaultsBag(cls), interp, isInstance: false);
                 return null;
             });
             Pair(536, "SaveConfig", (interp, frame, args) =>
@@ -1300,8 +1305,8 @@ namespace HP1.UEScript
             // any other latent (FinishAnim, MoveTo, TurnTo…) it does
             // nothing.
             //
-            // Mapping to the port model: the remaining sleep lives in
-            // UEFrame.SleepTimeLeft, the poll (UELevelRuntime.StateFrame) is
+            // Mapping to the port model: UEFrame.SleepTimeLeft is the actor's
+            // LatentFloat, the poll (UELevelRuntime.StateFrame) is
             // execPollSleep with a 0.5·dt threshold, so breaking writes the same -1.0.
             //
             // ONE body for both frontends: in Tut2 (BroomHarry) this native is live.
@@ -1515,6 +1520,9 @@ namespace HP1.UEScript
 
         protected virtual void Pair(int idx, string name, UENativeHandler handler)
         {
+            // A game whose natives are re-matched one by one (HP2, stage 4): an HP1 body is registered only once its
+            // HP2 body is matched (UEGameProfile.Natives); a call to any other is OnUnknownNative's loud STOP.
+            if (UEGameProfile.Current.Natives is { } matched && !matched.Contains(name ?? "")) return;
             if (idx > 0) _byIndex[idx] = handler;
             if (!string.IsNullOrEmpty(name)) _byName[name] = handler;
             if (idx > 0 && !string.IsNullOrEmpty(name)) _nameByIndex[idx] = name;
@@ -1584,9 +1592,19 @@ namespace HP1.UEScript
         // So an unknown native throws in every frontend; the only legitimate override is
         // headless survey mode, which calls the base.
         public virtual void OnUnknownNative(int idx, string name, string context)
-            => throw new NotSupportedException(
-                $"native idx={idx} name='{name}' reached in {context} but has no handler; "
-                + "implement it from source (PLAN_core: unknowns are loud, never silent no-ops)");
+            => throw new NotSupportedException(UEGameProfile.Current.Natives is null
+                ? $"native idx={idx} name='{name}' reached in {context} but has no handler; "
+                  + "implement it from source (PLAN_core: unknowns are loud, never silent no-ops)"
+                : $"{UEGameProfile.Current.Game}: native idx={idx} name='{DeclaredName(idx, name)}' reached in {context} is not ported "
+                  + $"for this game (its {UEGameProfile.Current.Game} body is not matched yet, stage 4)");
+
+        // The function a native index is declared by in the loaded scripts, for a STOP message ("__NFUN_<idx>__" is UELib's
+        // placeholder for an index its own table lacks, e.g. HP2's 328-330).
+        static string DeclaredName(int idx, string name)
+            => name is null || name.StartsWith("__NFUN_", StringComparison.Ordinal)
+                ? (idx > 0 ? HP1.Core.UEClassRegistry.Shared?.FindByNativeIndex(idx) is { } fn
+                    ? $"{(fn.Outer as UELib.Core.UClass)?.Name}.{fn.Name}" : name : name)
+                : name;
 
         // Diagnostics (HP1BridgeValidator coverage): registered name for a native
         // index (bytecode-side intrinsics only expose "__NFUN_<idx>__" stubs), and
@@ -1641,7 +1659,9 @@ namespace HP1.UEScript
                 // between the two arg evals (same pattern as StopSound's slot).
                 bool cr = args is { Length: > 1 } && args[1] is not null
                     ? UEValue.ToBool(args[1]) : true;
-                FrameProducer.DrawText(canvas, text, cr);
+                // HP2 [HP2 0x10391605..0x10391641]: numChars and bCursor, both pre-set to 0; bCursor is not read.
+                int numChars = args is { Length: > 2 } && args[2] is not null ? UEValue.ToInt(args[2]) : 0;
+                FrameProducer.DrawText(canvas, text, cr, numChars);
                 return null;
             });
             // execDrawTextClipped 0x1038a2f0: the optional bCheckHotKey is
@@ -1666,6 +1686,18 @@ namespace HP1.UEScript
                 if (args.Length > 2) args[2] = yl;
                 return null;
             });
+            // ScriptedTexture.TextSize(string Text, out float XL, out float YL, Font Font): no texture state is read.
+            // 472-475 (DrawText/DrawTile/DrawColoredText/ReplaceTexture) stay unregistered: their bodies are
+            // ScriptedTexture.cs, the Core owner of a ScriptedTexture's texels (PostLoad/Tick/RenderTexture, frame upload)
+            // is not ported — a call is the loud unknown-native report.
+            Pair(476, "ScriptedTexture.TextSize", (interp, frame, args) =>   // qualified: "TextSize" by name is Canvas 470
+            {
+                string text = args is { Length: > 0 } ? args[0]?.ToString() ?? "" : "";
+                if (!FrameProducer.ScriptedTextureTextSize(args.Length > 3 ? args[3] : null, text, out float xl, out float yl)) return null;
+                if (args.Length > 1) args[1] = xl;
+                if (args.Length > 2) args[2] = yl;
+                return null;
+            });
             Pair(464, "StrLen", (interp, frame, args) =>
             {
                 UEObject canvas = frame.Context ?? frame.Object;
@@ -1676,13 +1708,6 @@ namespace HP1.UEScript
                 if (args.Length > 2) args[2] = yl;
                 return null;
             });
-            // ── 471/480: LOUD BOUNDARIES, not stubs ──
-            //
-            // 471 DrawClippedActor and 480 DrawPortal: a bytecode census of all shipped .u
-            // — 480 has NO calls, 471 has a
-            // single one, UWindowWindow.DrawClippedActor, which itself has no
-            // caller (neither final nor virtual). Unreachable.
-            //
             // 467 DrawActor(Actor A, bool WireFrame, optional bool ClearZ): callers are Inventory.RenderOverlays and
             // Weapon.RenderOverlays (Engine.u), reached from the tail of DrawWorld when !bBehindView (shipped campaign:
             // never; the Restored mod's HP1FlyKeys: Weapon.RenderOverlays of a baseWand without Mesh). The optional
@@ -1694,10 +1719,27 @@ namespace HP1.UEScript
                 FrameProducer.CanvasDrawActor(frame.Context ?? frame.Object, args is { Length: > 0 } ? args[0] as UEObject : null, wire, clearZ);
                 return null;
             });
+            // 471 DrawClippedActor(Actor A, bool WireFrame, int X, int Y, int XB, int YB, optional bool ClearZ): read in that
+            // order (execDrawClippedActor 0x10389b30, ClearZ pre-filled with 0); the one shipped caller,
+            // UWindowWindow.DrawClippedActor, has no caller and passes ClearZ = True. Body: CanvasDrawClippedActor.
             Pair(471, "DrawClippedActor", (interp, frame, args) =>
-                throw new NotSupportedException("Canvas.DrawClippedActor reached — not ported; the campaign census shows its only caller UWindowWindow.DrawClippedActor has no callers"));
+            {
+                bool Given(int i) => args is not null && args.Length > i && args[i] is not null;
+                int I(int i) => Given(i) ? UEValue.ToInt(args[i]) : 0;
+                FrameProducer.CanvasDrawClippedActor(frame.Context ?? frame.Object, Given(0) ? args[0] as UEObject : null,
+                    Given(1) && UEValue.ToBool(args[1]), I(2), I(3), I(4), I(5), Given(6) && UEValue.ToBool(args[6]));
+                return null;
+            });
+            // 480 DrawPortal(int X, int Y, int Width, int Height, Actor CamActor, vector CamLocation, rotator CamRotation,
+            // optional int FOV = 90, optional bool ClearZ = True) — LOUD BOUNDARY, no shipped call site. Read from the disasm
+            // (execDrawPortal 0x1038a960..0x1038ab8e): Viewport->Actor FovAngle (+0x370) = FOV for the call (restored after);
+            // Render->CreateMasterFrame (+0x68)(Viewport, CamLocation, CamRotation) — CamActor is read but not passed on;
+            // the new node's XB/YB = X/Y, X/Y = Width/Height, ComputeRenderSize; ClearZ -> GRenderDevice->ClearZ (+0x9c, the
+            // global device, not Viewport->RenDev); Render->DrawWorld (+0x74)(node); Render->FinishMasterFrame (+0x70). A
+            // second camera's whole world render into the HUD (visibility, lighting, coronas, the render-side game writes
+            // of DrawWorld): a frame item Core does not build. Not ported.
             Pair(480, "DrawPortal", (interp, frame, args) =>
-                throw new NotSupportedException("Canvas.DrawPortal reached — not ported; the campaign census shows no call site"));
+                throw new NotSupportedException("Canvas.DrawPortal reached — not ported: Render->CreateMasterFrame + DrawWorld of a second camera into the canvas (Engine 0x1038a960)"));
             // UConsole.CreateNativeFont (Engine 0x33a0 execCreateNativeFont -> UViewport::CreateNativeFont,
             // WinDrv UWindowsViewport::CreateNativeFont): an OS font (CreateFont(-Height, …, 400, …)) that GDI DrawText
             // measures and draws (WinDrv UWindowsViewport::DrawString). Called only by HPConsole.SetupLanguage for

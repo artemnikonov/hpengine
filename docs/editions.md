@@ -44,6 +44,10 @@ d625f98f9af8b81d287248bec4db4b29bbf213d9. The DLL hashes alone separate three na
 Retail executables the table knows: US 1.53 SafeDisc `f7abfd7d56a6792e119964aa40af2190b8fe4ec4`, Russian EA SafeDisc
 `5d7ff458f6a9c3f6ff70725ecb3dada3b320998e`; several No-CD executables; and executables of European, Southern-European and
 other discs whose data sets are not on hand, so an install with only those executables identifies as `Unknown`.
+An executable that is not in the table (a patched or cracked one) changes nothing: the data set alone decides the
+edition and its tier. 0.4.0 dropped the row of a post-patched, cracked UK executable whose hash came from a third-party
+table and could not be checked against a copy; a UK 1.1 install with that executable is identified as UK 1.1
+(supported), like any UK 1.1 install.
 
 - **UK 1.1 is a label, not a proven fact.** This build has earlier DLL stamps (2001-10-19..22 against 2001-10-31 for the
   Russian one) and language tables for English, German and French; that it is the UK 1.1 retail data is an assumption.
@@ -86,8 +90,11 @@ were read in the disassembly (`../HP1.Core/Runtime/World/UEEdition.cs` header li
 
 - **Font.** The Russian `HPConsole.SetupLanguage` asks for native fonts (`CreateNativeFont('MS Sans Serif', 24/16/10/12)`),
   which the original draws with GDI through `UWindowsViewport::DrawString` (box-measuring `DrawText`, word-break, optional
-  centre) for `UCanvas::WrappedPrint` (native-font branch 0x10387d80..0x10387e08) and `FUN_10388530`. The port substitutes Liberation Sans only for that face
-  (D-39, not original); wrap points can differ, and the underline of an `&` mnemonic is not drawn. WinDrv selects the GDI
+  centre) for `UCanvas::WrappedPrint` (native-font branch 0x10387d80..0x10387e08) and `FUN_10388530`. The port substitutes the bundled Liberation Sans for that
+  face (D-39, not original), and since 0.4.0 for any other face a mod asks for; wrap points can differ, and the
+  underline of an `&` mnemonic is not drawn. The glyphs are drawn antialiased at the interface scale (0.4.0, not
+  original: the original's GDI text is aliased pixels at the canvas resolution); the layout (advances, line height,
+  wrap points) stays at the requested height. WinDrv selects the GDI
   charset by language and converts text with the OS code page on a non-Unicode OS; the substitute makes this moot.
 - **Sounds.** 1368 sounds have an `iEndPosn` that is odd or beyond the decoder's output. `MP2SoundStream::FillBuffer`
   (0x1037e550) then treats the short decoder read (0x1037e65d) as the end of the stream after exactly the decoded bytes,

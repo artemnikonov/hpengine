@@ -112,7 +112,8 @@ namespace HPEngine
         // take the mip by TextureDetail (Engine 0x10387819; HP1.Core UETextureLod), fonts (WrappedPrint) LOD 0.
         // NOT ported for HUD/menu: "UI/pictures enhanced everywhere" conflicts with
         // "Texture Detail as the original".
-        nint HudTexture(string path, HudQuadSource source)
+        // pagePixels: screen pixels the quad's texture window spans per whole texture width (quad width / U span).
+        nint HudTexture(string path, HudQuadSource source, float pagePixels)
         {
             if (string.IsNullOrEmpty(path)) return (nint)_hudWhite;
             // Runtime texture (CreateTextureFromBMP, SavePics): pixels from the Core registry; version is in the key:
@@ -121,8 +122,22 @@ namespace HPEngine
             if (UERuntimeTextures.TryGet(path, out var rt))
             {
                 bool glyph = source == HudQuadSource.Glyph;
-                string rkey = (glyph ? "rtfont|" : "rt|") + path + "|" + rt.Version;
+                // A native font's page at the interface scale (the quad's pixels per texel): Core rasterises the glyphs
+                // at that size, so text is drawn texel for pixel instead of stretched (UENativeFont.Coverage, NOT ORIGINAL).
+                UENativeFont nf = glyph ? UENativeFonts.OfPage(path) : null;
+                int scale = nf is null ? 1 : Math.Max(1, (int)MathF.Round(pagePixels / rt.USize));
+                string rkey = (glyph ? "rtfont|" : "rt|") + path + "|" + rt.Version + "|" + scale;
                 if (_hudTex.TryGetValue(rkey, out nint rtex)) return rtex;
+                if (nf is not null)
+                {
+                    byte[] cov = nf.Coverage(scale);
+                    int cw = rt.USize * scale, ch = rt.VSize * scale;
+                    var cpx = new byte[cw * ch * 4];
+                    for (int i = 0; i < cov.Length; i++) { cpx[i * 4] = cpx[i * 4 + 1] = cpx[i * 4 + 2] = 255; cpx[i * 4 + 3] = cov[i]; }
+                    var ct = Tex(SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, cw, ch, 1, SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER);
+                    UploadLevels(ct, new[] { (cw, ch, cpx) });
+                    return _hudTex[rkey] = (nint)ct;
+                }
                 var px = new byte[rt.USize * rt.VSize * 4];
                 for (int i = 0; i < rt.USize * rt.VSize; i++)
                 {
@@ -187,7 +202,7 @@ namespace HPEngine
             for (int i = 0; i < n; i++)
             {
                 HudQuad q = quads[i];
-                nint tex = HudTexture(q.Texture, q.Source);
+                nint tex = HudTexture(q.Texture, q.Source, (q.X1 - q.X0) / (q.U1 - q.U0));
                 int first = _hudVertCount;
                 Put(q.X0, q.Y0, q.U0, q.V0, q); Put(q.X1, q.Y0, q.U1, q.V0, q); Put(q.X1, q.Y1, q.U1, q.V1, q);
                 Put(q.X0, q.Y0, q.U0, q.V0, q); Put(q.X1, q.Y1, q.U1, q.V1, q); Put(q.X0, q.Y1, q.U0, q.V1, q);

@@ -54,16 +54,15 @@ namespace HP1.UEScript
         // map it loaded. MeshHashFieldsHook remains an OVERRIDE for a frontend
         // that already has the mesh loaded and would rather not re-read it.
         // Local box of the mesh primitive — GetCollisionBoundingBox(Owner, 0) of its
-        // slot +0x60 — for the UBox::LineCheck/PointCheck bodies.
+        // slot +0x60, one body for every mesh class (CylinderExtent.MeshLocalBox) — for the
+        // UBox::LineCheck/PointCheck bodies.
         public (Vector3 Lo, Vector3 Hi) MeshPrimitiveLocalBox(UEObject actor)
         {
             var meshRef = (UEResourceRef)actor.GetProp(PK.Mesh);
             Hp1MeshHashFields m = MeshHashFieldsOf(meshRef, actor);
-            EnsureMeshBounds(meshRef, actor, "UBox body: CollideType=3 mesh actor");
-            bool skeletal = _meshBounds.IsSkeletal(meshRef.Name, meshRef.ObjectPath);
             object ds = actor.GetProp(PK.DrawScale);
-            return CylinderExtent.MeshCollisionLocalBox(m.BoundMin, m.BoundMax, m.Scale, m.Origin,
-                ds is null ? 1f : UEInterpreter.AsFloat(ds), skeletal);
+            return CylinderExtent.MeshLocalBox(m.BoundMin, m.BoundMax, m.Scale, m.Origin,
+                ds is null ? 1f : UEInterpreter.AsFloat(ds));
         }
 
         public Hp1MeshHashFields MeshHashFieldsOf(UEResourceRef meshRef, UEObject actor)
@@ -212,7 +211,6 @@ namespace HP1.UEScript
                     ValidateActorCollision(actor, postLoad: true);
             var handleSnapshot = new Dictionary<UEObject, int>(_hashHandle);
             var actorSnapshot = new Dictionary<int, UEObject>(_hashActor);
-            var colLocSnapshot = new Dictionary<int, Vector3>(_hashColLocation);
             int handleCounter = _nextHashHandle;
             CollisionHash = new CollisionHashReplica();
             try
@@ -229,8 +227,6 @@ namespace HP1.UEScript
                 foreach (KeyValuePair<UEObject, int> e in handleSnapshot) _hashHandle[e.Key] = e.Value;
                 _hashActor.Clear();
                 foreach (KeyValuePair<int, UEObject> e in actorSnapshot) _hashActor[e.Key] = e.Value;
-                _hashColLocation.Clear();
-                foreach (KeyValuePair<int, Vector3> e in colLocSnapshot) _hashColLocation[e.Key] = e.Value;
                 _nextHashHandle = handleCounter;
                 throw;
             }
@@ -295,6 +291,9 @@ namespace HP1.UEScript
             int collideType = UEInterpreter.ToInt(get("CollideType"));
             if (collideType == 3)
             {
+                // HP2: UMesh::GetCollisionExtent [HP2 0x103c5e90] with UMesh / USkeletalMesh::GetCollisionBoundingBox [HP2 0x103c5b70]
+                // [HP2 0x1042a3a0] and UBoxPrim::GetCollisionExtent [HP2 0x1040c150] give HP1's bits (tools/hp2/engine_body_judge.py
+                // MeshCollisionExtent, 400 cases under unicorn): the same lines below.
                 if (get("Mesh") is UEResourceRef meshRef)
                 {
                     // UMesh::GetCollisionExtent 0x103b8820.
@@ -318,8 +317,10 @@ namespace HP1.UEScript
             }
             if (collideType == 2)
             {
+                // `fcomp 0.0; test ah, 0x40` [HP1 0x1037a961] [HP2 0x103816f0]: C3 is set for 0, -0 and an unordered NaN,
+                // so a NaN width takes the radius too (tools/hp2/engine_body_judge.py --port).
                 float w = UEInterpreter.AsFloat(get("CollisionWidth"));
-                return new Vector3(r, w != 0f ? w : r, h);
+                return new Vector3(r, w != 0f && !float.IsNaN(w) ? w : r, h);
             }
             return new Vector3(r, r, h);
         }
@@ -371,9 +372,21 @@ namespace HP1.UEScript
         // Both visual formulas are separate because they have TWO callers: HashBoxOf
         // (primitive by CollideType) and WorldCollisionBox (bVisual takes Mesh/Brush
         // regardless of CollideType). Two copies would drift silently.
+        // The mesh's GetCollisionBoundingBox(Owner, 1) by its class's image vtable slot +0x60: a SkeletalMesh is
+        // FBox(BoundingBox, GetMeshCoords(Owner)) [HP1 0x1041b8b0..0x1041b8f9] — the mesh coords mirror Y (Scale.y
+        // negated), take Wideness, rotate PrePivot with the actor and add the bAlignBottom shift; a LodMesh or Mesh is
+        // UMesh's transposed-rotation box (HashBoxes.Mesh). Every HashBoxOf caller (the collision hash's GetActorExtent
+        // [HP1 0x10364940], ActorEncroachmentCheck's extent, MoveActor's sweep box [HP1 0x103aa731]) and GetWorldCollisionBox
+        // [HP1 0x1040a9c4] call the slot with 1.
         (Vector3 Min, Vector3 Max) MeshPrimitiveBox(UEObject actor, UEResourceRef meshRef)
         {
             Hp1MeshHashFields m = MeshHashFieldsOf(meshRef, actor);
+            if (meshRef.Class.Equals("SkeletalMesh", StringComparison.OrdinalIgnoreCase))
+                return HashBoxes.BoxByCoords(m.BoundMin, m.BoundMax, MeshCoordsOf(actor, meshRef));
+            if (!meshRef.Class.Equals("LodMesh", StringComparison.OrdinalIgnoreCase)
+                && !meshRef.Class.Equals("Mesh", StringComparison.OrdinalIgnoreCase))
+                throw new NotSupportedException(
+                    $"GetCollisionBoundingBox: Mesh of class {meshRef.Class} actor={actor.GetProp(PK.Name)} mesh={meshRef.Name}");
             UERotator rot = UEInterpreter.AsRotator(actor.GetProp(PK.Rotation));
             return HashBoxes.Mesh(m.BoundMin, m.BoundMax, m.Scale, m.Origin,
                 m.RotPitch, m.RotYaw, m.RotRoll,
@@ -423,8 +436,9 @@ namespace HP1.UEScript
         }
 
         // FCollisionHash::AddActor (Engine.dll.c:49171): skip bDeleteMe, link
-        // the extent cells, remember ColLocation (+0x120) for the un-rehashed-
-        // move warning RemoveActor prints.
+        // the extent cells, then Actor.ColLocation = Location [HP1 0x10364d3a: +0x120 = +0xfc]
+        // [HP2 0x1036b93a: +0x140 = +0x11c] — the script field, which RemoveActor compares for its un-rehashed-move
+        // warning (live HP2 EN, Entry at InitGame: harry's ColLocation = its Location).
         public void HashAddActor(UEObject actor)
         {
             // FCollisionHash::AddActor: the body is under `if (!bDeleteMe)` (disasm
@@ -439,7 +453,7 @@ namespace HP1.UEScript
             }
             (Vector3 min, Vector3 max) = HashBoxOf(actor);
             CollisionHash.Add(handle, min, max);
-            _hashColLocation[handle] = UEInterpreter.AsVector3(actor.GetProp(PK.Location));
+            actor.Props["ColLocation"] = UEInterpreter.AsVector3(actor.GetProp(PK.Location));
         }
 
         // FCollisionHash::RemoveActor(actor, false) (Engine.dll.c:7832): unlink
@@ -456,7 +470,7 @@ namespace HP1.UEScript
             if (!UEInterpreter.ToBool(actor.GetProp(PK.bCollideActors))) return;
             if (!_hashHandle.TryGetValue(actor, out int handle)) return;
             Vector3 loc = UEInterpreter.AsVector3(actor.GetProp(PK.Location));
-            if (_hashColLocation.TryGetValue(handle, out Vector3 colLoc) && loc != colLoc)
+            if (actor.GetProp(PK.ColLocation) is { } cl && UEInterpreter.AsVector3(cl) is var colLoc && loc != colLoc)
                 Log($"collision_hash_warn moved_without_proper_hashing "
                     + $"actor={actor.GetProp(PK.Name)} loc={loc} colLoc={colLoc}");
             (Vector3 min, Vector3 max) = HashBoxOf(actor);
@@ -491,7 +505,7 @@ namespace HP1.UEScript
             // Shipped emits this BEFORE branching on bSweepAll, so the destroy
             // path warns exactly like the extent path does.
             Vector3 loc = UEInterpreter.AsVector3(actor.GetProp(PK.Location));
-            if (_hashColLocation.TryGetValue(handle, out Vector3 colLoc) && loc != colLoc)
+            if (actor.GetProp(PK.ColLocation) is { } cl && UEInterpreter.AsVector3(cl) is var colLoc && loc != colLoc)
                 Log($"collision_hash_warn moved_without_proper_hashing "
                     + $"actor={actor.GetProp(PK.Name)} loc={loc} colLoc={colLoc}");
             CollisionHash.RemoveAll(handle);

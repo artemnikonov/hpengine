@@ -55,11 +55,12 @@ namespace HP1.UEScript
         // index — tree frame -> index in Views (master — −1), for DrawFrame decal pieces. drawn — receives each frame's
         // polygons (WorldFrame.Drawn: master first, then the views in the same order).
         internal static List<ViewFrame> ProjectViews(UESceneNode master, Func<int, ViewSource> sourceOf, Dictionary<UESceneNode, int> index,
-            List<DrawnWorld> drawn = null, Func<int, int, ViewSource> polyOf = null)
+            List<DrawnWorld> drawn = null, Func<int, int, ViewSource> polyOf = null,
+            Func<UESceneNode, (bool Carrier, bool Drawn, int PolyFlags, int Alpha)[]> lumosOf = null)
         {
             var views = new List<ViewFrame>();
             index?.Add(master, -1);
-            drawn?.Add(DrawnOf(master, polyOf));
+            drawn?.Add(DrawnOf(master, polyOf, lumosOf));
             BrushCoords r = master.Coords;
             void Walk(UESceneNode f, int parent)
             {
@@ -100,7 +101,7 @@ namespace HP1.UEScript
                     index?.Add(c, me);
                     views.Add(new ViewFrame(parent, kind, c.Recursion, m, cn, cd,
                         BitConverter.SingleToInt32Bits(c.Mirror) < 0, src, c.Coords, c.Zone));
-                    drawn?.Add(DrawnOf(c, polyOf));
+                    drawn?.Add(DrawnOf(c, polyOf, lumosOf));
                     Walk(c, me);
                 }
             }
@@ -114,7 +115,8 @@ namespace HP1.UEScript
         // their tracker fragments were drawn (the frontend draws a mover polygon whole; its coplanar pieces are
         // UELevelRuntime.MoverCoplanarPieces), sky windows (UESceneNode.SkyWindows). polyOf: (surface, node) -> level surface or
         // the mover polygon of the fragment's owner (UEOcclusionWorld.PolyOf).
-        internal static DrawnWorld DrawnOf(UESceneNode f, Func<int, int, ViewSource> polyOf)
+        internal static DrawnWorld DrawnOf(UESceneNode f, Func<int, int, ViewSource> polyOf,
+            Func<UESceneNode, (bool Carrier, bool Drawn, int PolyFlags, int Alpha)[]> lumosOf = null)
         {
             var nodes = new List<int>(f.DrawnPolys.Count);
             List<int> back = null;
@@ -145,7 +147,64 @@ namespace HP1.UEScript
                     reflagged[i] = (src.Surf >= 0 ? node : -1, src, pf);
                 }
             }
-            return new DrawnWorld(nodes.ToArray(), movers.ToArray(), sky, back?.ToArray(), reflagged);
+            // HP2: DrawFrame's Lumos arguments per carrier polygon; a mover polygon whose fragments' records disagree cannot be
+            // drawn whole by the frontend (the original draws each fragment with its record's arguments): loud
+            List<(int, ViewSource, bool, int, int)> lumos = null;
+            if (lumosOf?.Invoke(f) is { } la)
+            {
+                Dictionary<(int, int), (bool, int, int)> moverArgs = null;
+                for (int i = 0; i < la.Length; i++)
+                {
+                    if (!la[i].Carrier) continue;
+                    var (surf, node, _, _) = f.DrawnPolys[i];
+                    ViewSource src = polyOf(surf, node);
+                    var args = (la[i].Drawn, la[i].PolyFlags, la[i].Alpha);
+                    if (src.Surf >= 0) { (lumos ??= new()).Add((node, default, args.Item1, args.Item2, args.Item3)); continue; }
+                    moverArgs ??= new();
+                    if (moverArgs.TryGetValue((src.MoverId, src.MoverPoly), out var prev))
+                    {
+                        if (prev != args)
+                            throw new NotSupportedException($"HP2 DrawFrame Lumos: mover {src.MoverId} polygon {src.MoverPoly} has fragments drawn with "
+                                + $"different arguments ({prev} / {args}); the frontend draws a mover polygon whole");
+                        continue;
+                    }
+                    moverArgs[(src.MoverId, src.MoverPoly)] = args;
+                    (lumos ??= new()).Add((-1, src, args.Item1, args.Item2, args.Item3));
+                }
+            }
+            return new DrawnWorld(nodes.ToArray(), movers.ToArray(), sky, back?.ToArray(), reflagged, lumos?.ToArray());
+        }
+
+        // HP2: URender::DrawFrame's Lumos lines (UELumosSurfaces) for each frame of the tree the walk world w produced; null for
+        // HP1 (no carrier is drawn differently there). The viewport actor is read as DrawFrame reads it: after OccludeFrame,
+        // the surface words with every frame's Lumos marks (OccludeBsp's pass runs per frame, DrawFrame after all of them).
+        internal static Func<UESceneNode, (bool Carrier, bool Drawn, int PolyFlags, int Alpha)[]> LumosOf(UEOcclusionWorld w)
+        {
+            if (UEGameProfile.Current.Game != UEEdition.Game.HP2 || w?.Bsp is null) return null;
+            HeadlessBspModel m = w.Bsp;
+            UEObject v = w.Viewer;
+            bool pawn = v is not null && UEInterpreter.ClassIsA(v.Class, "PlayerPawn");
+            bool on = pawn && UEValue.ToBool(v.GetProp("bLumosOn"));
+            float radius = pawn ? UEValue.AsFloat(v.GetProp("fLumosRadius")) : 0f;
+            UEVector loc = v is null ? default : UEValue.AsVector3(v.GetProp(PK.Location));
+            bool span = w.SpanBased?.Invoke() ?? throw new InvalidOperationException("DrawFrame Lumos: RenDev.SpanBased not bound to the occlusion world");
+            var (recordFlags, zone) = RecordKeys(w);
+            return f => UELumosSurfaces.Frame(f, m.SurfPolyFlagsOf, recordFlags, zone, span, pawn, on, radius, loc);
+        }
+
+        // OccludeBsp's draw-record merge key of a FSavedPoly (UELumosSurfaces.RecordHeads): the record's PolyFlags (surface |
+        // ExtraPolyFlags 0 | texture, & (ShowFlags >> 11 | 0xfffffffe), as UEOcclusion.Surface) and the node side's zone actor
+        // (Model->Zones[iZone[side]].ZoneActor, Level->Actors[0] when none).
+        internal static (Func<int, int> RecordFlags, Func<int, int, object> ZoneActor) RecordKeys(UEOcclusionWorld w)
+        {
+            HeadlessBspModel m = w.Bsp;
+            int show = (int)(((uint)w.ShowFlags >> 11) | 0xfffffffe);
+            object Zone(int node, int side)
+            {
+                m.RenderNode(node, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out int z0, out int z1, out _, out _);
+                return (object)w.ZoneActor(side == 0 ? z0 : z1) ?? w.LevelInfo;
+            }
+            return (s => (m.SurfPolyFlagsOf(s) | w.TexturePolyFlags(s)) & show, Zone);
         }
 
         // Surf->Texture of every polygon a frame of the tree drew, first appearance order (DrawFrame Update, see DrawnWorld);
@@ -189,7 +248,8 @@ namespace HP1.UEScript
             float ex = s.BoundsMax.x - s.BoundsMin.x, ey = s.BoundsMax.y - s.BoundsMin.y, ez = s.BoundsMax.z - s.BoundsMin.z;
             float lim = (ex * ex + ez * ez) + ey * ey;
             if (!(lim >= 10000f)) lim = 10000f;                                       // fcom; test ah,1
-            if ((mx * mx + mz * mz) + my * my > lim)                                  // fcomp st1; test ah,0x41
+            _grbbShifted = (mx * mx + mz * mz) + my * my > lim;
+            if (_grbbShifted)                                                         // fcomp st1; test ah,0x41
             {
                 bool ok;
                 _grbbPath = true;
@@ -214,6 +274,8 @@ namespace HP1.UEScript
                 HasZone = zone is not null, ZoneGravity = zone is null ? default : UEValue.AsVector3(zone.GetProp(PK.ZoneGravity)),
                 GravityModifier = PropF(fx, "GravityModifier"), Gravity = UEValue.AsVector3(fx.GetProp(PK.Gravity)),
             };
+            // HP2: the owner-mesh box [HP2 0x103ce88e..0x103ce8c1] is HP1's (layout only): tools/hp2/particle_body_judge.py
+            // GrbbOwnerMesh; the mesh box itself is HP2's skeletal GetRenderBoundingBox (MeshRenderBoundingBox).
             // The closure only when the box reads it (allocation only: ParticleRenderBox calls it only for OwnerMesh).
             return ParticleRenderBox(input, input.OwnerMesh ? OwnerMeshBox(owner) : null, fx.GetProp(PK.Name)?.ToString());
         }
@@ -339,13 +401,15 @@ namespace HP1.UEScript
             return (new UEVector(nx, ny, nz), new UEVector(xx, xy, xz));
         }
 
-        // FBox::FBox(FBox, FCoords) (Core 0x1014f170): axes — box sides along the C axes, origin — sum per the disasm, then
-        // FBox(FCoords).
-        static (UEVector, UEVector) BoxTransform24(UEVector min, UEVector max, in BrushCoords c)
+        // Original: Core.dll ??0FBox@@QAE@ABV0@ABVFCoords@@@Z [HP1 0x1014F170] [HP2 0x10150950]
+        // Axes — box sides along the C axes, origin — sum per the disasm, then FBox(FCoords).
+        internal static (UEVector, UEVector) BoxTransform24(UEVector min, UEVector max, in BrushCoords c)
         {
             float dz = max.z - min.z, dy = max.y - min.y, dx = max.x - min.x;
-            // RU EA (UEEdition.RuOrder; RU Core 0x1014eaf2..0x1014eb09): Origin.x = ((min.z·Z.x + min.y·Y.x) + min.x·X.x) + O.x.
-            var o = new UEVector(UEEdition.RuOrder ? ((min.z * c.Z.x + min.y * c.Y.x) + min.x * c.X.x) + c.Origin.x
+            // RU EA (UEEdition.RuOrder; RU Core 0x1014eaf2..0x1014eb09) and HP2 (HP2 Core 0x101509c2..0x101509d7):
+            // Origin.x = ((min.z·Z.x + min.y·Y.x) + min.x·X.x) + O.x; .y and .z as in US 1.53 in both.
+            bool ruX = UEEdition.RuOrder || UEGameProfile.Current.Game == UEEdition.Game.HP2;
+            var o = new UEVector(ruX ? ((min.z * c.Z.x + min.y * c.Y.x) + min.x * c.X.x) + c.Origin.x
                     : ((min.y * c.Y.x + min.x * c.X.x) + min.z * c.Z.x) + c.Origin.x,
                 ((c.X.y * min.x + c.Z.y * min.z) + c.Y.y * min.y) + c.Origin.y,
                 ((c.X.z * min.x + c.Z.z * min.z) + c.Y.z * min.y) + c.Origin.z);
@@ -368,16 +432,31 @@ namespace HP1.UEScript
             return c;
         }
 
+        // FDynamicSprite::Setup's ParticleFX branch (Render 0x10b30cf8..0x10b30d53, DrawType 2 or 8, the class chain holds
+        // AParticleFX): bShellOnly (+0x3c8 bit 0) gives the whole viewport, X1 = Y1 = 0, X2/Y2 = Viewport SizeX/SizeY, and
+        // returns without writing the sprite's Z (+0x8, +0xc); the FDynamicSprite ctor then places the corners at that Z
+        // (0x10b3080c, 0x10b30867), which is the GDynMem chunk's residue (new(GDynMem) does not clear it, 0x10b2fe80..):
+        // which leaves and spans the sprite filters into is undefined in the original. Class A STOP.
+        static NotSupportedException ShellSpriteStop(UEObject a) => new(
+            $"FDynamicSprite::Setup: bShellOnly emitter {a.GetProp(PK.Name)} — the full-screen sprite's Z is GDynMem residue (STOP)");
+
+        // Original: Render.dll not exported: FUN_10b30c70 FDynamicSprite::Setup [HP1 0x10B30C70] — thunk 0x10b01131, called by
+        // the FDynamicSprite ctor 0x10b307c3
         bool MeshSpriteSetup(UEObject a, UESceneNode f, out UERenderVisibility.ScreenBounds sb)
         {
             sb = default;
             if (UEInterpreter.ClassIsA(a.Class, "ParticleFX"))
-                throw new NotSupportedException($"FDynamicSprite::Setup: mesh AParticleFX (bit +0x3c8, full screen) not ported actor={a.GetProp(PK.Name)}");
+            {
+                if (UEValue.ToBool(a.GetProp(PK.bShellOnly))) throw ShellSpriteStop(a);
+                // Otherwise the box is the virtual GetRenderBoundingBox: AParticleFX's particle box, then a mesh draw.
+                throw new NotSupportedException($"FDynamicSprite::Setup: AParticleFX {a.GetProp(PK.Name)} with a mesh DrawType (its "
+                    + "sprite takes the particle box, not the mesh box) is not ported");
+            }
             if (MeshRenderBoundingBox is null) throw new InvalidOperationException("DirectRenderStep: mesh box (UELevelRuntime.MeshRenderBoundingBox) not bound to the producer");
             BrushCoords box = MeshRenderBoundingBox(a);
             float lx = box.X.y * box.X.y + box.X.z * box.X.z + box.X.x * box.X.x;
-            if (lx == 0f) return false;
-            SetupBoundVisibleResidue(box);
+            if (lx == 0f) { Hp2SetupSlotUnknown(); return false; }
+            SetupBoundVisibleResidue(box, f.Parent is not null);
             return UERenderVisibility.BoundVisible(f, box, out sb) && sb.Y2 > sb.Y1;
         }
 
@@ -409,9 +488,11 @@ namespace HP1.UEScript
             bool identity = rendMap is 13 or 14 or 15 or 1;
             DirectMeshes = DirectEmitters = 0;
             DirectChildEmitters = DirectChildMeshes = 0;
+            Hp2RenderSlotGameWrite();   // HP2: the previous frame's tail and this frame's Setup pass (D-73 HP2)
             UESceneNode master = OccludeWorld(player, interp, frameX, frameY, fov, actors, shadowsOn, sprites: true);
             var viewIndex = new Dictionary<UESceneNode, int>();
-            _views = ProjectViews(master, _lastOcclusionWorld.SourceOf, viewIndex, _drawn = new List<DrawnWorld>(), _lastOcclusionWorld.PolyOf);
+            _views = ProjectViews(master, _lastOcclusionWorld.SourceOf, viewIndex, _drawn = new List<DrawnWorld>(), _lastOcclusionWorld.PolyOf,
+                LumosOf(_lastOcclusionWorld));
             var drawOrder = new List<int>[_views.Count + 1];
             _drawnTextures = DrawnTexturesOf(master, _lastOcclusionWorld);
             CollectSurfDynamicLights(master, _lastOcclusionWorld);
@@ -430,7 +511,17 @@ namespace HP1.UEScript
                 // (UESpriteSort); a SpanBased one draws it in list order after pass 2 (no list-2 interleaving here).
                 bool spanBased = _lastOcclusionWorld.SpanBased?.Invoke()
                     ?? throw new InvalidOperationException("DrawFrame: RenDev.SpanBased not bound to the occlusion world");
+                // HP2's SpanBased sprite interleave draws a sprite only when FSpanBuffer::BoxIsVisible of its rectangle on the
+                // record's span passes [HP2 0x10b2529a..0x10b252c3]; the interleave is not ported for either game (above), and
+                // HP2's D3DDrv is not SpanBased (StaticConstructor [HP2 D3DDrv 0x10001eaf]: +0x48 = 0).
+                if (spanBased && UEGameProfile.Current.Game == UEEdition.Game.HP2)
+                    throw new NotSupportedException("HP2 URender::DrawFrame on a SpanBased device (SoftDrv): the sprite interleave with "
+                        + "FSpanBuffer::BoxIsVisible [HP2 0x10b2529a..0x10b252c3] is not ported");
                 IReadOnlyList<UESprite> order = spanBased ? f.Sprites : UESpriteSort.NonSpanBasedOrder(f.Sprites, x => x.Actor);
+                // HP2: each DrawFrame's sprite loop runs at its own depth (a child frame one DrawFrame deeper: live PrivetDr,
+                // the sky frame's CloudPuffs0 at slot 0x0012e61c); before it, game code at that depth (the surfaces' Render
+                // side, the child DrawFrame's locals over the master slot) leaves pointer bits there (D-73 HP2 (7)).
+                Hp2RenderSlotGameWrite();
                 List<int> seq = drawOrder[viewIndex[f] + 1] = new List<int>(order.Count);
                 var inSeq = new HashSet<int>();
                 void Drew(int id) { if (inSeq.Add(id)) seq.Add(id); }
@@ -465,6 +556,10 @@ namespace HP1.UEScript
                         // Sprite DrawActorSprite (texture tile): the frontend draws it; the frame names what to draw.
                         _spriteActors.Add(a.ObjectId);
                         DirectSprites++;
+                        // HP2 DrawActorSprite draws the tile through UCanvas::DrawTile, which calls the device only when
+                        // XL = (USize·Scale)·DrawScale > 0 and YL > 0 and the tile meets the frame [HP2 Engine 0x1038f86f..];
+                        // Setup already kept only sprites whose tile meets the frame and that have a Texture.
+                        if (UEInterpreter.AsFloat(a.GetProp(PK.DrawScale)) > 0f) Hp2RenderSlotGameWrite();
                     }
                     else
                     {
@@ -474,9 +569,24 @@ namespace HP1.UEScript
                         int Request(UEObject owner)
                         {
                             if (EnhancedVisuals) return -1;
+                            // Not IsA ULodMesh: DrawMesh's UMesh branch, no LOD (Render 0x10b0e960..0x10b0e97e).
+                            if (owner.GetProp(PK.Mesh) is UEResourceRef { Class: var mc } && mc.Equals("Mesh", StringComparison.OrdinalIgnoreCase))
+                                return -1;
                             var lod = MeshLodOf(owner.GetProp(PK.Mesh));
+                            // URender+0x4c GlobalShapeLOD as the process's URender holds it: Init's 1.0 unless MLOD stored
+                            // another (HP2's FESoundVideoPage; no HP1 code path writes it).
                             return UEMeshLod.VertsRequested(lod.Lod, lod.ModelVerts, lod.SpecialVerts, lod.Skeletal,
-                                UEInterpreter.AsFloat(owner.GetProp(PK.LODBias)), sp.X1, sp.Y1, sp.X2, sp.Y2, f.FX);
+                                UEInterpreter.AsFloat(owner.GetProp(PK.LODBias)), sp.X1, sp.Y1, sp.X2, sp.Y2, f.FX,
+                                UEMeshLod.ConsoleGlobalShapeLOD);
+                        }
+                        // HP2 DrawActorSprite calls DrawMesh for DrawType 2 with a Mesh [HP2 0x10b33525 area]; DrawMesh's
+                        // ULodMesh branch calls DrawLodMesh (every DrawMesh in the live captures did).
+                        if (dt == 2 && a.GetProp(PK.Mesh) is UEResourceRef { Class: var dmc })
+                        {
+                            if (dmc.Equals("Mesh", StringComparison.OrdinalIgnoreCase))
+                                UEGameProfile.Stop(UEEdition.Game.HP2, "D-73 render slot: DrawMesh's UMesh branch (not a ULodMesh) between "
+                                    + $"two particle draws ({a.GetProp(PK.Name)}): its writes at the slot are not derived");
+                            Hp2RenderSlotGameWrite();
                         }
                         var poses = new List<MeshPose>();
                         DrawMesh(a, identity, f.Coords, DrawnMeshes, poses, Request);
@@ -598,13 +708,19 @@ namespace HP1.UEScript
             // Emitter FDynamicSprite::Setup (Render thunk_FUN_10b30c70) in frame f: the AParticleFX::GetRenderBoundingBox box
             // (vtable +0xa0, call 0x10b30d61; on a shift — Update(0) regardless of the frustum: the Shutdown budget -> actor
             // Destroy depends on the step count, pilot J15), reject when |X|² = 0 (order y² + z² + x²), frame BoundVisible.
+            // Original: Render.dll not exported: FUN_10b30c70 FDynamicSprite::Setup [HP1 0x10B30C70] (its ParticleFX branch)
             bool EmitterSetup(UEObject a, UESceneNode f, out UERenderVisibility.ScreenBounds sb)
             {
                 sb = default;
+                if (UEValue.ToBool(a.GetProp(PK.bShellOnly))) throw ShellSpriteStop(a);
+                if (f.Parent is not null) Hp2SetupSlotUnknown();   // HP2: a child frame's Setup reads another slot (D-73 HP2 (7))
                 BrushCoords box = ParticleRenderBoundingBox(a);
                 float lx = box.X.y * box.X.y + box.X.z * box.X.z + box.X.x * box.X.x;
-                if (lx == 0f) return false;
-                SetupBoundVisibleResidue(box);
+                // HP2: a shifted emitter's degenerate box (its Update failed or drew nothing) leaves the slot as that Update
+                // did (live Adv11aCorridor SpellCursor1, then Diffindo_ropeFx0 read the unchanged (0, 0)); the box branch's
+                // own writes there (live: (1.0, ...) [HP2 GetRenderBoundingBox]) are not derived — unknown.
+                if (lx == 0f) { if (!_grbbShifted) Hp2SetupSlotUnknown(); return false; }
+                SetupBoundVisibleResidue(box, f.Parent is not null);
                 return UERenderVisibility.BoundVisible(f, box, out sb) && sb.Y2 > sb.Y1;
             }
             bool IsEmitter(UEObject a, int dt) => dt == 8 && particlesOn && UEInterpreter.ClassIsA(a.Class, "ParticleFX");
@@ -643,7 +759,7 @@ namespace HP1.UEScript
                         else if (IsSprite(dt)) { if (SpriteSetup(a, f, out sb)) Occlusion.CreateSprite(f, a, sb, nodeCount); }
                     },
                     Shadow, f.Parent is null ? a => { if (UpdateMovingBrush(a)) DirectMovers++; } : null, f.Recursion,
-                    a => Occlusion.SetupLight(f, a, nodeCount));
+                    a => Occlusion.SetupLight(f, a, nodeCount), f.Parent is null ? Hp2SetupSlotGameWrite : Hp2SetupSlotUnknown);
                 Occlusion.OccludeBsp(f, w);
                 Occlusion.ClearCache();
                 foreach (UESceneNode c in f.Children) { DirectChildFrames++; OccludeFrame(c); }

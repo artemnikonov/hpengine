@@ -12,9 +12,12 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../VERSION').Trim())</Version>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="*.cs" />
+    <!-- The game titles' serif: Cormorant Garamond Bold (SIL OFL 1.1, Fonts/README.md), with its licence. -->
+    <AvaloniaResource Include="Fonts/CormorantGaramond-Bold.otf;Fonts/CormorantGaramond-LICENSE.txt" />
     <!-- The engine's own rule for "this folder is a game" (Logic.cs DataDir.OwnGame): one recogniser, not two. -->
     <Compile Include="../../hpengine/packaging/InstallRoot.cs" Link="InstallRoot.cs" />
     <!-- The engine's own mod placement rule (Logic.cs StartMap: the maps the enabled mods add). -->
@@ -31,6 +34,13 @@
     <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
       <_Parameter1>HPEngineUpdateKey</_Parameter1>
       <_Parameter2>$(HPEngineUpdateKey)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+  <!-- HP2 in the launcher (Logic.cs Hp2Release): a preview build only; make_launcher.sh passes -p:HPEngineHp2=true with HPENGINE_HP2=1 -->
+  <ItemGroup Condition="'$(HPEngineHp2)' == 'true'">
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>HPEngineHp2</_Parameter1>
+      <_Parameter2>true</_Parameter2>
     </AssemblyAttribute>
   </ItemGroup>
 </Project>

@@ -19,11 +19,12 @@ namespace HP1.UEScript
         // properties terminator (None), FBox {Min, Max, IsValid}, FSphere {xyz, W}.
         // Same header the level-model parse skips (Load below, "25 + 16"). Keyed by
         // 1-based export index — the value a mover's Brush ObjectProperty carries.
-        // Parse the Level export up to its Model reference. Layout per
-        // ULevelBase::Load + ULevel::Load (as in SurrealEngine ULevel.cpp:33/86): properties
-        // terminator, Actors (int32 count, int32 max, count object indices), FURL
-        // (Protocol/Host/Map/Portal strings, Options count+strings, Port int32,
-        // trailing int32), then the Model object index.
+        // Parse the Level export up to its Model reference.
+        // Original: ULevel::Serialize 0x103aec60 calls ULevelBase::Serialize 0x103adce0 first: UObject::Serialize
+        // (0x103add11, properties: terminator), then, not transacting (`[Ar+0x18]` = 0, 0x103add17), Actors as int32
+        // Num (0x103add5b) and int32 Max (0x103add68, read and never used), Num object indices (0x103ade34), the FURL
+        // (0x1042dc90: Protocol, Host, Map, Portal strings, Op TArray<FString> 0x103b2b80, Port int32 +0x18, Valid
+        // int32 +0x40); back in ULevel::Serialize the Model object index (+0x98, 0x103aecae).
         private static UExportTableItem ResolveLevelModel(UnrealPackage package, byte[] packageBytes)
         {
             UExportTableItem level = null;
@@ -68,7 +69,7 @@ namespace HP1.UEScript
         {
             string key = HP1.Core.UEClassRegistry.PhysicalPath(mapPath);   // a symlinked spelling is the same file
             if (_packageCache.TryGetValue(key, out var cached)) return cached;
-            UnrealPackage package = UnrealLoader.LoadPackage(mapPath, FileAccess.Read);
+            UnrealPackage package = HP1.UEScript.UEPackageOpen.Load(mapPath, FileAccess.Read);
             package.InitializePackage(UnrealPackage.InitFlags.All);
             byte[] bytes = File.ReadAllBytes(mapPath);
             return _packageCache[key] = (package, bytes);
@@ -121,9 +122,9 @@ namespace HP1.UEScript
             return ParseModelExport(package, packageBytes, model);
         }
 
-        // ULevel::Load immediately follows the Model reference with the serialized
-        // ReachSpecs TArray (as in SurrealEngine ULevel.cpp:86-108; shipped ULevel keeps
-        // the 0x1c-byte runtime entries at +0x8c).  FindPath(553) consumes these
+        // Original: ULevel::Serialize follows the Model reference with ReachSpecs (+0x8c, 0x103aecb9 -> 0x103b2e80:
+        // compact count, then 0x1c-byte FReachSpecs by 0x103b3730: Distance int32, Start and End object indices,
+        // CollisionRadius, CollisionHeight, reachFlags int32, bPruned byte). FindPath(553) consumes these
         // original entries through each NavigationPoint.Paths[16].  Reading them
         // here keeps the gameplay graph sourced from the level's own .unr data.
         public static IReadOnlyList<LevelReachSpecRef> LoadReachSpecs(string mapPath)
@@ -155,9 +156,7 @@ namespace HP1.UEScript
                 throw new InvalidDataException("Level property terminator: " + terminator);
 
             int actorCount = CheckedCount(r.Int32(), "level actors");
-            int actorMax = r.Int32();
-            if (actorMax < actorCount)
-                throw new InvalidDataException($"level actor max {actorMax} < count {actorCount}");
+            r.Int32(); // max
             for (int i = 0; i < actorCount; i++) r.Index();
             for (int i = 0; i < 4; i++) r.UString();
             int options = CheckedCount(r.Index(), "URL options");
@@ -192,21 +191,29 @@ namespace HP1.UEScript
                 specs[i] = new LevelReachSpecRef(distance, start, end, radius, height, flags, pruned);
             }
 
-            // Shipped ULevel::Serialize continues after ReachSpecs (Engine.dll.c
-            // 10155-10215): the saved 32.32 clock converted to float, one object
-            // reference at +0x100, sixteen object references at +0x9c..+0xd8, and
-            // for package version >=63 the TravelInfo TMap<string,string>. SurrealEngine's
-            // loader stops at ReachSpecs, so use the shipped layout and
-            // consume the tail rather than silently accepting a partial Level.
+            // Original: ULevel::Serialize continues after ReachSpecs (0x103aecc3..0x103aecf1): the saved 32.32 clock
+            // as a float (4 bytes), the object reference at +0x100, sixteen object references at +0x9c..+0xd8; then
+            // by ArVer (0x103aecf3): above 62 the TravelInfo TMap<FString,FString> (0x103b33c0: compact count,
+            // key/value string pairs), 61..62 two TArray<FString> (0x103aed48/0x103aed55 -> 0x103b2b80), below 61
+            // nothing. The tail is consumed, so a partial Level is not silently accepted.
             r.Single();
             r.Index();
             for (int i = 0; i < 16; i++) r.Index();
-            int travelCount = CheckedCount(r.Index(), "travel info");
-            for (int i = 0; i < travelCount; i++)
+            if (package.Version > 62)
             {
-                r.UString();
-                r.UString();
+                int travelCount = CheckedCount(r.Index(), "travel info");
+                for (int i = 0; i < travelCount; i++)
+                {
+                    r.UString();
+                    r.UString();
+                }
             }
+            else if (package.Version >= 61)
+                for (int list = 0; list < 2; list++)
+                {
+                    int n = CheckedCount(r.Index(), "travel info (two lists)");
+                    for (int i = 0; i < n; i++) r.UString();
+                }
             if (r.Remaining != 0)
                 throw new InvalidDataException(
                     $"Level export has {r.Remaining} unread bytes after ReachSpecs: {r.RemainingHex()}");

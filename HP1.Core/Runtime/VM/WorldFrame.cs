@@ -87,14 +87,17 @@ namespace HP1.UEScript
         // : Rotation +0x108). The spot filler FUN_10b05710 calls it (Render.dll.c:18492), and ComputeFromActor's
         // LightSource 1 branch inlines it (IsA [0x10b74734] = APawn::PrivateStaticClass, disasm 0x10b06e8e..0x10b06ea8).
         public readonly UERotator ViewRotation;
+        // LightType 8/9 (TexturePaletteOnce/Loop): the Skin palette entry the type function reads at this frame
+        // (LightPalette.Pack, 0x01RRGGBB; the render-side index at PC24); 0 — no Skin or no Palette, or another type.
+        public readonly int Palette;
         public LightState(int type, int effect, int brightness, int hue, int saturation,
             int radius, float worldRadius, int radiusInner, int cone, int phase,
             int period, int volumeBrightness,
             bool corona, bool dynamicLight, bool specialLit, int source,
             bool bStatic, bool dark, bool noDelete, float scale = 1f,
-            int volumeRadius = 0, int volumeFog = 0, bool movable = false, UERotator viewRotation = default)
+            int volumeRadius = 0, int volumeFog = 0, bool movable = false, UERotator viewRotation = default, int palette = 0)
         {
-            VolumeRadius = volumeRadius; VolumeFog = volumeFog; Movable = movable; ViewRotation = viewRotation;
+            VolumeRadius = volumeRadius; VolumeFog = volumeFog; Movable = movable; ViewRotation = viewRotation; Palette = palette;
             Type = type; Effect = effect; Brightness = brightness; Hue = hue;
             Saturation = saturation; Radius = radius; WorldRadius = worldRadius;
             RadiusInner = radiusInner; Cone = cone; Phase = phase;
@@ -123,7 +126,7 @@ namespace HP1.UEScript
         // ABrush::ToWorld of this tick (UELevelRuntime.BrushToWorld: Location, Rotation, PrePivot, MainScale, PostScale):
         // the frontend places the brush polygons with it instead of reading the live actor. Zero when the actor has no brush.
         public readonly BrushCoords ToWorld;
-        // Mover.bDynamicLightMover: mode-3 lighting (Core MoverMode3Lightmaps), not the zone layer.
+        // Mover.bDynamicLightMover: mode-3 lighting (Core MoverMode3Lightmaps), not the level branch (MoverLevelLightmap).
         public readonly bool DynamicLightMover;
         public MoverState(int keyNum, int prevKeyNum, int numKeys, float physAlpha,
             bool interpolating, int brushExportIndex, string brushName, BrushCoords toWorld = default, bool dynamicLightMover = false)
@@ -973,6 +976,10 @@ namespace HP1.UEScript
         // Textures DrawFrame updated this tick (see DrawnWorld): AnimNext chains and procedural textures advance only these.
         public readonly IReadOnlyList<string> DrawnTextures;
 
+        // AnimNext chains: the frame each chain head shows after this frame's Updates (UEWorldFrameProducer.TextureUses: every
+        // texture the frame used, the HUD's included), keyed by the head's path; a texture absent here was not used this frame.
+        public readonly IReadOnlyDictionary<string, string> TextureFrames;
+
         // NOT ORIGINAL (Enhanced mode): the Options item "Object Detail" as read by
         // Core this frame (UEWorldFrameProducer.EnhancedVisuals). true — the frontend applies the runtime-switchable
         // visual improvements (anisotropy D-53, trilinear mips D-48); false — the shipped D3DDrv sampling.
@@ -982,6 +989,9 @@ namespace HP1.UEScript
         // plays voices from them and decides nothing. AudioResumeSerial - the song held on viewport loss (D-51).
         public readonly IReadOnlyList<UEGalaxyAudio.Playback> AudioChannels;
         public readonly int AudioResumeSerial;
+        // HP2: the OpenAL calls the ALAudio device (UEALAudio, Core) made since the previous frame, in call order — the
+        // frontend executes them (HPEngine ALExecutor) and decides nothing. Null for HP1 (Galaxy: AudioChannels).
+        public IReadOnlyList<UEALAudio.Command> ALCommands { get; internal set; }
         // K2: pool voices the frame's device calls freed before its Update, and the dt that Update advanced the audio clock by
         // (UEGalaxyAudio.LastCallStops / LastMixDt): the frontend stops them, mixes the frame's audio, then applies the table.
         public readonly IReadOnlyList<int> AudioCallStops;
@@ -999,9 +1009,9 @@ namespace HP1.UEScript
             ActorViewSets actorViews = null, IReadOnlyList<CoronaInstance> coronas = null, bool enhancedVisuals = true,
             IReadOnlyList<DrawnWorld> drawn = null, IReadOnlyList<string> drawnTextures = null,
             IReadOnlyList<int> audioCallStops = null, float audioMixDt = 0f, IReadOnlyList<int[]> drawOrder = null,
-            int canvasScale = 1)
+            int canvasScale = 1, IReadOnlyDictionary<string, string> textureFrames = null)
         {
-            DrawOrder = drawOrder; CanvasScale = canvasScale;
+            DrawOrder = drawOrder; CanvasScale = canvasScale; TextureFrames = textureFrames ?? _noTextureFrames;
             AudioCallStops = audioCallStops ?? System.Array.Empty<int>(); AudioMixDt = audioMixDt;
             Drawn = drawn; DrawnTextures = drawnTextures ?? _noTextures;
             Coronas = coronas ?? _noCoronas; EnhancedVisuals = enhancedVisuals;
@@ -1021,6 +1031,7 @@ namespace HP1.UEScript
         static readonly int[] _noSprites = new int[0];
         static readonly CoronaInstance[] _noCoronas = new CoronaInstance[0];
         static readonly string[] _noTextures = new string[0];
+        static readonly IReadOnlyDictionary<string, string> _noTextureFrames = new Dictionary<string, string>();
         static readonly MeshPose[] _noPoses = new MeshPose[0];
     }
 
@@ -1098,10 +1109,17 @@ namespace HP1.UEScript
         // PF_Translucent cleared, 0x80000000 set and is drawn in the opaque pass 1. Node: level node, -1 for a mover polygon
         // (Mover.MoverId, Mover.MoverPoly).
         public readonly (int Node, ViewSource Mover, int PolyFlags)[] Reflagged;
-        public DrawnWorld(int[] nodes, ViewSource[] movers, int[] skyWindows, int[] backNodes = null, (int, ViewSource, int)[] reflagged = null)
+        // Lumos (HP2; empty for HP1): the drawn polygons whose surface is a Lumos carrier (Surf PolyFlags & 0x800040), with the
+        // DrawComplexSurface arguments DrawFrame passes for their draw record (UELumosSurfaces: PolyFlags in place of the
+        // record's flags, the multitexture pass's diffuse alpha byte; Drawn false — DrawFrame skips the record). Node: level
+        // node, -1 for a mover polygon (Mover.MoverId, Mover.MoverPoly).
+        public readonly (int Node, ViewSource Mover, bool Drawn, int PolyFlags, int Alpha)[] Lumos;
+        public DrawnWorld(int[] nodes, ViewSource[] movers, int[] skyWindows, int[] backNodes = null, (int, ViewSource, int)[] reflagged = null,
+            (int, ViewSource, bool, int, int)[] lumos = null)
         {
             Nodes = nodes; Movers = movers; SkyWindows = skyWindows; BackNodes = backNodes ?? System.Array.Empty<int>();
             Reflagged = reflagged ?? System.Array.Empty<(int, ViewSource, int)>();
+            Lumos = lumos ?? System.Array.Empty<(int, ViewSource, bool, int, int)>();
         }
     }
 
@@ -1324,77 +1342,77 @@ namespace HP1.UEScript
                     (touching ??= new List<string>()).Add(t.GetProp(PK.Name)?.ToString());
 
             return new ActorSnapshot(
-                objectId:     a.ObjectId,
-                baseId:       IdOf(a.GetProp(PK.Base)),
-                ownerId:      IdOf(a.GetProp(PK.Owner)),
-                name:         a.GetProp(PK.Name)?.ToString(),
-                @class:       a.Class?.Name,
-                placed:       a.GetProp(PK.ExportIndex) is not null,
-                exportIndex:  UEValue.ToInt(a.GetProp(PK.ExportIndex)),
-                location:     UEValue.AsVector3(a.GetProp(PK.Location)),
-                rotation:     UEValue.AsRotator(a.GetProp(PK.Rotation)),
-                velocity:     UEValue.AsVector3(a.GetProp(PK.Velocity)),
+                objectId: a.ObjectId,
+                baseId: IdOf(a.GetProp(PK.Base)),
+                ownerId: IdOf(a.GetProp(PK.Owner)),
+                name: a.GetProp(PK.Name)?.ToString(),
+                @class: a.Class?.Name,
+                placed: a.GetProp(PK.ExportIndex) is not null,
+                exportIndex: UEValue.ToInt(a.GetProp(PK.ExportIndex)),
+                location: UEValue.AsVector3(a.GetProp(PK.Location)),
+                rotation: UEValue.AsRotator(a.GetProp(PK.Rotation)),
+                velocity: UEValue.AsVector3(a.GetProp(PK.Velocity)),
                 acceleration: UEValue.AsVector3(a.GetProp(PK.Acceleration)),
-                physics:      UEValue.ToInt(a.GetProp(PK.Physics)),
-                zoneNumber:   UEValue.ToInt(region?.GetProp(PK.ZoneNumber)),
-                leaf:         UEValue.ToInt(region?.GetProp(PK.iLeaf)),
-                fogZone:      UEValue.ToBool(a.GetProp(PK.bFogZone)),
+                physics: UEValue.ToInt(a.GetProp(PK.Physics)),
+                zoneNumber: UEValue.ToInt(region?.GetProp(PK.ZoneNumber)),
+                leaf: UEValue.ToInt(region?.GetProp(PK.iLeaf)),
+                fogZone: UEValue.ToBool(a.GetProp(PK.bFogZone)),
                 texUPanSpeed: UEValue.AsFloat(a.GetProp(PK.TexUPanSpeed)),
                 texVPanSpeed: UEValue.AsFloat(a.GetProp(PK.TexVPanSpeed)),
-                animBone:     UEValue.ToInt(a.GetProp(PK.AnimBone)),
-                auxAnims:     AuxAnimIds(a.GetProp(PK.AuxAnims)),
-                @base:        NameOf(a.GetProp(PK.Base)),
-                owner:        NameOf(a.GetProp(PK.Owner)),
-                state:        a.StateFrame?.Func?.Name ?? "-",
-                latent:       a.StateFrame is { } sfr ? LatentName(sfr.LatentState) : "-",
-                moveTimer:    UEValue.AsFloat(a.GetProp(PK.MoveTimer)),
+                animBone: UEValue.ToInt(a.GetProp(PK.AnimBone)),
+                auxAnims: AuxAnimIds(a.GetProp(PK.AuxAnims)),
+                @base: NameOf(a.GetProp(PK.Base)),
+                owner: NameOf(a.GetProp(PK.Owner)),
+                state: a.StateFrame?.Func?.Name ?? "-",
+                latent: a.StateFrame is { } sfr ? LatentName(sfr.LatentState) : "-",
+                moveTimer: UEValue.AsFloat(a.GetProp(PK.MoveTimer)),
                 animSequence: a.GetProp(PK.AnimSequence)?.ToString() ?? "-",
-                animFrame:    UEValue.AsFloat(a.GetProp(PK.AnimFrame)),
-                animRate:     UEValue.AsFloat(a.GetProp(PK.AnimRate)),
-                tweenRate:    UEValue.AsFloat(a.GetProp(PK.TweenRate)),
+                animFrame: UEValue.AsFloat(a.GetProp(PK.AnimFrame)),
+                animRate: UEValue.AsFloat(a.GetProp(PK.AnimRate)),
+                tweenRate: UEValue.AsFloat(a.GetProp(PK.TweenRate)),
                 // THE SAME CONDITION AS THE TickRootMovement CALL - not a "similar" one.
                 // Role_Authority = 4 (ENetRole), see TickRootMovement.
                 rootMotionDriven: UEValue.ToInt(a.GetProp(PK.Role)) == 4
                                   && UEValue.ToBool(a.GetProp(PK.bAnimMove))
                                   && a.GetProp(PK.Mesh) is not null,
-                tweenAlpha:   UEValue.AsFloat(a.GetProp(PK.TweenAlpha)),
-                timerRate:    a.TimerRate,
+                tweenAlpha: UEValue.AsFloat(a.GetProp(PK.TweenAlpha)),
+                timerRate: a.TimerRate,
                 timerCounter: a.TimerCounter,
-                lifeSpan:     UEValue.AsFloat(a.GetProp(PK.LifeSpan)),
-                touching:     (IReadOnlyList<string>)touching ?? _noTouch,
-                destroyed:    a.Destroyed,
-                drawType:     UEValue.ToInt(a.GetProp(PK.DrawType)),
-                meshPath:     AssetPath(a.GetProp(PK.Mesh)),
+                lifeSpan: UEValue.AsFloat(a.GetProp(PK.LifeSpan)),
+                touching: (IReadOnlyList<string>)touching ?? _noTouch,
+                destroyed: a.Destroyed,
+                drawType: UEValue.ToInt(a.GetProp(PK.DrawType)),
+                meshPath: AssetPath(a.GetProp(PK.Mesh)),
                 // DT_Sprite/DT_SpriteAnimOnce render from Actor.Texture (URender::DrawActorSprite,
                 // Render.dll.c:11928-12027) — the candles/torch-fire/lights the
                 // frontend cannot build without it.
-                texturePath:  AssetPath(a.GetProp(PK.Texture)),
+                texturePath: AssetPath(a.GetProp(PK.Texture)),
                 // DrawScale defaults to 1.0 in UE1; an actor that never set it
                 // reads null → project the engine default, not 0.
-                drawScale:    a.GetProp(PK.DrawScale) is { } ds ? UEValue.AsFloat(ds) : 1f,
+                drawScale: a.GetProp(PK.DrawScale) is { } ds ? UEValue.AsFloat(ds) : 1f,
                 // Computed by the runtime (bAlignBottom vertical); a call without a runtime
                 // (no mesh catalogue - nothing to compute) yields a zero term.
-                style:        UEValue.ToInt(a.GetProp(PK.Style)),
-                hidden:       UEValue.ToBool(a.GetProp(PK.bHidden)),
-                unlit:        UEValue.ToBool(a.GetProp(PK.bUnlit)),
+                style: UEValue.ToInt(a.GetProp(PK.Style)),
+                hidden: UEValue.ToBool(a.GetProp(PK.bHidden)),
+                unlit: UEValue.ToBool(a.GetProp(PK.bUnlit)),
                 meshEnviroMap: UEValue.ToBool(a.GetProp(PK.bMeshEnviroMap)),
-                ambientGlow:  UEValue.ToInt(a.GetProp(PK.AmbientGlow)),
-                scaleGlow:    a.GetProp(PK.ScaleGlow) is { } sg ? UEValue.AsFloat(sg) : 1f,
-                fatness:      a.GetProp(PK.Fatness) is { } fat ? UEValue.ToInt(fat) : 128,
-                opacity:      a.GetProp(PK.Opacity) is { } op ? UEValue.AsFloat(op) : 1f,
+                ambientGlow: UEValue.ToInt(a.GetProp(PK.AmbientGlow)),
+                scaleGlow: a.GetProp(PK.ScaleGlow) is { } sg ? UEValue.AsFloat(sg) : 1f,
+                fatness: a.GetProp(PK.Fatness) is { } fat ? UEValue.ToInt(fat) : 128,
+                opacity: a.GetProp(PK.Opacity) is { } op ? UEValue.AsFloat(op) : 1f,
                 specularGlow: a.GetProp(PK.SpecularGlow) is { } sgl ? UEValue.AsFloat(sgl) : 1f,
                 specularWidth: a.GetProp(PK.SpecularWidth) is { } sw ? UEValue.ToInt(sw) : 170,
                 spriteProjForward: a.GetProp(PK.SpriteProjForward) is { } spf ? UEValue.AsFloat(spf) : 32f,
-                noSmooth:     UEValue.ToBool(a.GetProp(PK.bNoSmooth)),
-                zoneEnvironmentMap:  AssetPath((region?.GetProp(PK.Zone) as UEObject)?.GetProp("EnvironmentMap")),
+                noSmooth: UEValue.ToBool(a.GetProp(PK.bNoSmooth)),
+                zoneEnvironmentMap: AssetPath((region?.GetProp(PK.Zone) as UEObject)?.GetProp("EnvironmentMap")),
                 levelEnvironmentMap: AssetPath((a.GetProp(PK.Level) as UEObject)?.GetProp("EnvironmentMap")),
-                latePass:     UESpriteSort.Pass(a) == 2,
-                skin:         AssetPath(a.GetProp(PK.Skin)),
-                multiSkins:   ProjectMultiSkins(a.GetProp(PK.MultiSkins)),
-                light:        ProjectLight(a, outsideFrame),
-                mover:        ProjectMover(a),
-                ambient:      ProjectAmbient(a),
-                emitter:      ProjectEmitter(a));
+                latePass: UESpriteSort.Pass(a) == 2,
+                skin: AssetPath(a.GetProp(PK.Skin)),
+                multiSkins: ProjectMultiSkins(a.GetProp(PK.MultiSkins)),
+                light: ProjectLight(a, outsideFrame),
+                mover: ProjectMover(a),
+                ambient: ProjectAmbient(a),
+                emitter: ProjectEmitter(a));
         }
 
         // ── PER-ACTOR PROJECTION MEMO ───────────────────────────────────────
@@ -1557,23 +1575,23 @@ namespace HP1.UEScript
                 for (int i = 0; i < tex.Length; i++) tex[i] = AssetPath(tl[i]);
             }
             return new ParticleState(
-                valid:           true,
+                valid: true,
                 particlesPerSec: Range(a, "ParticlesPerSec"),
-                lifetime:        Range(a, "Lifetime"),
+                lifetime: Range(a, "Lifetime"),
                 renderPrimitive: UEValue.ToInt(a.GetProp(PK.RenderPrimitive)),
-                texturePaths:    (IReadOnlyList<string>)tex ?? _noSkins);
+                texturePaths: (IReadOnlyList<string>)tex ?? _noSkins);
         }
 
         static AmbientState ProjectAmbient(UEObject a)
         {
             int radius = UEValue.AsByte(a.GetProp(PK.SoundRadius));
             return new AmbientState(
-                soundPath:   AssetPath(a.GetProp(PK.AmbientSound)),
+                soundPath: AssetPath(a.GetProp(PK.AmbientSound)),
                 soundRadius: radius,
                 // StartAmbience radius (SoundRadius+1)*25 — one body, UEGalaxyVoiceMix.AmbientRadius.
                 worldRadius: UEGalaxyVoiceMix.AmbientRadius(a),
                 soundVolume: UEValue.AsByte(a.GetProp(PK.SoundVolume)),
-                soundPitch:  UEValue.AsByte(a.GetProp(PK.SoundPitch)));
+                soundPitch: UEValue.AsByte(a.GetProp(PK.SoundPitch)));
         }
 
         // Music from the local player pawn. The shipped Engine.u
@@ -1584,11 +1602,11 @@ namespace HP1.UEScript
         {
             if (player is null) return default;   // Valid=false
             return new MusicState(true,
-                songPath:    AssetPath(player.GetProp(PK.Song)),
+                songPath: AssetPath(player.GetProp(PK.Song)),
                 songSection: UEValue.AsByte(player.GetProp(PK.SongSection)),
-                cdTrack:     UEValue.AsByte(player.GetProp(PK.CdTrack)),
-                transition:  UEValue.AsByte(player.GetProp(PK.Transition)),
-                dontLoop:    UEValue.ToBool(player.GetProp(PK.bDontLoopSong)),
+                cdTrack: UEValue.AsByte(player.GetProp(PK.CdTrack)),
+                transition: UEValue.AsByte(player.GetProp(PK.Transition)),
+                dontLoop: UEValue.ToBool(player.GetProp(PK.bDontLoopSong)),
                 percentVolume: UEValue.AsByte(player.GetProp(PK.PercentMusicVolume)));
         }
 
@@ -1600,8 +1618,8 @@ namespace HP1.UEScript
         //   5 Strobe     (0x10b064b0): a global trigger flips on each new TimeSeconds value;
         //                              when set, b = 0;
         //   7 SubtlePulse(0x10b06510): like Pulse with 0.09/0.9;
-        //   8/9 TexturePalette* (0x10b06590/0x10b066d0): colour from the texture palette -
-        //                              NOT ported, factor 1 with a loud warning.
+        //   8/9 TexturePalette* (0x10b06590/0x10b066d0): brightness and colour from the Skin palette entry
+        //                              (LightPalette; the entry per frame in LightState.Palette), not a factor.
         // Constants read from the image: 2293760 = 35*65536 (0x10b38668), 0.39 (0x10b38664), 0.6 (0x10b385c8),
         // 0.09 (0x10b3866c), 0.9 (0x10b3863c), 0.5 (0x10b385ec). ROUND - fistp to nearest even; SinTab - GMath
         // (same as BrushCoords.SinAngle: index (a>>2)&0x3fff).
@@ -1617,9 +1635,9 @@ namespace HP1.UEScript
             static float _strobeLast = float.NaN;
             static bool _strobeOn;
             static float[] _rand;
-            static bool _paletteNoted;
 
             public static bool HasFrameRandoms => _rand is not null;
+            public static float Time => _time;
 
             public static void Begin(float levelTime, float[] randomBase)
             {
@@ -1649,44 +1667,113 @@ namespace HP1.UEScript
                 switch (type)
                 {
                     case 2:
-                    {
-                        int p = period == 0 ? 1 : period;
-                        int arg = RoundToInt(_time * 2293760f / p + (phase << 8));
-                        return Sin(arg) * 0.39f + 0.6f;
-                    }
+                        {
+                            int p = period == 0 ? 1 : period;
+                            int arg = RoundToInt(_time * 2293760f / p + (phase << 8));
+                            return Sin(arg) * 0.39f + 0.6f;
+                        }
                     case 3:
-                    {
-                        int arg = RoundToInt(_time * 2293760f / (period + 1) + (phase << 8));
-                        return (arg & 1) != 0 ? 0f : 1f;
-                    }
+                        {
+                            int arg = RoundToInt(_time * 2293760f / (period + 1) + (phase << 8));
+                            return (arg & 1) != 0 ? 0f : 1f;
+                        }
                     case 4:
-                    {
-                        if (_rand is null)
-                            throw new System.InvalidOperationException(
-                                "Flicker: the frame has no FGlobalRandoms table (frame built without Render->PreRender)");
-                        float r = _rand[actorKey & 0xff];
-                        return r < 0.5f ? 0f : r;
-                    }
+                        {
+                            if (_rand is null)
+                                throw new System.InvalidOperationException(
+                                    "Flicker: the frame has no FGlobalRandoms table (frame built without Render->PreRender)");
+                            float r = _rand[actorKey & 0xff];
+                            return r < 0.5f ? 0f : r;
+                        }
                     case 5: return _strobeOn ? 0f : 1f;
                     case 7:
-                    {
-                        // SubtlePulse (0x10b06510): the sine argument goes through MSVCRT
-                        // _ftol (call 0x10b352c4 -> [0x10b74814]) - TRUNCATION, not
-                        // fistp as in Pulse (0x10b063d7).
-                        int p = period < 1 ? 1 : period;
-                        int arg = unchecked((int)UEGlobalRandoms.FtolLow(_time * 2293760f / p + (phase << 8)));
-                        return Sin(arg) * 0.09f + 0.9f;
-                    }
-                    case 8:
-                    case 9:
-                        if (!_paletteNoted)
                         {
-                            _paletteNoted = true;
-                            HP1.Core.UETrace.Warn($"LightType {type} (TexturePalette*) on {a.GetProp(PK.Name)}: texture palette as light color is not ported — multiplier 1");
+                            // SubtlePulse (0x10b06510): the sine argument goes through MSVCRT
+                            // _ftol (call 0x10b352c4 -> [0x10b74814]) - TRUNCATION, not
+                            // fistp as in Pulse (0x10b063d7).
+                            int p = period < 1 ? 1 : period;
+                            int arg = unchecked((int)UEGlobalRandoms.FtolLow(_time * 2293760f / p + (phase << 8)));
+                            return Sin(arg) * 0.09f + 0.9f;
                         }
-                        return 1f;
-                    default: return 1f;
+                    default: return 1f;   // 1, 6, >= 10 — `ret`; 8/9 are not a factor (LightPalette, LightState.Palette)
                 }
+            }
+
+            // The Skin palette entry a type-8/9 function reads (LightPalette.Pack), 0 when it returns at once (no Skin,
+            // Render 0x10b0659a / 0x10b066d9; no Palette, 0x10b065a8 / 0x10b066e7). 8: LifeSpan over Class->Defaults'
+            // LifeSpan (the live class defaults when script wrote default.X, as the shipped Defaults array); 9: time.
+            // Original: Render.dll not exported: FUN_10b06590 [HP1 0x10B06590] — LightType 8, table 0x10b38288 entry 8 (Skin/Palette tests and Colors(i), 0x10b06597..0x10b06642)
+            // Original: Render.dll not exported: FUN_10b066d0 [HP1 0x10B066D0] — LightType 9, table 0x10b38288 entry 9 (Skin/Palette tests and Colors(i), 0x10b066d6..0x10b0675b)
+            internal static int PaletteOf(UEObject a, int type, float time, bool pc64)
+            {
+                byte[] pal = SkinPalette(a.GetProp(PK.Skin));
+                if (pal is null) return 0;
+                int i;
+                if (type == 8)
+                {
+                    float life = UEValue.AsFloat(a.GetProp(PK.LifeSpan));
+                    float def = UEValue.AsFloat(a.Interp is { } ip ? ip.ClassDefaultScalarNoAlloc(a.Class, "LifeSpan")
+                        : UEObject.ClassDefaultScalar(a.Class, "LifeSpan"));
+                    i = pc64 ? LightPalette.IndexOncePc64(life, def) : LightPalette.IndexOnce(life, def);
+                }
+                else
+                {
+                    int period = UEValue.AsByte(a.GetProp(PK.LightPeriod)), phase = UEValue.AsByte(a.GetProp(PK.LightPhase));
+                    i = pc64 ? LightPalette.IndexLoopPc64(time, period, phase) : LightPalette.IndexLoop(time, period, phase);
+                }
+                return LightPalette.Pack(pal[i * 3], pal[i * 3 + 1], pal[i * 3 + 2]);
+            }
+
+            // Skin -> Palette->Colors (R,G,B × 256), null — no Skin or no Palette. A package texture through its export
+            // (UEClassRegistry.ResolveResourceExport, as UETextureFacts), a Core runtime texture (CreateTextureFromBMP)
+            // through the palette its factory published.
+            static readonly Dictionary<string, byte[]> _skinPalettes = new(System.StringComparer.OrdinalIgnoreCase);
+            static byte[] SkinPalette(object skin)
+            {
+                if (skin is null) return null;
+                if (skin is UEObject o && !o.IsStruct)
+                {
+                    string rp = UERuntimeTextures.PathOf(o);
+                    if (rp is null || !UERuntimeTextures.TryGet(rp, out UERuntimeTexture rt))
+                        throw new System.NotSupportedException($"TexturePalette light Skin {o.GetProp(PK.Name)}: a VM object that is not a runtime texture");
+                    return Rgb(rt.PaletteRGBA, 4);
+                }
+                string path, cls;
+                if (skin is UEResourceRef rr) { path = rr.ObjectPath ?? rr.Name; cls = rr.Class; }
+                else if (skin is UELib.Core.UObject uo) { path = uo.GetPath(); cls = uo.Class?.Name; }
+                else throw new System.NotSupportedException($"TexturePalette light Skin of unknown kind {skin.GetType().Name}");
+                string key = (cls ?? "<?>") + "|" + path;
+                lock (_skinPalettes)
+                {
+                    if (_skinPalettes.TryGetValue(key, out byte[] cached)) return cached;
+                    var at = HP1.Core.UEClassRegistry.Shared.ResolveResourceExport(path, cls)
+                        ?? throw new System.NotSupportedException($"TexturePalette light Skin {cls}'{path}' does not resolve to a package export");
+                    UELib.UnrealPackage pkg = UEPackageOpen.Load(at.PackagePath, System.IO.FileAccess.Read);
+                    pkg.InitializePackage(UELib.UnrealPackage.InitFlags.All);
+                    if (pkg.Exports[at.ExportIndex - 1].Object is not UELib.Engine.UTexture tex)
+                        throw new System.NotSupportedException($"TexturePalette light Skin {path}: the export is not a texture");
+                    tex.BeginDeserializing();
+                    byte[] rgb = null;
+                    if (tex.Palette is not null)
+                    {
+                        tex.Palette.BeginDeserializing();
+                        var c = tex.Palette.Colors;
+                        if (c is null || c.Count < 256)
+                            throw new System.NotSupportedException($"TexturePalette light Skin {path}: palette with {c?.Count ?? 0} colours (the type function indexes 0..254)");
+                        rgb = new byte[256 * 3];
+                        for (int k = 0; k < 256; k++) { rgb[k * 3] = c[k].R; rgb[k * 3 + 1] = c[k].G; rgb[k * 3 + 2] = c[k].B; }
+                    }
+                    _skinPalettes[key] = rgb;
+                    return rgb;
+                }
+            }
+
+            static byte[] Rgb(byte[] src, int stride)
+            {
+                if (src is null || src.Length < 256 * stride) return null;
+                var rgb = new byte[256 * 3];
+                for (int k = 0; k < 256; k++) { rgb[k * 3] = src[k * stride]; rgb[k * 3 + 1] = src[k * stride + 1]; rgb[k * 3 + 2] = src[k * stride + 2]; }
+                return rgb;
             }
 
             // The same type functions called FROM GALAXY (UpdateAmbience 0x10608635: GRender->GlobalLighting
@@ -1699,7 +1786,7 @@ namespace HP1.UEScript
             // FGlobalRandoms.Base at the call: Galaxy Update runs BEFORE Render->PreRender (Engine.dll.c:117938
             // before 117946), i.e. it sees the table of the PREVIOUS GRandoms->Tick - passed in by the caller.
             // The Strobe trigger is shared (StrobeAt).
-            // 8/9 also change brightness (0x10b066ba/0x10b06800) - not ported: refusal.
+            // 8/9: the palette entry read at this call (index at PC64), brightness LightPalette.BrightnessPc64.
             internal static float ModulatePc64(int type, int period, int phase, int actorKey, float br,
                 float time, float[] randomBase, UEObject a)
             {
@@ -1707,36 +1794,37 @@ namespace HP1.UEScript
                 {
                     case 0: return 0f;
                     case 2:
-                    {
-                        int p = period < 1 ? 1 : period;
-                        float argF = (float)((double)time * 2293760.0 / p + (phase << 8));
-                        return (float)(((double)Sin(RoundToInt(argF)) * 0.39f + 0.6f) * br);
-                    }
+                        {
+                            int p = period < 1 ? 1 : period;
+                            float argF = (float)((double)time * 2293760.0 / p + (phase << 8));
+                            return (float)(((double)Sin(RoundToInt(argF)) * 0.39f + 0.6f) * br);
+                        }
                     case 3:
-                    {
-                        float argF = (float)((double)time * 2293760.0 / (period + 1) + (phase << 8));
-                        return (RoundToInt(argF) & 1) != 0 ? 0f : br;
-                    }
+                        {
+                            float argF = (float)((double)time * 2293760.0 / (period + 1) + (phase << 8));
+                            return (RoundToInt(argF) & 1) != 0 ? 0f : br;
+                        }
                     case 4:
-                    {
-                        if (randomBase is null)
-                            throw new System.InvalidOperationException(
-                                "Flicker: no FGlobalRandoms table (no Render->PreRender before this Update)");
-                        float r = randomBase[actorKey & 0xff];
-                        return r < 0.5f ? 0f : (float)((double)r * br);
-                    }
+                        {
+                            if (randomBase is null)
+                                throw new System.InvalidOperationException(
+                                    "Flicker: no FGlobalRandoms table (no Render->PreRender before this Update)");
+                            float r = randomBase[actorKey & 0xff];
+                            return r < 0.5f ? 0f : (float)((double)r * br);
+                        }
                     case 5: return StrobeAt(time) ? 0f : br;
                     case 7:
-                    {
-                        int p = period < 1 ? 1 : period;
-                        int arg = UELevelRuntime.Ftol((double)time * 2293760.0 / p + (phase << 8));
-                        return (float)(((double)Sin(arg) * 0.09f + 0.9f) * br);
-                    }
+                        {
+                            int p = period < 1 ? 1 : period;
+                            int arg = UELevelRuntime.Ftol((double)time * 2293760.0 / p + (phase << 8));
+                            return (float)(((double)Sin(arg) * 0.09f + 0.9f) * br);
+                        }
                     case 8:
                     case 9:
-                        throw new System.InvalidOperationException(
-                            $"{a?.GetProp(PK.Name)}: LightType {type} (TexturePalette, 0x10b06590/0x10b066d0) " +
-                            "changes brightness by the texture palette — not ported; ambient volume is not computed from it");
+                        {
+                            int pal = PaletteOf(a, type, time, pc64: true);
+                            return pal == 0 ? br : LightPalette.BrightnessPc64(pal, br);
+                        }
                     default: return br;   // 1, 6 — `ret`
                 }
             }
@@ -1751,37 +1839,39 @@ namespace HP1.UEScript
                 : LightAnim.ScaleFor(lightType, UEValue.AsByte(a.GetProp(PK.LightPeriod)),
                     UEValue.AsByte(a.GetProp(PK.LightPhase)), a.ObjectId, a);
             return new LightState(
-                type:             UEValue.AsByte(a.GetProp(PK.LightType)),
-                effect:           UEValue.AsByte(a.GetProp(PK.LightEffect)),
-                brightness:       UEValue.AsByte(a.GetProp(PK.LightBrightness)),
-                hue:              UEValue.AsByte(a.GetProp(PK.LightHue)),
-                saturation:       UEValue.AsByte(a.GetProp(PK.LightSaturation)),
-                radius:           radius,
-                worldRadius:      WorldLightRadius(a, radius),
-                radiusInner:      UEValue.AsByte(a.GetProp(PK.LightRadiusInner)),
-                cone:             UEValue.AsByte(a.GetProp(PK.LightCone)),
-                phase:            UEValue.AsByte(a.GetProp(PK.LightPhase)),
-                period:           UEValue.AsByte(a.GetProp(PK.LightPeriod)),
+                type: UEValue.AsByte(a.GetProp(PK.LightType)),
+                effect: UEValue.AsByte(a.GetProp(PK.LightEffect)),
+                brightness: UEValue.AsByte(a.GetProp(PK.LightBrightness)),
+                hue: UEValue.AsByte(a.GetProp(PK.LightHue)),
+                saturation: UEValue.AsByte(a.GetProp(PK.LightSaturation)),
+                radius: radius,
+                worldRadius: WorldLightRadius(a, radius),
+                radiusInner: UEValue.AsByte(a.GetProp(PK.LightRadiusInner)),
+                cone: UEValue.AsByte(a.GetProp(PK.LightCone)),
+                phase: UEValue.AsByte(a.GetProp(PK.LightPhase)),
+                period: UEValue.AsByte(a.GetProp(PK.LightPeriod)),
                 volumeBrightness: UEValue.AsByte(a.GetProp(PK.VolumeBrightness)),
-                corona:           UEValue.ToBool(a.GetProp(PK.bCorona)),
-                dynamicLight:     UEValue.ToBool(a.GetProp(PK.bDynamicLight)),
-                specialLit:       UEValue.ToBool(a.GetProp(PK.bSpecialLit)),
+                corona: UEValue.ToBool(a.GetProp(PK.bCorona)),
+                dynamicLight: UEValue.ToBool(a.GetProp(PK.bDynamicLight)),
+                specialLit: UEValue.ToBool(a.GetProp(PK.bSpecialLit)),
                 // ELightSource, byte at AActor+0x1f4 (Render.dll.c:16887/16900).
-                source:           UEValue.AsByte(a.GetProp(PK.LightSource)),
+                source: UEValue.AsByte(a.GetProp(PK.LightSource)),
                 // Per-actor selection: cap branch and dark-light sign
                 // (Render.dll.c:21399-21437 + the -1.0 constant from .rdata).
-                bStatic:          UEValue.ToBool(a.GetProp(PK.bStatic)),
-                dark:             UEValue.ToBool(a.GetProp(PK.bDarkLight)),
+                bStatic: UEValue.ToBool(a.GetProp(PK.bStatic)),
+                dark: UEValue.ToBool(a.GetProp(PK.bDarkLight)),
                 // Second half of the static/dynamic split
                 // (Render.dll.c:11183-11185).
-                noDelete:         UEValue.ToBool(a.GetProp(PK.bNoDelete)),
-                scale:            scale,
-                volumeRadius:     UEValue.AsByte(a.GetProp(PK.VolumeRadius)),
-                volumeFog:        UEValue.AsByte(a.GetProp(PK.VolumeFog)),
+                noDelete: UEValue.ToBool(a.GetProp(PK.bNoDelete)),
+                scale: scale,
+                volumeRadius: UEValue.AsByte(a.GetProp(PK.VolumeRadius)),
+                volumeFog: UEValue.AsByte(a.GetProp(PK.VolumeFog)),
                 // Per-actor selection: non-static with bMovable - no LOS (0x10b0a223).
-                movable:          UEValue.ToBool(a.GetProp(PK.bMovable)),
+                movable: UEValue.ToBool(a.GetProp(PK.bMovable)),
                 // AActor::GetViewRotation: the class chain holds APawn -> ViewRotation, else Rotation.
-                viewRotation:     UEValue.AsRotator(a.GetProp(UEInterpreter.ClassIsA(a.Class, "Pawn") ? PK.ViewRotation : PK.Rotation)));
+                viewRotation: UEValue.AsRotator(a.GetProp(UEInterpreter.ClassIsA(a.Class, "Pawn") ? PK.ViewRotation : PK.Rotation)),
+                // LightType 8/9: the palette entry of this frame (render side, PC24).
+                palette: lightType is 8 or 9 ? LightAnim.PaletteOf(a, lightType, LightAnim.Time, pc64: false) : 0);
         }
 
         // AActor::WorldLightRadius - per the shipped body.
@@ -1826,14 +1916,14 @@ namespace HP1.UEScript
         {
             var brush = a.GetProp(PK.Brush) as UEModelRef;
             return new MoverState(
-                keyNum:        UEValue.AsByte(a.GetProp(PK.KeyNum)),
-                prevKeyNum:    UEValue.AsByte(a.GetProp(PK.PrevKeyNum)),
-                numKeys:       UEValue.AsByte(a.GetProp(PK.NumKeys)),
-                physAlpha:     UEValue.AsFloat(a.GetProp(PK.PhysAlpha)),
+                keyNum: UEValue.AsByte(a.GetProp(PK.KeyNum)),
+                prevKeyNum: UEValue.AsByte(a.GetProp(PK.PrevKeyNum)),
+                numKeys: UEValue.AsByte(a.GetProp(PK.NumKeys)),
+                physAlpha: UEValue.AsFloat(a.GetProp(PK.PhysAlpha)),
                 interpolating: UEValue.ToBool(a.GetProp(PK.bInterpolating)),
                 brushExportIndex: brush?.ExportIndex ?? -1,
-                brushName:        brush?.Name,
-                toWorld:          brush is null ? default : UELevelRuntime.BrushToWorld(a),
+                brushName: brush?.Name,
+                toWorld: brush is null ? default : UELevelRuntime.BrushToWorld(a),
                 dynamicLightMover: UEValue.ToBool(a.GetProp("bDynamicLightMover")));
         }
 
@@ -1911,7 +2001,7 @@ namespace HP1.UEScript
             IReadOnlyList<CoronaInstance> coronas = null, bool enhancedVisuals = true,
             IReadOnlyList<DrawnWorld> drawn = null, IReadOnlyList<string> drawnTextures = null,
             IReadOnlyList<int> audioCallStops = null, float audioMixDt = 0f, IReadOnlyList<int[]> drawOrder = null,
-            int canvasScale = 1)
+            int canvasScale = 1, IReadOnlyDictionary<string, string> textureFrames = null)
         {
             // Capacity for the whole list up front: otherwise List doubled from 4 to 2048+ every frame,
             // discarding the previous snapshot array on EACH doubling. Pure growth arithmetic, no behaviour
@@ -1963,7 +2053,8 @@ namespace HP1.UEScript
                 reverb: ProjectReverb(player), views: views, meshPoses: meshPoses, spriteActors: spriteActors,
                 audioChannels: audioChannels, audioResumeSerial: audioResumeSerial, actorViews: actorViews, coronas: coronas,
                 enhancedVisuals: enhancedVisuals, drawn: drawn, drawnTextures: drawnTextures,
-                audioCallStops: audioCallStops, audioMixDt: audioMixDt, drawOrder: drawOrder, canvasScale: canvasScale);
+                audioCallStops: audioCallStops, audioMixDt: audioMixDt, drawOrder: drawOrder, canvasScale: canvasScale,
+                textureFrames: textureFrames);
         }
 
         // Galaxy UpdateReverb (FUN_106095c4): the zone is Region.Zone (+0xa0) of the viewport actor's

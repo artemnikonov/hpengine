@@ -28,6 +28,26 @@ namespace HP1.UEScript
         public UEInterpreter Interp { get; }
         public UELevelRuntime Runtime => _n.Runtime;
         public UEGameEngineNatives Natives => _n;
+        // HP2 Game.exe's command line as the engine reads it (the launcher passes "PrivetDr.unr  -SAVESLOT=n" or
+        // " -LOADGAME=0  -SAVESLOT=n"): the URL is the first token unless it starts with '-' (none: [URL] LocalMap);
+        // SAVESLOT= is appInit's Parse (Core [HP2 0x101571a2..]) and LOADGAME= UGameEngine::Init's (0x103a15cf..0x103a17f8):
+        // Parse(appCmdLine, "KEY=", int) = the key found case-insensitively anywhere, then appAtoi of what follows.
+        public static (string Map, int? SaveSlot, int? LoadGame) ParseHp2CommandLine(string cmd)
+        {
+            cmd ??= "";
+            string first = cmd.TrimStart(' ', '\t').Split(' ', '\t')[0];
+            string map = first.Length == 0 || first[0] == '-' ? null : Path.GetFileNameWithoutExtension(first);
+            static int? Int(string c, string key)
+                => UEValue.AppStrfind(c, key) is int i && i >= 0 ? UEValue.LeadingAtoi(c.Substring(i + key.Length)) : null;
+            return (map, Int(cmd, "SAVESLOT="), Int(cmd, "LOADGAME="));
+        }
+
+        // UGameEngine::Init's LOADGAME=n [HP2 0x103a15cf..0x103a17f8], after the first map and the player: Exec LOADGAME's
+        // ServerTravel to the slot's save, without LoadPersistentActorCache (appInit restored the cache already).
+        public void LoadGameAtInit(int slot) => _n.LoadGameTravel(Interp, slot);
+
+        // The frontend calls it once before the process ends (appPreExit's game part: HP2 clears the PA cache).
+        public void PreExit() => _n.PreExit();
         public HeadlessBspModel Bsp { get; }
         public string GameRoot { get; }
         public string MapName { get; }
@@ -77,7 +97,7 @@ namespace HP1.UEScript
         public static UEGameEngine Boot(string gameRoot, string mapName, NativesFactory createNatives = null,
             bool selectHardwareRenderDevice = false, UEConfig.IStore configStore = null,
             bool forceSurfaceLightmapsInFrame = true, BootStops stops = null, string saveDir = null,
-            IReadOnlyList<string> mods = null)
+            IReadOnlyList<string> mods = null, int? saveSlot = null)
         {
             string systemDir = Path.Combine(gameRoot, "System");
             UEClassRegistry.Shared = new UEClassRegistry();
@@ -85,7 +105,9 @@ namespace HP1.UEScript
             UEObject.DefaultInterp = interp;
             interp.ThrowOnMissingScript = true;
             UELevelRuntime.AppInit(systemDir, configStore);
-            foreach (string name in CorePackages)
+            // A game whose port is partial (HP2) boots up to its first unported seam, which stops loudly by name
+            // (UEGameProfile.Stop, the native gate in UENativesCore.Pair); a player frontend refuses it before Boot.
+            foreach (string name in UEGameProfile.Known(UEGameProfile.Current.CorePackages, "the script package load set"))
             {
                 string path = UEInstallPath.ScriptPackageFile(gameRoot, name);
                 if (path is not null) UEClassRegistry.Shared.GetOrLoadPackage(path);
@@ -103,6 +125,8 @@ namespace HP1.UEScript
             n.SetGameRoot(gameRoot);
             if (saveDir is not null) n.SaveDirOverride = saveDir;   // gameRoot is the mod working copy (hpengine ModOverlay)
             if (mods is not null) n.ActiveMods = mods;               // the enabled mods: recorded in saves, compared on load
+            n.SaveSlot = saveSlot;                                    // HP2 appInit's SAVESLOT= (GSys+0x40)
+            n.AppInitSaveSlot();
             stops?.NativesCreated?.Invoke(n);
             string mapPath = Path.Combine(gameRoot, "Maps", mapName + ".unr");
             mapPath = UEInstallPath.File(mapPath) ?? mapPath;
@@ -150,6 +174,21 @@ namespace HP1.UEScript
                 ?? throw new System.IO.InvalidDataException("KillPlayerProbe: the player has no KillHarry"), true);
             return victim.GetProp(PK.Name)?.ToString();
         }
+        // Menu page probe (snapshot --open-book-at): FEBook.OpenBook(page) on the console's menu book, the call the menu's own
+        // buttons make (e.g. the report page's folio card -> "FOLIO"). "<page>/<array property>/<index>" then clicks that
+        // control of the page (Notify(DE_Click = 2), as MenuClickProbe), e.g. "FOLIO/SmallCardBmp/3" selects a card.
+        // Returns the class of the page then current.
+        public string OpenBookProbe(string spec)
+        {
+            string[] p = spec.Split('/');
+            UEObject book = Runtime.ViewportConsole?.GetProp("menuBook") as UEObject
+                ?? throw new System.IO.InvalidDataException("OpenBookProbe: the console has no menuBook (open the menu first)");
+            Interp.Invoke(book, Interp.FindGlobalFunction(book, "OpenBook"), p[0]);
+            UEObject cur = book.GetProp("curPage") as UEObject;
+            if (p.Length == 3 && (cur?.GetProp(p[1]) as System.Collections.IList)?[int.Parse(p[2])] is UEObject c)
+                Interp.Invoke(c, Interp.FindGlobalFunction(c, "Notify"), (byte)2);
+            return cur?.Class?.Name;
+        }
         // Menu click probe (window script verb `click <text>`): the control of the open menu book page whose Text is the
         // given one gets Notify(DE_Click = 2), the call UWindowButton.Click makes for a mouse click (no cursor position
         // involved). Returns "<page class>.<control name>"; when the page has no such control, "NO SUCH CONTROL" and the
@@ -176,6 +215,11 @@ namespace HP1.UEScript
             Interp.Invoke(control, Interp.FindGlobalFunction(control, "Notify"), (byte)2);
             return $"{page.Class?.Name}.{control.GetProp(PK.Name)}";
         }
+        // Console probe (the live original probe's `exec=` / `pexec=`, run through UViewport::Exec): the command through the
+        // ConsoleCommand native's own route (UEConsoleCommand.Execute with the runtime's config, input, live actors and
+        // class defaults; no viewport device, no audio device).
+        public string ConsoleProbe(string command)
+            => UEConsoleCommand.Execute(Runtime.Config, command, Runtime.Input, null, Interp, null, _n.LiveActors());
         // Snapshot probe (the live original probe's `causeevent <Tag>` exec): Trigger(player, player)
         // on every actor whose Tag is the name, in actor-list order. Not a console command of the port (UEConsoleCommand).
         public int CauseEventProbe(string tag)
@@ -202,13 +246,6 @@ namespace HP1.UEScript
         }
 
         public WorldFrame Frame(string label) => _n.BuildWorldFrame(_tick, label);
-
-        // Script packages loaded by a game run.
-        internal static readonly string[] CorePackages =
-        {
-            "Core", "Engine", "HPParticle", "UWindow", "HPBase", "HarryPotter",
-            "HPMenu", "HProps", "HPDialog", "Tut1", "Tut3", "Hub2"
-        };
 
         // Core-owned (UEActorGraphLoader.Load). The placed-actor graph IS actor
         // identity — export order, ExportIndex, the mover's Brush UModelRef, every

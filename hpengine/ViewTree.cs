@@ -3,7 +3,8 @@
 // Here only which world batch of the parent view takes which child view's colour: a warp portal by its level surface
 // (WorldMesh.WarpPortals), a mirror by its surface key (WorldMesh.MirrorPlaneOfSurf / MoverScene.MirrorPlaneOf: one key
 // per mirrored surface, so the key names exactly the surfaces Core listed in ViewFrame.Sources), a sky window by the
-// parent (all PF_FakeBackdrop batches of a view sample its sky child).
+// parent (all PF_FakeBackdrop batches of a view sample its sky child); the camera-in-warp child by no batch at all (it is
+// drawn into its parent's target, FullScreenChild).
 // One key, one view: a second frame claiming a key already taken would never be drawn — a loud refusal, not a silent
 // first-wins.
 using HP1.UEScript;
@@ -19,6 +20,10 @@ namespace HPEngine
         readonly Dictionary<(int Parent, int Kind, int Key), int> _childOf = new();
 
         public int ChildOf(int view, int kind, int key) => _childOf.TryGetValue((view, kind, key), out int vi) ? vi : -1;
+
+        // The camera-in-warp child that fills the view's whole frame (−1 none); its key is no batch key (portal keys are ≥ 0).
+        const int FullScreenKey = -1;
+        public int FullScreenChild(int view) => ChildOf(view, KindWarp, FullScreenKey);
 
         // portalOf: level surface -> warp portal batch (−1 none); mirrorKey: mirror source -> batch key (−1 none).
         // Actors of a sky frame need nothing here: shipped DrawFrame draws every frame's own sprite list with no test of the
@@ -42,12 +47,11 @@ namespace HPEngine
                 FrameOf.Add(i);
                 at[i] = vi;
                 if (kind == KindSky) { Claim(parent, kind, 0, vi, i, refuse); continue; }
-                // Core's camera-in-warp-zone child (OccludeBsp 0x10b22802..): no portal surface, the whole parent view is seen
-                // through the warp, and Core does not draw the master. No batch samples it and there is no full-screen child
-                // pass here: a loud STOP, never a silently empty frame.
-                if (kind == KindWarp && fv.Sources.Length == 0)
-                    throw new NotSupportedException("camera inside a warp zone (OccludeBsp 0x10b22802..0x10b22b19): the full-screen "
-                        + "warp child view has no frontend pass — not ported");
+                // Core's camera-in-warp-zone child (OccludeBsp 0x10b22802..0x10b22b19): no portal surface, the parent's whole
+                // span is seen through the warp and the parent's OccludeBsp returns without walking, so the parent frame has
+                // nothing of its own. DrawFrame draws the child first into the same buffer (Render.dll.c:1011-1014): this view
+                // is drawn into its parent's target (FullScreenChild), no batch samples it.
+                if (kind == KindWarp && fv.Sources.Length == 0) { Claim(parent, kind, FullScreenKey, vi, i, refuse); continue; }
                 foreach (ViewSource src in fv.Sources)
                 {
                     int key = kind == KindWarp ? (src.Surf >= 0 ? portalOf(src.Surf) : -1) : mirrorKey(src);

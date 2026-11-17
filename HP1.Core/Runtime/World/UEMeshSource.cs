@@ -33,6 +33,9 @@ namespace HP1.UEScript
         public float[] origin, scale; public int[] rotationOrigin;
         public int weaponBoneIdx; public float[] weaponAdjustOrigin, weaponAdjustAxis;
         public string animObject;          // UMesh -> Animation object (not in the store: it addresses the bank)
+        // A plain UMesh only (DrawMesh's UMesh branch): Connects (count, VertLinks offset) per point and VertLinks — the
+        // point normals take UEActorLighting.ConnectNormals; null for skeletal and ULodMesh views.
+        public int[] connectNumTris, connectOffset, vertLinks;
 
         // The same mesh with another face list (UEMeshSource.LodVariant); every other field is shared.
         internal UERawSkeletalMesh WithFaces(int[] tri, int[] material)
@@ -76,6 +79,8 @@ namespace HP1.UEScript
         public int lodMinVerts; public int[] remapAnimVerts; public int oldFrameVerts;
         public float[] origin, scale; public int[] rotationOrigin;
         public string[] seqNames; public int[] seqStart, seqFrames; public float[] seqRate;
+        // A plain UMesh (class Mesh): wedges/faces/materials below are its Tris (BuildVertex), drawn in Core's order.
+        public bool plain;
     }
 
     public sealed class UEMeshSource
@@ -104,8 +109,12 @@ namespace HP1.UEScript
                     if (_byPath.ContainsKey(full)) continue;       // skeletal and vertex registries share paths
                     _byPath[full] = new Entry
                     {
-                        Path = full, Class = pkg.ClassName(export), Package = pkg.PackageName,
-                        Leaf = export.Name, File = pkg, Export = export,
+                        Path = full,
+                        Class = pkg.ClassName(export),
+                        Package = pkg.PackageName,
+                        Leaf = export.Name,
+                        File = pkg,
+                        Export = export,
                     };
                 }
         }
@@ -192,11 +201,19 @@ namespace HP1.UEScript
             int nb = m.Bones.Length;
             var r = new UERawSkeletalMesh
             {
-                name = leaf, pkg = pkgName, objectPath = objectPath, rootConvention = "game",
+                name = leaf,
+                pkg = pkgName,
+                objectPath = objectPath,
+                rootConvention = "game",
                 animObject = m.AnimObject,
-                numBones = nb, boneNames = new string[nb], boneParents = new int[nb],
-                boneOrientation = new float[nb * 4], bonePosition = new float[nb * 3],
-                boneScale = new float[nb * 3], boneLength = new float[nb], boneFlags = new int[nb],
+                numBones = nb,
+                boneNames = new string[nb],
+                boneParents = new int[nb],
+                boneOrientation = new float[nb * 4],
+                bonePosition = new float[nb * 3],
+                boneScale = new float[nb * 3],
+                boneLength = new float[nb],
+                boneFlags = new int[nb],
             };
             for (int i = 0; i < nb; i++)
             {
@@ -265,8 +282,11 @@ namespace HP1.UEScript
                 .OrderBy(q => q.Name, StringComparer.OrdinalIgnoreCase)
                 .Select(q => new UEAnimBankSequence
                 {
-                    name = q.Name, group = q.Group, rate = q.Rate,
-                    startFrame = q.StartFrame, frameCount = q.NumFrames,
+                    name = q.Name,
+                    group = q.Group,
+                    rate = q.Rate,
+                    startFrame = q.StartFrame,
+                    frameCount = q.NumFrames,
                     tracks = q.Movement.Tracks.Select(t =>
                     {
                         var r = new double[checked(t.QuaternionKeys.Length / 3 * 4)];
@@ -286,8 +306,11 @@ namespace HP1.UEScript
                             p[i] = (i % 3 == 2 ? 1.0 : -1.0) * t.PositionKeys[i] * scale + 0.0;
                         return new UEAnimBankTrack
                         {
-                            numQ = t.QuaternionKeys.Length / 3, numP = t.PositionKeys.Length / 3,
-                            numT = t.KeyTimes.Length, r = r, p = p,
+                            numQ = t.QuaternionKeys.Length / 3,
+                            numP = t.PositionKeys.Length / 3,
+                            numT = t.KeyTimes.Length,
+                            r = r,
+                            p = p,
                             t = t.KeyTimes.Select(b => (int)b).ToArray(),
                         };
                     }).ToArray(),
@@ -295,7 +318,8 @@ namespace HP1.UEScript
                 }).ToArray();
             return new UEAnimBank
             {
-                pkg = pkgName, name = mesh.AnimObject,
+                pkg = pkgName,
+                name = mesh.AnimObject,
                 boneNames = refBones.Select(b => b.Name).ToArray(),
                 boneParents = refBones.Select(b => b.ParentIndex).ToArray(),
                 sequences = seqs,
@@ -305,24 +329,41 @@ namespace HP1.UEScript
         public static UERawVertexMesh BuildVertex(string objectPath, string pkgName, string leaf,
             Hp1VertexMesh m, UEPackageReader.UEMeshAnimInfo info)
         {
+            if (m.Plain) m = PlainFaces(m);
             return new UERawVertexMesh
             {
-                name = leaf, pkg = pkgName, objectPath = objectPath,
-                frameVerts = m.FrameVerts, animFrames = m.AnimFrames, numVerts = m.Verts.Length,
+                name = leaf,
+                pkg = pkgName,
+                objectPath = objectPath,
+                frameVerts = m.FrameVerts,
+                animFrames = m.AnimFrames,
+                numVerts = m.Verts.Length,
                 verts = m.Verts.SelectMany(v => new[] { v.x, v.y, v.z }).ToArray(),
-                numWedges = m.WedgePoint.Length, wedgeVertex = m.WedgePoint.ToArray(),
+                numWedges = m.WedgePoint.Length,
+                wedgeVertex = m.WedgePoint.ToArray(),
                 wedgeU = m.WedgeU.Select(b => b / 256f).ToArray(),
                 wedgeV = m.WedgeV.Select(b => b / 256f).ToArray(),
-                numTris = m.FaceMaterial.Length, triWedge = m.FaceWedges.ToArray(), triMaterial = m.FaceMaterial.ToArray(),
-                materialFlags = m.MaterialFlags.ToArray(), materialTexIdx = m.MaterialTextureIndex.ToArray(),
+                numTris = m.FaceMaterial.Length,
+                triWedge = m.FaceWedges.ToArray(),
+                triMaterial = m.FaceMaterial.ToArray(),
+                materialFlags = m.MaterialFlags.ToArray(),
+                materialTexIdx = m.MaterialTextureIndex.ToArray(),
                 textures = m.TexturePath.ToArray(),
-                connectNumTris = m.ConnectNumTris.ToArray(), connectOffset = m.ConnectOffset.ToArray(),
+                connectNumTris = m.ConnectNumTris.ToArray(),
+                connectOffset = m.ConnectOffset.ToArray(),
                 vertLinks = m.VertLinks.ToArray(),
-                specialFaceWedges = m.SpecialFaceWedges.ToArray(), specialFaceMaterial = m.SpecialFaceMaterial.ToArray(),
-                modelVerts = m.ModelVerts, specialVerts = m.SpecialVerts,
-                meshScaleMax = m.MeshScaleMax, lodHysteresis = m.LodHysteresis, lodStrength = m.LodStrength,
-                lodMinVerts = m.LodMinVerts, lodMorph = m.LodMorph, lodZDisplace = m.LodZDisplace,
-                remapAnimVerts = m.RemapAnimVerts.ToArray(), oldFrameVerts = m.OldFrameVerts,
+                specialFaceWedges = m.SpecialFaceWedges.ToArray(),
+                specialFaceMaterial = m.SpecialFaceMaterial.ToArray(),
+                modelVerts = m.ModelVerts,
+                specialVerts = m.SpecialVerts,
+                meshScaleMax = m.MeshScaleMax,
+                lodHysteresis = m.LodHysteresis,
+                lodStrength = m.LodStrength,
+                lodMinVerts = m.LodMinVerts,
+                lodMorph = m.LodMorph,
+                lodZDisplace = m.LodZDisplace,
+                remapAnimVerts = m.RemapAnimVerts.ToArray(),
+                oldFrameVerts = m.OldFrameVerts,
                 origin = new[] { m.Origin.x, m.Origin.y, m.Origin.z },
                 scale = new[] { m.Scale.x, m.Scale.y, m.Scale.z },
                 rotationOrigin = new[] { m.RotPitch, m.RotYaw, m.RotRoll },
@@ -330,6 +371,34 @@ namespace HP1.UEScript
                 seqStart = info.Sequences.Select(q => q.StartFrame).ToArray(),
                 seqFrames = info.Sequences.Select(q => q.NumFrames).ToArray(),
                 seqRate = info.Sequences.Select(q => q.Rate).ToArray(),
+                plain = m.Plain,
+            };
+        }
+
+        // A plain UMesh's Tris in the wedge/face/material shape of the frontend mesh: triangle t is face t with wedges
+        // 3t..3t+2 (point iVertex[k], U/V Tex[k]); material = the triangle's (PolyFlags, TextureIndex) pair, numbered in
+        // order of first use. DrawMesh reads exactly these per triangle (Render.dll.c:9389-9411).
+        static Hp1VertexMesh PlainFaces(Hp1VertexMesh m)
+        {
+            int nt = m.TriPolyFlags.Length;
+            var mats = new List<(int Flags, int Tex)>();
+            var faceMaterial = new int[nt];
+            for (int t = 0; t < nt; t++)
+            {
+                var key = (m.TriPolyFlags[t], m.TriTextureIndex[t]);
+                int mi = mats.IndexOf(key);
+                if (mi < 0) { mi = mats.Count; mats.Add(key); }
+                faceMaterial[t] = mi;
+            }
+            return m with
+            {
+                WedgePoint = m.TriVerts,
+                WedgeU = m.TriU,
+                WedgeV = m.TriV,
+                FaceWedges = Enumerable.Range(0, nt * 3).ToArray(),
+                FaceMaterial = faceMaterial,
+                MaterialFlags = mats.Select(x => x.Flags).ToArray(),
+                MaterialTextureIndex = mats.Select(x => x.Tex).ToArray(),
             };
         }
     }

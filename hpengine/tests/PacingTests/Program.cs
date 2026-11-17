@@ -191,7 +191,8 @@ static class Program
             new HudCommand[0], f1.Particles, 4, new LevelAmbientState(1, 2, 3), f1.HighDetailActors, new DecalInstance[0],
             f1.Paused, new ViewFlashState(1, 2, 3, 4), f1.DrawWorld, f1.Reverb, f1.Views, f1.MeshPoses,
             new[] { 9 }, new UEGalaxyAudio.Playback[0], 5, new ActorViewSets(new Dictionary<int, int>(), new List<int[]>()),
-            new CoronaInstance[0], f1.EnhancedVisuals, f1.Drawn, f1.DrawnTextures, new[] { 4 }, 0.25f, new[] { new[] { 1 } }, 3);
+            new CoronaInstance[0], f1.EnhancedVisuals, f1.Drawn, f1.DrawnTextures, new[] { 4 }, 0.25f, new[] { new[] { 1 } }, 3,
+            new Dictionary<string, string> { ["P.A00"] = "P.A01" });
         var fxm = Interp.Frame(f0, fx, 0.5f, 1 / 60f);
         var bare = new WorldFrame(0, null, null, default, null, default, null, null, 0);
         var lerped = new HashSet<string> { "Camera", "Particles", "Views", "Drawn", "DrawnTextures" };
@@ -204,6 +205,10 @@ static class Program
         Check("display frame fixture sets every field", unset.Count == 0, string.Join(",", unset));
         var lost = fields.Where(fi => !Equals(fi.GetValue(fxm), fi.GetValue(fx))).Select(fi => fi.Name).ToList();
         Check("display frame carries every non-interpolated field", !ReferenceEquals(fxm, fx) && lost.Count == 0, string.Join(",", lost));
+        // The window thread's copy of the tick frame (Interp.Detach) carries every field but its own actor list.
+        var fdet = Interp.Detach(fx, new List<ActorSnapshot>());
+        var lostDet = fields.Where(fi => fi.Name != "Actors" && !Equals(fi.GetValue(fdet), fi.GetValue(fx))).Select(fi => fi.Name).ToList();
+        Check("detached tick frame carries every field", lostDet.Count == 0, string.Join(",", lostDet));
 
         // Window title (D-77): fps/timings only with --perf-title; a plain launch keeps the plain title.
         Check("perf title off by default", !FramePacer.PerfTitleFromArgs(new string[0]) && !FramePacer.PerfTitleFromArgs(new[] { "--root", "x", "--map", "Lev_Tut1" }));
