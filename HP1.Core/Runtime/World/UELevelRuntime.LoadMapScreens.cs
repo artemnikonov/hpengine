@@ -30,6 +30,7 @@
 // Not original (author 2026-11-07): the parchment is drawn at the menu's full brightness (BuildLevelInfoFrame).
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace HP1.UEScript
 {
@@ -113,7 +114,13 @@ namespace HP1.UEScript
             UEObject level = interp?.GetLevelInfo();
             UEObject player = Viewport?.GetProp(PK.Actor) as UEObject;
             _loadMapClient = Viewport is not null && level is not null;
-            if (_loadMapClient)
+            // HP2 [HP2 0x103a563d..0x103a5658]: only Viewport.Actor.bShowMenu (+0x6b8 & ~0x400000) here; Pauser and
+            // LevelAction are written after the fade (RunLoadMapFade, HP2's loading screen).
+            if (_loadMapClient && UEGameProfile.Current.Game == UEEdition.Game.HP2)
+            {
+                if (player is not null) player.Props["bShowMenu"] = false;
+            }
+            else if (_loadMapClient)
             {
                 level.Props["Pauser"] = "";
                 if (player is not null) player.Props["bShowMenu"] = false;
@@ -129,6 +136,7 @@ namespace HP1.UEScript
         // The 2–3 loop (0x1039c76c..0x1039c88c): the clock before the loop and after every Engine->Draw; the next
         // step is delta = now − prev, so the fade lasts FadeoutTime of real time. Headless (no presenter, no wall clock
         // of its own) steps by its fixed delta. frameNumber: the fade frames' own numbers. Returns the frames built.
+        // Original: Engine.dll ?LoadMap@UGameEngine@@UAEPAVULevel@@ABVFURL@@PAVUPendingLevel@@PBV?$TMap@VFString@@V1@@@AAVFString@@@Z [HP1 0x1039c3d0] [HP2 0x103a5430]
         public int RunLoadMapFade(UEInterpreter interp, float deltaSeconds, Func<int> frameNumber, Func<double> wallSeconds)
         {
             BeginLoadMapFade(interp);
@@ -146,8 +154,42 @@ namespace HP1.UEScript
                     prev = now;
                 }
             }
+            // HP2's loading screen [HP2 0x103a57c9..0x103a58f2], after the final fade Draw: Level.Pauser = "" (+0x470),
+            // Level.LevelAction = LEVACT_Loading (+0x4b8 = 1), Engine->Draw(Viewport, 1, 0, 0) (vtbl+0x7c). In that frame
+            // baseConsole.DrawLevelAction (LevelAction == 1) draws LoadingBackground.p1..p6 and Localize("all","Options_0058",
+            // "HPMenu") ("Loading Game") and sets the travel bool Viewport.Actor.bShowLoadingScreen, which keeps the screen
+            // up in the new level until harry.TravelPostAccept clears it (or PostSaveGame, after a queued save). The frame
+            // stays on screen while the map loads: HP2's LoadMap never calls DrawLevelInfo (HP1's step 4; no caller of
+            // UConsole::eventDrawLevelInfo [HP2 0x103016b8] in any HP2 module).
+            if (_loadMapClient && UEGameProfile.Current.Game == UEEdition.Game.HP2)
+            {
+                UEObject level = interp.GetLevelInfo();
+                level.Props["Pauser"] = "";
+                level.Props["LevelAction"] = (byte)1;
+                RunEngineFrame(interp, frameNumber(), "loading", deltaSeconds); frames++;
+                // Held and presented as the loading screen (no world): the world under it is the fade's end, FlashFog.W = 0,
+                // i.e. the flat FlashFog colour (logged), and the old world must not be drawn over the new level's scene.
+                if (LatestFrame is { } lf)
+                    LastLoadMapScreen = new WorldFrame(lf.Tick, "loading", Array.Empty<ActorSnapshot>(), default,
+                        Array.Empty<AudioCommand>(), default, lf.Hud, Array.Empty<ParticleInstance>(), -1,
+                        canvasScale: lf.CanvasScale, textureFrames: lf.TextureFrames);
+                if (LastLoadMapScreen is not null) PresentLoadMapScreenNow?.Invoke(LastLoadMapScreen);
+                Log($"loadmap_loading_screen flash={LatestFrame?.ViewFlash.R},{LatestFrame?.ViewFlash.G},{LatestFrame?.ViewFlash.B},{LatestFrame?.ViewFlash.W} bShowLoadingScreen="
+                    + UEInterpreter.ToBool((Viewport?.GetProp(PK.Actor) as UEObject)?.GetProp("bShowLoadingScreen"))
+                    + " hud=" + string.Join("|", (LatestFrame?.Hud ?? Array.Empty<HudCommand>())
+                        .Select(h => h.Kind == HudKind.Text ? "text:" + h.Text : h.TexturePath)));
+            }
             // 3a: after the final Draw, before BeginLoad (0x1039c8af-0x1039c8c7).
-            if (_loadMapClient && FrameProducer?.Audio is { } audio)
+            // HP2 [HP2 0x103a58f5..0x103a590a]: the same call, Engine+0x5c, vtable +0x8c GetViewport / +0x60 SetViewport of
+            // UALAudioSubsystem, when there is an Audio: every started source stops before the old level is collected, so
+            // the old level's sounds (PlayMusic's transient USound included) are already silent when CollectGarbage(RF_Native)
+            // [HP2 0x103a5430 body] runs USound::Destroy [HP2 0x10385710] -> UnregisterSound(this, -1) on them.
+            // The OpenAL calls reach the frontend with the next frame's ALCommands (no present-now path for HP2).
+            if (_loadMapClient && UEGameProfile.Current.Game == UEEdition.Game.HP2)
+            {
+                if (FrameProducer?.ALAudio is { } al) { al.SetViewport(al.HasViewport); Log("loadmap_audio set_viewport alaudio"); }
+            }
+            else if (_loadMapClient && FrameProducer?.Audio is { } audio)
             {
                 audio.SetViewportSame();
                 Log("loadmap_audio set_viewport channels=" + audio.BusyCount());
@@ -238,6 +280,9 @@ namespace HP1.UEScript
         // shipped, where DrawLevelInfo comes before loading the rest of the level.
         internal void BuildLoadMapScreenOfLoadedLevel(UEInterpreter interp)
         {
+            // HP2's LoadMap goes from LevelInfo0 straight to the level load [HP2 0x103a5cff..0x103a5d35]: no DrawLevelInfo;
+            // the screen on show is RunLoadMapFade's LEVACT_Loading frame.
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2) return;
             string text = (Actors.Count > 0 ? Actors[0].GetProp(PK.LevelEnterText) as string : null) ?? "";
             LastLoadMapScreen = BuildLevelInfoScreen(interp, EngineFrameCount, text);
             // Shipped presents DrawLevelInfo immediately (Viewport->Unlock/Present before loading the rest of the

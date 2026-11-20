@@ -8,6 +8,8 @@ not have.
 **Picture**
 - Widescreen without stretching: the 3D world is Hor+ (wider view on wide screens); menus, loading screens and 2D
   pictures keep 4:3 with black side bars. Interface size is an integer multiple of 480p, so text stays sharp.
+- Chamber of Secrets, widescreen: a pickup flying into the HUD (e.g. a bean that hit a wall) is drawn with the game's
+  own field of view, placed like the HUD, not with the wider Hor+ view, so it lands on its HUD icon at any aspect.
 - Enhanced mode: 16× anisotropic and trilinear texture filtering, full mesh detail at any distance and frame rate (no
   LOD collapse, e.g. Dumbledore in the final level), fire without the start-up flash.
 - Masked textures cut palette colour 0 everywhere, so glasses and similar skins no longer show a dark band.
@@ -15,6 +17,10 @@ not have.
 - Light flares are hidden behind characters standing between the camera and the lamp (the original lets them shine
   through Harry); see-through characters (Harry under the Invisibility Cloak, the ghosts) still let them through.
 - The loading screen is drawn at the same brightness as the menus.
+- Chamber of Secrets, widescreen: the loading screen is a centred 4:3 picture like the menus, and the shop (vendor) bar
+  keeps the world full-width (it is drawn over the playing world, not as a menu).
+- Smoothed 2D pictures do not blend in the opposite edge of their texture, so the loading-screen parchment (HP1) has no
+  lines at its piece edges (the original shows a faint seam at 800x600 and a stronger one when stretched).
 - Two-sided cloth (robes, capes) keeps the depth offset it has at 800 pixels wide on wider screens; the original's offset
   grows with the screen width, and at 4K/5K Harry's robe showed through his neck.
 - Game logic always runs at 60 Hz, as the game was designed (several original scripts behave differently at other
@@ -25,11 +31,11 @@ not have.
   and mods such as the Widescreen Mod, whose list is empty in the original).
 - Menu (HP1): Options → Video has Display Mode (Fullscreen or Windowed) in place of Color Depth and Interface Size (Smaller,
   Standard, Larger; only the sizes that differ on the screen) in place of Object Detail.
-- Russian release (HP1): menu text is drawn with Liberation Sans in place of Windows' MS Sans Serif, so its shapes and line
+- Russian releases (both games): menu text is drawn with the book-style font Philosopher in place of Windows' MS Sans Serif, so its shapes and line
   breaks differ from the original. It is drawn smooth (antialiased) and at the screen's resolution, where the original
   draws small pixel text.
 - *HP1 only:* a native font with any other face name (mods such as 25 Years HD ask for one) is drawn with the same
-  Liberation Sans, the same way; the original takes whatever substitute font Windows picks for that name.
+  Philosopher, the same way; the original takes whatever substitute font Windows picks for that name.
 - Menu (*HP1 only*): an open drop-down list closes when the page changes (Esc); the original left it drawn over the next
   page. HP2's pages close their lists themselves.
 - Chamber of Secrets, menu: Options → Sound/Video lists every display resolution (the original offered 640x480,
@@ -37,18 +43,20 @@ not have.
   Color Depth; the launcher has no Video or Sound page — these settings are in the game's own menu.
 
 **Sound**
+- Chamber of Secrets, menu: the options input page shows Difficulty (Easy, Medium, Hard) for every player; the original
+  showed it only in its debug mode.
 - 44.1 kHz mixer (the original HP1 mixes at 22 kHz).
 - Music resumes where it was after Alt-Tab (both games) or pausing in the menu; songs play to their end instead of being
   cut (HP1: HP2's music loops and pauses with the menu in the original).
 - *HP1 only:* the music level does not follow the Sound Volume slider down to silence (HP2's never did).
 
 **Input and platform**
-- Gamepad (the original has no gamepad bindings): the left stick moves and turns (analog), the right stick moves the
+- Gamepad (the original has no gamepad bindings): the left stick moves and turns like the arrow keys, the right stick moves the
   camera and the menu cursor, the buttons have default actions (layout in [settings](settings.md)); B, Start and the
   right stick are fixed, the other buttons, the triggers, the d-pad and the left stick can be rebound, and a binding
   replaces the default. The d-pad has no default action in the game. HP2: A is Jump and the broom action, the left stick
-  carries HP2's arrow-key commands (spell lessons included); the map, the duel spells and cutscene skip have no default
-  button yet.
+  carries HP2's arrow-key commands (spell lessons included), Back opens the map, B skips a cut-scene, and the d-pad picks
+  the duel spell (Left Rictusempra, Down Mimblewimble, Right Expelliarmus; Up drinks Wiggenweld and, in a duel, cycles the spell).
 - Gamepad: while a gamepad is in use the Controls page lists its buttons and left-stick directions (defaults
   included) under the connected controller type's names ("Pad A", "Pad Cross", "D-pad Up") and rebinds them like keys;
   with keyboard and mouse it is the original page. HP2 shows the pad view; rebinding on HP2's Controls page is not

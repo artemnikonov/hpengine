@@ -137,6 +137,15 @@ namespace HPEngine
     //   mouse <dx> <dy>                                   — InputStage.OnMouseMotion
     //   text <characters>                                 — InputStage.OnTextInput (WM_CHAR)
     //   console <command>                                 — UEConsoleCommand.Execute on the Core thread before the tick's input
+    //   exec <command>                                    — a live-probe command on the Core thread before the tick's input
+    //                                                       (HPEngineProgram.ProbeExec: causeevent, trigger <actor>, kill, set ...)
+    //   report <png>                                      — the F12 spot report (SpotReport) at the first frame drawn after this
+    //                                                       tick, its screenshot written to <png>
+    //   shot <png>                                        — the first window frame drawn after this tick, also rendered offscreen
+    //                                                       with the window's camera and written as PNG
+    //   loadshot <png>                                    — every frame Core presents synchronously inside this tick (LoadMap
+    //                                                       fade, HP2's loading screen) is also rendered offscreen and written
+    //                                                       as PNG: the last one stays
     //   pad <lx> <ly> <rx> <ry> <lt> <rt> <buttons> | pad none — the gamepad state Core reads from that tick on
     //   probe                                             — after the tick, log the menu state (page, control under the
     //                                                       cursor, Brightness, Interface Size, an open combo list)
@@ -188,6 +197,13 @@ namespace HPEngine
         {
             foreach (var (t, verb, args) in _lines) if (t == tick && verb == "console") yield return args;
         }
+        public IEnumerable<string> ExecAt(int tick)
+        {
+            foreach (var (t, verb, args) in _lines) if (t == tick && verb == "exec") yield return args;
+        }
+        public string ReportAt(int tick) => _lines.Find(l => l.Tick == tick && l.Verb == "report").Args;
+        public string ShotAt(int tick) => _lines.Find(l => l.Tick == tick && l.Verb == "shot").Args;
+        public string LoadShotAt(int tick) => _lines.Find(l => l.Tick == tick && l.Verb == "loadshot").Args;
         public bool ProbeAt(int tick) => _lines.Exists(l => l.Tick == tick && l.Verb == "probe");
         public bool KillAt(int tick) => _lines.Exists(l => l.Tick == tick && l.Verb == "kill");
         public IEnumerable<string> ClicksAt(int tick)
@@ -231,7 +247,10 @@ namespace HPEngine
                 if (UEInterpreter.ClassIsA(w.Class, "UWindowComboList")) list = $" list={(w.GetProp("Selected") as UEObject)?.GetProp("Value")}";
             return $"page={page?.Class?.Name} over={over?.Class?.Name}:{over?.GetProp("Name")}"
                 + (over is not null && UEInterpreter.ClassIsA(over.Class, "UWindowHSliderControl") ? $" value={over.GetProp("Value")}" : "")
-                + $" brightness={(page?.GetProp("BrightnessSlider") as UEObject)?.GetProp("Value")} size={Val(page?.GetProp("ObjectDetailCombo") as UEObject)}{list}";
+                + $" brightness={(page?.GetProp("BrightnessSlider") as UEObject)?.GetProp("Value")} size={Val(page?.GetProp("ObjectDetailCombo") as UEObject)}"
+                + $" mode={Val(page?.GetProp("ColorDepthCombo") as UEObject)} res={Val(page?.GetProp("ResolutionCombo") as UEObject)}{list}"
+                + (root is null ? "" : $" root: scale={root.GetProp("GUIScale")} win={root.GetProp("WinWidth")}x{root.GetProp("WinHeight")} real={root.GetProp("RealWidth")}x{root.GetProp("RealHeight")}"
+                    + $" book={book?.GetProp("WinLeft")},{book?.GetProp("WinTop")} mouse={con.GetProp("MouseX")},{con.GetProp("MouseY")} canvas={host.Runtime.FrameProducer?.ViewportX}x{host.Runtime.FrameProducer?.ViewportY}/{host.Runtime.FrameProducer?.CanvasScale}");
         }
 
         // The tick's input, in file order (window thread, where the loop hands InputStage the tick's polled events).
@@ -246,12 +265,13 @@ namespace HPEngine
                     case "key": if (!OsEvents) input.OnKey(Enum.Parse<SDL.SDL_Scancode>("SDL_SCANCODE_" + a[0], true), a[1] == "down"); break;
                     case "mouse": if (!OsEvents) input.OnMouseMotion(F(a[0]), F(a[1])); break;
                     case "text": input.OnTextInput(args); break;
+                    case "button": input.OnMouseButton(int.Parse(a[0], System.Globalization.CultureInfo.InvariantCulture), a[1] == "down"); break;   // SDL button (1 left, 3 right)
                     case "pad":
                         _padOk = a[0] != "none";
                         if (_padOk) _pad = new UEInput.GamepadState { LeftX = S(a[0]), LeftY = S(a[1]), RightX = S(a[2]), RightY = S(a[3]),
                             LeftTrigger = S(a[4]), RightTrigger = S(a[5]), Buttons = uint.Parse(a[6], System.Globalization.CultureInfo.InvariantCulture) };
                         break;
-                    case "console": case "probe": case "kill": case "click": break;
+                    case "console": case "probe": case "kill": case "click": case "exec": case "shot": case "loadshot": case "report": break;
                     default: throw new InvalidDataException($"window script: unknown verb '{verb}' at tick {tick}");
                 }
             }

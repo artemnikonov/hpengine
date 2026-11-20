@@ -273,6 +273,7 @@ namespace HP1.UEScript
             if (!string.Equals(cls, "ALAudio.ALAudioSubsystem", StringComparison.OrdinalIgnoreCase))
                 throw new NotSupportedException($"{ini}: [Engine.Engine] AudioDevice={cls} is not ported (HP2: ALAudio.ALAudioSubsystem)");
             AudioDevice = ALAudio = UEALAudio.FromConfig(config);
+            if (ALAudio is not null) _alMixedClock = ALAudio.Clock;   // the frontend mixes from the device's creation
             return ALAudio;
         }
         // Runtime of the current level — source of the listener, actors and the view actor (set by BindFrameProducerHooks).
@@ -706,6 +707,7 @@ namespace HP1.UEScript
             // (Engine.dll.c:117900-117920).
             float frameFov = player is null ? 0f : UEValue.AsFloat(player.GetProp(PK.FovAngle));
             float viewFov = HorPlusFov(frameFov);
+            _canvasFov = viewFov != frameFov ? frameFov : 0f;   // Hor+ widened the master frame: the canvas keeps FovAngle
             if (viewFov != frameFov)
             {
                 frameFov = viewFov;
@@ -816,8 +818,8 @@ namespace HP1.UEScript
             // actor and surface paths, DrawActorSprite [HP2 0x10b32ee0], the mesh and particle drawers, the skeletal poses.
             // What is not judged stops at its own line: the DrawActorSprite debug drawing and Init's GlobalShapeLOD ini values
             // (below), the SpanBased sprite box test, a mover polygon with disagreeing records, RenderPrimitive 4, the
-            // D-73 slot of HP2's particles, AttachDecal (so no decal is clipped), and in the frontend the
-            // drawing of DrawnWorld.Lumos.
+            // D-73 slot of HP2's particles, AttachDecal (so no decal is clipped), and in the frontend a Lumos carrier on a
+            // mover, in a fog-pass or unlit batch, or masked (SdlRenderer.DrawLumos).
             bool hp2 = UEGameProfile.Current.Game == UEEdition.Game.HP2;
             if (hp2 && drawWorld)
             {
@@ -863,6 +865,7 @@ namespace HP1.UEScript
             _spriteActors = new List<int>();      // and no sprites
             _actorViews = new Dictionary<int, List<int>>();
             _drawOrder = null;                    // and no draw order
+            _meshDraws = null;                    // and no mesh draws for the canvas
             _actorViewSets = null;
             _coronas = null;                      // and without coronas
             BeginDecalFrame?.Invoke();             // and no decal pieces
@@ -894,7 +897,7 @@ namespace HP1.UEScript
                     string tex = TexPathOf(((System.Collections.IList)a.GetProp(PK.Textures))[0]);
                     foreach (var (pt, alpha) in kept)
                         particles.Add(new ParticleInstance(a.ObjectId, pt.Pos, pt.Width, pt.Length, alpha, pt.Color, pt.SpinPos, tex,
-                            pt.Vel, pt.DripTimer, pt.SpinRate, view));
+                            pt.Vel, pt.DripTimer, pt.SpinRate, view, pt.Serial));
                 }
                 var seen = new HashSet<UEObject>();
                 foreach (UEObject a in UseTranslatedRenderPass ? drawn : Array.Empty<UEObject>())
@@ -915,7 +918,7 @@ namespace HP1.UEScript
                         var pt = s.Particles[v < 0 ? 0 : v];
                         particles.Add(new ParticleInstance(a.ObjectId, pt.Pos,
                             pt.Width, pt.Length, pt.Alpha, pt.Color, pt.SpinPos, tex,
-                            pt.Vel, pt.DripTimer, pt.SpinRate));
+                            pt.Vel, pt.DripTimer, pt.SpinRate, serial: pt.Serial));
                     }
                 }
             }
@@ -977,6 +980,9 @@ namespace HP1.UEScript
                 _drawnTextures = DrawnTexturesOf(occluded, _lastOcclusionWorld);
                 CollectSurfDynamicLights(occluded, _lastOcclusionWorld);
             }
+            // DrawFrame's Surf->Texture->Update(Viewport->CurrentTime) of every drawn surface: a ScriptedTexture ticks there
+            // (its copy, then NotifyActor.RenderTexture) — after the occlusion walk, before DrawWorld's RenderOverlays tail.
+            if (drawWorld) TickScriptedTextures(interp, _drawnTextures);
             // C9 measurement (investigation, off by default): actor render state before the overlays/HUD vs after.
             if (OverlayProbe) _overlayPre = OverlayFingerprints(actors);
             // Tail of URender::DrawWorld (Render.dll.c:2661-2677): after DrawFrame —
@@ -1000,6 +1006,7 @@ namespace HP1.UEScript
                 }
             }
             if (DriveHudEnabled) HudPostRender(interp, player);
+            CanvasMeshDraws();
             if (OverlayProbe)
                 foreach (var kv in OverlayFingerprints(actors))
                     if (!_overlayPre.TryGetValue(kv.Key, out var pre) || pre.fp != kv.Value.fp) OverlayChanged.Add(kv.Value.what);
@@ -1033,6 +1040,8 @@ namespace HP1.UEScript
             IReadOnlyList<DecalInstance> decals = DecalSnapshot?.Invoke();
             secT = Section(ref LastDecalsMs, secT);
             AllocNote("frame.decals");
+            // HP2: Galaxy's LastCallStops/LastMixDt are ALAudio's calls and clock span (DrainALCommands).
+            (UEALAudio.Command[] alCalls, float mixDt) = ALAudio is not null ? DrainALCommands() : (null, Audio?.LastMixDt ?? 0f);
             long projT0 = System.Diagnostics.Stopwatch.GetTimestamp();
             _frameCache = WorldFrameProjector.ProjectWorld(tick, label, actors,
                 _cameraCache, player, music, audio, _hudCache, particles,
@@ -1042,7 +1051,11 @@ namespace HP1.UEScript
                 UseTranslatedRenderPass ? null : _spriteActors, Audio?.Snapshot(), Audio?.ResumeSerial ?? 0,
                 UseTranslatedRenderPass ? null : _actorViewSets ?? ActorViewSets.From(_actorViews), _coronas, EnhancedVisuals,
                 UseTranslatedRenderPass ? null : _drawn, UseTranslatedRenderPass ? null : _drawnTextures,
-                Audio?.LastCallStops, Audio?.LastMixDt ?? 0f, UseTranslatedRenderPass ? null : _drawOrder, _canvasScale, _textureFrames);
+                Audio?.LastCallStops, mixDt, UseTranslatedRenderPass ? null : _drawOrder, _canvasScale, _textureFrames);
+            _frameCache.ALCommands = alCalls;
+            _frameCache.ScriptedTexels = TakeScriptedFrame();
+            _frameCache.CanvasFovAngle = _canvasFov;
+            _frameCache.CanvasFrameSize = _canvasFov > 0f ? (_viewportX, _viewportY) : default;
             TextureUses(_frameCache);   // the frame's world and actor texture uses, into its TextureFrames
             long projDt = System.Diagnostics.Stopwatch.GetTimestamp() - projT0;
             AllocNote("frame.project");
@@ -1105,6 +1118,8 @@ namespace HP1.UEScript
         public readonly List<UEObject> DrawnMeshes = new();
         // Vertices of these meshes (WorldFrame.MeshPoses): a new list per frame — the frame goes to the frontend whole.
         List<MeshPose> _meshPoses = new();
+        // Every DrawMesh of the tick (view, pose): DrawFrame's, then the canvas's (CanvasMeshDraw); null before a direct frame.
+        List<(int View, MeshPose Pose)> _meshDraws;
         // DrawActorSprite mesh branch (UELevelRuntime.DrawMeshActor): actor, identity, Frame->Coords, list, frame vertices,
         // the draw's LOD request.
         public Action<UEObject, bool, BrushCoords, List<UEObject>, List<MeshPose>, Func<UEObject, int>> DrawMesh;
@@ -1135,6 +1150,15 @@ namespace HP1.UEScript
         public Func<UEVector, UEVector, bool> CoronaLineClear;   // (start, end): SingleLineCheck(TraceFlags 6) found nothing
         public Func<UEVector, UEVector, bool> CoronaPawnClear;   // NOT ORIGINAL (Enhanced): no visible pawn on the ray (UELevelRuntime.CoronaPawnClear)
         Func<UEVector, UEVector, bool> _coronaEnhancedClear;
+        int _coronaView;   // the frame whose corona block runs (its viewIndex), for CoronaFramePose
+        // The pose DrawFrame drew `objectId` with in the frame whose corona block runs; null — not drawn there. NOT ORIGINAL
+        // (Enhanced, HP2: UELevelRuntime.CoronaPawnClear tests the corona ray against the drawn triangles).
+        public MeshPose? CoronaFramePose(int objectId)
+        {
+            if (_meshDraws is not null)
+                foreach (var d in _meshDraws) if (d.View == _coronaView && !d.Pose.Weapon && d.Pose.ObjectId == objectId) return d.Pose;
+            return null;
+        }
         double _viewportClock;
         CoronaInstance[] _coronas;
         // ObjectId -> view indices of the frames whose DrawFrame drew the actor (WorldFrame.ActorViews).
@@ -1177,6 +1201,12 @@ namespace HP1.UEScript
         // FovAngle unchanged.
         // Set by the host through SetWideScreen (the frontend writes no Core field).
         public bool HorPlus { get; internal set; }
+        // The canvas frame keeps the shipped projection (author's decision 2026-11-17, option (b) of the STOP "Hor+ moves the
+        // flight's end point", NOT ORIGINAL only in that the world around it is Hor+): HP2 HProp's flight to the HUD aims at
+        // the icon through PlayerPawn.CameraToWorld with the unwidened FovAngle over Canvas.SizeX/Y, so Canvas.DrawActor's
+        // Setup and draw use a frame of the canvas size with that FovAngle (CanvasSceneNode). 0 — Hor+ did not widen this
+        // tick's frame: the canvas frame is the master frame.
+        float _canvasFov;
 
         int _consoleRegionX;
 

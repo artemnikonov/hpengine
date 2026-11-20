@@ -25,7 +25,7 @@ namespace HP1.UEScript
         // Returns the frame size after the console border (for FSceneNode).
         (int X, int Y) HudPreRender(UEInterpreter interp, UEObject player)
         {
-            _hud.Clear(); _hudDepthZ = null;
+            _hud.Clear(); _hudDepthZ = null; _canvasFrameAtOrigin = false; _canvasActorsDrawn = false;
             if (interp is null || player is null)
                 return (_viewportX, _viewportY);
             if (_canvas is null)
@@ -179,10 +179,21 @@ namespace HP1.UEScript
         //   WindowConsole.RenderUWindow, HPConsole.RenderUWindow and the default, all 1.0.
         //   Canvas.Z != 1: loud STOP (NoteCanvasZ / RequireHudWithoutDepth). NOT covered: SetRes's
         //   W-buffer branch (ZENABLE 2 with D3DPRASTERCAPS_WBUFFER and a 16-bit Z: tile w = 1 against the world's w).
-        // NOT PORTED (loud): every actor Setup could accept — DrawActorSprite on the canvas frame (the mesh or
-        // sprite projected through the canvas frame's Coords, lit by the light manager for that frame, Z-tested against
-        // what the frame drew; none of it read yet, and no carrier: Restored HP1FlyKeys reaches only the meshless wand).
-        // Original: Engine.dll UCanvas::execDrawActor [HP1 0x10389930]
+        // A MESH actor Setup accepts (DrawType 2 with a Mesh, not a ParticleFX, ShowFlags & 0x20 clear) is drawn: URender::
+        // DrawActor [HP1 0x10B33980] [HP2 0x10B344A0] (the same body: an FDynamicSprite of A on the stack, Setup, DrawActorSprite)
+        // on Canvas.Frame — the viewport's master frame of this UGameEngine::Draw, whose Coords are the camera's
+        // (CreateMasterFrame) unless a DrawClippedActor this frame left them at the origin (a loud STOP below). Port: Setup is
+        // MeshSpriteSetup on this tick's master UESceneNode (LastMasterFrame; the canvas sprite carries no LeafLights — it is
+        // built here, not filtered through OccludeBsp), the mesh branch is DrawMeshSprite (the world's DrawFrame body); the pose
+        // joins the tick's mesh draws in view −1 (master) and the master DrawOrder after DrawFrame's sprites, so the light
+        // lists, fog and triangle order are the master frame's (UEActorLights: SetupForActor runs per master draw); a
+        // HudKind.Actor command places the draw in the HUD order and the frontend draws it there after clearing depth.
+        // Shipped carrier: HP2 hgame HProp.RenderHud (Canvas.DrawActor(self, false, true)) from HPHud.PostRender's propArray
+        // (a pickup that hit a wall flying to the HUD: HProp.HitWall -> HPHud.RegisterPickupProp).
+        // STOP (loud), no shipped carrier: sprites (DrawType 1/7), emitters (8), brushes, a ParticleFX, a UMesh with
+        // ShowFlags & 0x20, ClearZ false (the actor would test against the world's depth, which the frontend does not keep
+        // past the world pass), DrawClippedActor of anything drawable, an actor also drawn by this tick's DrawFrame.
+        // Original: Engine.dll ?execDrawActor@UCanvas@@QAEXAAUFFrame@@QAX@Z [HP1 0x10389930] [HP2 0x10391C00]
         internal void CanvasDrawActor(UEObject canvas, UEObject a, bool wireFrame, bool clearZ)
             => DrawActorOnFrame(canvas, a, wireFrame, clearZ, null);
 
@@ -191,7 +202,10 @@ namespace HP1.UEScript
         {
             FrameOf(canvas);   // Frame(+0x7c) is written first: no frame, shipped dereferences NULL
             DrawActorOnFrame(canvas, a, wireFrame, clearZ, (x, y, xb, yb));
+            _canvasFrameAtOrigin = true;   // ComputeRenderCoords(Frame, 0, 0) is not undone (above)
         }
+        bool _canvasFrameAtOrigin;   // this frame's master Coords were left at the origin by a DrawClippedActor
+        bool _canvasActorsDrawn;     // a canvas mesh draw joined this tick's mesh draws (CanvasMeshDraws)
 
         // Judge tap (canvas_judge.py): the state at the point the original calls Render->DrawActor — the actor, the
         // clipped frame (null: the canvas frame as it is) and the viewer's RendMap. Observes only.
@@ -209,16 +223,76 @@ namespace HP1.UEScript
             bool icons = (UEValue.ToInt(viewer.GetProp(PK.ShowFlags)) & 0x20) != 0;
             bool rejected = !icons && (dt is not (1 or 7 or 2 or 8)
                 || dt == 2 && !UEInterpreter.ClassIsA(a.Class, "ParticleFX") && a.GetProp(PK.Mesh) is null && a.GetProp(PK.Brush) is null);
-            if (!rejected)
-                throw new NotSupportedException($"Canvas.DrawActor of {a.GetProp(PK.Name)} ({a.Class?.Name}, DrawType {dt}) reached — "
-                    + "not ported: FDynamicSprite::Setup + DrawActorSprite on the canvas frame (Render 0x10b33980)");
+            bool mesh = !rejected && !icons && dt == 2 && !UEInterpreter.ClassIsA(a.Class, "ParticleFX") && a.GetProp(PK.Mesh) is not null;
+            if (!rejected && !(mesh && clip is null && clearZ))
+                throw new NotSupportedException($"Canvas.{(clip is null ? "DrawActor" : "DrawClippedActor")} of {a.GetProp(PK.Name)} "
+                    + $"({a.Class?.Name}, DrawType {dt}, ClearZ {clearZ}) reached — not ported: only a mesh actor with ClearZ through "
+                    + "Canvas.DrawActor is (FDynamicSprite::Setup + DrawActorSprite on the canvas frame, Render [HP2 0x10b344a0])");
+            UESceneNode master = null;
+            if (mesh)
+            {
+                if (_canvasFrameAtOrigin)
+                    throw new NotSupportedException($"Canvas.DrawActor of {a.GetProp(PK.Name)} after a DrawClippedActor this frame: the "
+                        + "canvas frame's Coords are ComputeRenderCoords(0, 0)'s, not the camera's — not ported (STOP)");
+                master = LastMasterFrame ?? throw new NotSupportedException($"Canvas.DrawActor of {a.GetProp(PK.Name)} in a frame "
+                    + "without this tick's DrawWorld (no master frame in Core) — not ported (STOP)");
+                if (UseTranslatedRenderPass || _meshDraws is null)
+                    throw new InvalidOperationException("Canvas.DrawActor of a mesh: only the direct frame path keeps the tick's mesh draws");
+            }
             object rendMap = viewer.GetProp(PK.RendMap);
             if (wireFrame) viewer.Props["RendMap"] = 1;
             a.Props["bHidden"] = false;
-            if (clearZ) ClearZTap?.Invoke(clip);   // no visible effect (see above)
+            if (clearZ) ClearZTap?.Invoke(clip);   // the frontend clears depth at the HudKind.Actor command (mesh), else no effect
             DrawActorReachedTap?.Invoke(a, clip, viewer.GetProp(PK.RendMap));
+            if (mesh) CanvasMeshDraw(a, CanvasSceneNode(master), UEValue.ToInt(viewer.GetProp(PK.RendMap)));
             a.Props["bHidden"] = true;
             viewer.Props["RendMap"] = rendMap;
+        }
+
+        // Canvas.Frame as the original has it: the master frame, or under Hor+ (NOT ORIGINAL) a projection-only frame with the
+        // master's camera, the canvas size (Canvas.SizeX/Y, D-44) and the unwidened FovAngle (_canvasFov): the projection the
+        // HUD script aims with (PlayerPawn.CameraToWorld), placed in the HUD's space like the canvas tiles.
+        UESceneNode CanvasSceneNode(UESceneNode master) => _canvasFov > 0f
+            ? UESceneNode.ProjectionMaster(_viewportX, _viewportY, _cameraCache.Location, _cameraCache.Rotation, _canvasFov)
+            : master;
+
+        // URender::DrawActor on the master frame for a mesh actor: FDynamicSprite::Setup (MeshSpriteSetup; rejected -> nothing
+        // drawn, no command), then DrawActorSprite's mesh branch (DrawMeshSprite) with the DrawLodMesh identity gate read
+        // from the viewer's RendMap as the call sees it (after the WireFrame write).
+        public int CanvasMeshCalls, CanvasMeshDrawn;   // canvas mesh DrawActor calls; those Setup accepted and DrawMesh posed
+        void CanvasMeshDraw(UEObject a, UESceneNode master, int rendMap)
+        {
+            CanvasMeshCalls++;
+            if (!MeshSpriteSetup(a, master, out UERenderVisibility.ScreenBounds sb)) return;
+            if (_actorViews.TryGetValue(a.ObjectId, out var views) && views.Count > 0)
+                throw new NotSupportedException($"Canvas.DrawActor of {a.GetProp(PK.Name)}, which this tick's DrawFrame drew too: two "
+                    + "draws of one actor in the master view, one in the world pass and one in the HUD — not ported (STOP)");
+            List<MeshPose> poses = DrawMeshSprite(a, master, (int)sb.X1, (int)sb.Y1, (int)sb.X2, (int)sb.Y2, rendMap is 13 or 14 or 15 or 1);
+            foreach (MeshPose p in poses)
+            {
+                if (p.Weapon) throw new NotSupportedException($"Canvas.DrawActor of {a.GetProp(PK.Name)}: a third-person weapon draw on "
+                    + "the canvas — not ported (STOP)");
+                _meshDraws.Add((-1, p));
+            }
+            if (poses.Count == 0) return;
+            _actorViews[a.ObjectId] = new List<int> { -1 };
+            int[] m = _drawOrder[0];
+            Array.Resize(ref m, m.Length + 1);
+            m[^1] = a.ObjectId;
+            _drawOrder[0] = m;
+            _canvasActorsDrawn = true;
+            CanvasMeshDrawn++;
+            _hud.Add(new HudCommand(HudKind.Actor, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, null, null, null, default, 0, false, false,
+                actorId: a.ObjectId));
+        }
+
+        // After the HUD: the canvas draws join the tick's merged poses and view sets (MeshDrawParts over every mesh draw).
+        void CanvasMeshDraws()
+        {
+            if (!_canvasActorsDrawn) return;
+            _canvasActorsDrawn = false;
+            _meshPoses = new List<MeshPose>();
+            _actorViewSets = MeshDrawParts(_meshDraws);
         }
 
         void HudPostRender(UEInterpreter interp, UEObject player)
@@ -280,6 +354,42 @@ namespace HP1.UEScript
         {
             UEObject c = Console;
             if (c is null) return;
+            // HP2 LOADING SCREEN AS A CENTRED 4:3 PICTURE (NOT ORIGINAL, author 2026-11-18; the menu rule of 2026-09-29).
+            // baseConsole.DrawLevelAction (LevelAction == 1 or Viewport.Actor.bShowLoadingScreen) draws the 768x512
+            // FELoadingBackground1..6 with ScaleAndDraw (FX = FY = 1) -> Root.DrawStretchedTexture, i.e. at Root.GUIScale
+            // from the top-left corner, and Root.GUIScale is fixed when the root is made (RealWidth / 640, the full canvas
+            // width). For this console call only: the 4:3 region and Root.GUIScale = region width / 640, as a 4:3 screen
+            // of that height has; both restored after it.
+            int savedRegion = _consoleRegionX; UEObject loadRoot = null, loadClip = null; object savedGuiScale = null;
+            (object X, object Y, object W, object H) savedClip = default;
+            if (LevelInfo43 && UEGameProfile.Current.Game == UEEdition.Game.HP2 && (long)_viewportX * 3 > (long)_viewportY * 4
+                && ((interp.GetLevelInfo()?.GetProp("LevelAction") is byte la && la == 1)
+                    || ((c.GetProp("Viewport") as UEObject)?.GetProp(PK.Actor) is UEObject va && UEInterpreter.ToBool(va.GetProp("bShowLoadingScreen")))))
+            {
+                _consoleRegionX = _viewportY * 4 / 3;
+                if (c.GetProp("Root") is UEObject root)
+                {
+                    // DrawStretchedTextureSegment clips to Root.ClippingRegion x GUIScale (set at Resized with the full-width
+                    // scale): the region's 640 x height/scale GUI units for this call too.
+                    float sc = _consoleRegionX / 640f;
+                    loadRoot = root; savedGuiScale = root.GetProp("GUIScale"); root.Props["GUIScale"] = sc;
+                    if (root.GetProp("ClippingRegion") is UEObject cr)
+                    {
+                        loadClip = cr; savedClip = (cr.GetProp("X"), cr.GetProp("Y"), cr.GetProp("W"), cr.GetProp("H"));
+                        cr.Props["X"] = 0; cr.Props["Y"] = 0; cr.Props["W"] = 640; cr.Props["H"] = (int)MathF.Ceiling(_viewportY / sc);
+                    }
+                }
+            }
+            try { ConsolePostRenderBody(interp, c); }
+            finally
+            {
+                _consoleRegionX = savedRegion;
+                if (loadRoot is not null) loadRoot.Props["GUIScale"] = savedGuiScale;
+                if (loadClip is not null) { loadClip.Props["X"] = savedClip.X; loadClip.Props["Y"] = savedClip.Y; loadClip.Props["W"] = savedClip.W; loadClip.Props["H"] = savedClip.H; }
+            }
+        }
+        void ConsolePostRenderBody(UEInterpreter interp, UEObject c)
+        {
             // Console region (presentation, not shipped): see SetConsoleRegion.
             int frameX = ConsoleRegionActive ? _consoleRegionX : _viewportX;
             // UConsole::PostRender (Engine.dll.c:32520-32525) restores the frame in
@@ -544,6 +654,7 @@ namespace HP1.UEScript
         {
             if (tex is UEObject || tex is null) return tex;
             string path = TexPathOf(tex);
+            RefuseScriptedUse(path, "UCanvas::DrawTile");
             string cur = TextureUse(path);
             if (cur == path) return tex;
             // The chain frame is resolved with the head's class (a frame of another class does not resolve: loud).

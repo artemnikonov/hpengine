@@ -162,6 +162,16 @@ namespace HP1.UEScript
             lock (_gate)
             {
                 if (_lod.TryGetValue((raw, verts), out var hit)) return hit;
+                var (tri, material) = LodFaces(path, verts);
+                return _lod[(raw, verts)] = raw.WithFaces(tri, material);
+            }
+        }
+
+        // The face list of LodVariant (wedge triples, per-face material) for `path` at the LOD level `verts`.
+        public (int[] tri, int[] material) LodFaces(string path, int verts)
+        {
+            lock (_gate)
+            {
                 Entry e = Find(path) ?? throw new InvalidOperationException("LodVariant: no mesh " + path);
                 Hp1MeshLod lod; int[] faceWedges, faceMaterial, wedgePoint;
                 if (e.Class.Equals("SkeletalMesh", StringComparison.OrdinalIgnoreCase))
@@ -176,7 +186,7 @@ namespace HP1.UEScript
                 }
                 var kept = new List<int>();
                 int[] tri = UEMeshLod.CollapsedFaces(lod, faceWedges, wedgePoint, verts, kept);
-                return _lod[(raw, verts)] = raw.WithFaces(tri, kept.ConvertAll(f => faceMaterial[f]).ToArray());
+                return (tri, kept.ConvertAll(f => faceMaterial[f]).ToArray());
             }
         }
 

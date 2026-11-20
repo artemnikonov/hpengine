@@ -7,6 +7,14 @@
 // unshield). Not ported: unshield's "old" compression and files stored outside the cabinet (both fail loudly here).
 // Unlike unshield, two different files for one output path are refused instead of the later one overwriting.
 // Checked against unshield itself on the US CD's setup/data1.cab (launcher/test_setup.sh, is_cab_vs_unshield).
+// Install layout (`language` given, InstallShield 6+): instead of <group>/..., only the file groups the setup installs
+// into the game folder — target directory "<TARGETDIR>\<sub>" (descriptor + 0x3a) and language (descriptor + 0x26, a
+// hex LCID such as "0009"; empty or "0" = every language) equal to `language` — are written, as <sub>/<directory>/<name>,
+// the first directory of <sub> in the case of the first group that names it (the HP2 CD has both "system" and "System").
+// Groups for the installer's own folders (<SUPPORTDIR>, <COMMONFILES>, ...) are skipped: the HP2 CD's
+// "<Engine>Kernel Placeholder\iKernel.exe" is not inside its cabinet (unshield fails on it too). Two different files
+// for one path: the language group's wins over a language-neutral group's (the CD's System/default.ini: Language=int
+// in the base group, Language=usa in the English one, as in the installed EN game).
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
@@ -28,7 +36,7 @@ static class InstallShield
     }
 
     // `first`: the <prefix>1.hdr, or <prefix>1.cab of a cabinet without a separate header. Returns the file count.
-    public static int Extract(string first, string outDir)
+    public static int Extract(string first, string outDir, string language = null)
     {
         string dir = Path.GetDirectoryName(Path.GetFullPath(first))!, name = Path.GetFileName(first);
         int digit = name.IndexOfAny("0123456789.".ToCharArray());   // unshield_create_filename_pattern
@@ -81,7 +89,9 @@ static class InstallShield
 
         var fds = new Fd[fileCount];
         for (int i = 0; i < fileCount; i++) fds[i] = Read(i);
-        var written = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var written = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);   // path -> from a language group
+        var tops = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);   // install layout: first case of each top directory
+        if (language is not null && major < 6) throw new InvalidDataException("the install layout needs InstallShield 6 or later");
         int count = 0;
         for (int g = 0; g < 71; g++)   // MAX_FILE_GROUP_COUNT offsets at descriptor + 0x3e, each a linked list
             for (uint next = U32(h, d + 0x3e + g * 4); next != 0;)
@@ -89,6 +99,19 @@ static class InstallShield
                 int list = d + (int)next, desc = d + (int)U32(h, list + 4);
                 next = U32(h, list + 8);
                 string group = Str(d + (long)U32(h, desc));
+                bool specific = false;
+                if (language is not null)
+                {
+                    const string Target = "<TARGETDIR>";
+                    string lang = U32(h, desc + 0x26) == 0 ? "" : Str(d + (long)U32(h, desc + 0x26));
+                    string to = U32(h, desc + 0x3a) == 0 ? "" : Str(d + (long)U32(h, desc + 0x3a));
+                    if (!to.StartsWith(Target, StringComparison.OrdinalIgnoreCase) || lang is not ("" or "0") && !lang.Equals(language, StringComparison.OrdinalIgnoreCase)) continue;
+                    specific = lang is not ("" or "0");
+                    group = to[Target.Length..].TrimStart('\\');
+                    int cut = group.IndexOf('\\');
+                    string top = cut < 0 ? group : group[..cut];
+                    if (top.Length > 0) group = tops.TryAdd(top, top) ? group : tops[top] + group[top.Length..];
+                }
                 int at = desc + 4 + (major <= 5 ? 0x48 : 0x12);
                 uint firstFile = U32(h, at), lastFile = U32(h, at + 4);
                 for (uint i = firstFile; i <= lastFile && i < fileCount; i++)
@@ -100,13 +123,17 @@ static class InstallShield
                     string target = Path.Combine(outDir, rel), tmp = target + ".hp1part";
                     Directory.CreateDirectory(Path.GetDirectoryName(target)!);
                     Save(src, fds[src], tmp);
-                    if (!written.Add(rel))
+                    if (written.TryGetValue(rel, out bool before))
                     {
                         bool same = File.ReadAllBytes(tmp).AsSpan().SequenceEqual(File.ReadAllBytes(target));
+                        // Install layout: the language group's file replaces the language-neutral one (the HP2 CD's
+                        // System/default.ini: Language=int in the base group, Language=usa in the English group).
+                        if (!same && specific && !before) { File.Move(tmp, target, overwrite: true); written[rel] = true; continue; }
                         File.Delete(tmp);
-                        if (!same) throw new InvalidDataException($"two different files for {rel}");
+                        if (!same && !(before && !specific)) throw new InvalidDataException($"two different files for {rel}");
                         continue;
                     }
+                    written[rel] = specific;
                     File.Move(tmp, target);
                     count++;
                 }

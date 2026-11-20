@@ -2,7 +2,7 @@
 //
 // All Canvas semantics (pen, line wrap, glyph layout, CharRemap, clipping by ClipX/ClipY and by the frame, PolyFlags
 // choice) execute in Core (UEWorldFrameProducer). Here ready commands only become screen quads: interface scale,
-// edge snapping to pixels, texture window, blend mode. The module does not call the GPU: the backend draws, in list order.
+// D3DDrv DrawTile vertices (fractional, unrounded), texture window, blend mode. The module does not call the GPU: the backend draws, in list order.
 using HP1.UEScript;
 
 namespace HPEngine.Hud
@@ -10,7 +10,7 @@ namespace HPEngine.Hud
     public sealed class HudBatcher
     {
         // UE1 PolyFlags (Engine/Inc/UnObj.h) applied by a tile.
-        public const int PF_Masked = 0x2, PF_Translucent = 0x4, PF_Modulated = 0x40;
+        public const int PF_Masked = 0x2, PF_Translucent = 0x4, PF_Modulated = 0x40, PF_NoSmooth = 0x800;
 
         // Logical texture size by UE path: USize/VSize of mip 0 (D3DDrv scales UV by 1/(1<<firstMip) rather than
         // changing USize). null means no texture.
@@ -89,6 +89,13 @@ namespace HPEngine.Hud
             {
                 HudCommand c = cmds[i];
                 float r = c.Color.x / 255f, g = c.Color.y / 255f, b = c.Color.z / 255f;
+                if (c.Kind == HudKind.Actor)
+                {
+                    // Core's canvas mesh draw (UCanvas::execDrawActor after ClearZ): a marker in the list order.
+                    _quads.Add(new HudQuad(0, 0, 0, 0, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, HudBlend.Opaque, false, null,
+                        HudQuadSource.Actor, i, actorId: c.ActorId));
+                    continue;
+                }
                 if (c.Kind == HudKind.Tile)
                 {
                     Calls++;
@@ -123,20 +130,20 @@ namespace HPEngine.Hud
             }
         }
 
-        // HP1HudRender.DrawWithFlags (:204-226) + Blit/BlitMaterial (:115-135, :230-237).
+        // Screen vertices of a canvas tile as D3DDrv DrawTile builds them: X = (Frame.XB − 0.5) + X, Y = (Frame.YB − 0.5) + Y
+        // (fild; fsub [0x1001a68c] = 0.5f; fadd; fstp), corners X, X+XL, Y, Y+YL, no rounding and no refusal (a fan of 4
+        // pretransformed vertices, cull none). The −0.5 is the D3D7 pixel-centre convention (centre at the integer); SDL_GPU
+        // centres are at +0.5, so the same coverage and the same interpolated UV come from the unshifted X, Y here.
+        // The canvas frame origin (XB, YB) is 0 for the HUD frame. UV: U·UScale, (U+UL)·UScale, likewise V.
+        // Original: D3DDrv.dll ?DrawTile@UD3DRenderDevice@@UAEXPAUFSceneNode@@AAUFTextureInfo@@MMMMMMMMPAVFSpanBuffer@@MVFPlane@@3K@Z [HP1 0x100060B0] [HP2 0x100060C0]
         void DrawWithFlags(string tex, (int W, int H) size, float x, float y, float xl, float yl,
                            float u, float v, float ul, float vl, int pf, float r, float g, float b,
                            HudQuadSource source, int cmd)
         {
-            // Interface scale: Core canvas commands are stretched back to the screen.
+            // Interface scale (D-44, NOT ORIGINAL; 1 at 800x600): Core canvas commands are stretched back to the screen.
             x *= Scale; y *= Scale; xl *= Scale; yl *= Scale;
-            // Edges snap to integer pixels, each separately (adjacent tiles share one boundary).
-            // Rounding is to even.
-            float x0 = MathF.Round(x, MidpointRounding.ToEven), y0 = MathF.Round(y, MidpointRounding.ToEven);
-            float x1 = MathF.Round(x + xl, MidpointRounding.ToEven), y1 = MathF.Round(y + yl, MidpointRounding.ToEven);
-            if (x1 - x0 <= 0f || y1 - y0 <= 0f) return;
-            // Window [U,U+UL)×[V,V+VL) as is, from UNROUNDED U,V (UV is not adjusted for edge snapping),
-            // in fractions of the logical size.
+            float x0 = x, y0 = y, x1 = x + xl, y1 = y + yl;
+            // Window [U,U+UL)×[V,V+VL) as is, in fractions of the logical size.
             float u0 = u / size.W, u1 = (u + ul) / size.W, v0 = v / size.H, v1 = (v + vl) / size.H;
             bool masked = (pf & PF_Masked) != 0;
             HudBlend blend;
@@ -151,7 +158,10 @@ namespace HPEngine.Hud
             }
             else
                 blend = masked ? HudBlend.AlphaBlend : HudBlend.Opaque;   // CanvasTile
-            _quads.Add(new HudQuad(x0, y0, x1, y1, u0, v0, u1, v1, r, g, b, 1f, blend, clip, tex, source, cmd));
+            // Filter: D3DDrv SetBlending sets MAG/MINFILTER to POINT under PF_NoSmooth, else LINEAR (0x1000949c-0x100094cc
+            // HP1). Glyphs always carry PF_NoSmooth (Core TextPolyFlags); a tile carries it from Canvas.bNoSmooth.
+            _quads.Add(new HudQuad(x0, y0, x1, y1, u0, v0, u1, v1, r, g, b, 1f, blend, clip, tex, source, cmd,
+                smooth: (pf & PF_NoSmooth) == 0));
         }
 
         // FillBlack: CanvasTile without blending, white texture, black colour.

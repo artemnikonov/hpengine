@@ -1,5 +1,5 @@
 // The launcher window (code only, no XAML): install flow, Play, Mods, Menu. Behaviour as launcher/Launcher.swift; the look
-// is the approved redesign (HP1_archive/launcher_design/proposal.md, 2026-11-16): a fixed 600x560 window that each game paints
+// is the approved redesign (the maintainer's notes, 2026-11-16): a fixed 600x560 window that each game paints
 // whole (its palette, its serif title, one gold primary button); rare actions in the Menu; gamepad A/B/LB/RB/Start/Y.
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -103,6 +103,7 @@ public sealed partial class MainWindow : Window
     Process _setup, _play;
     int _step = -1; double _progress; bool _running, _playing; string _edition, _warning, _error, _report, _runError;
     string _hp2Error, _hp2RunError, _launcherError;   // per game (GameScope): HP1's in _error, HP2's, the launcher's own (update)
+    string[] _runLogsBefore, _hp2RunLogsBefore;   // each game's run journals before its last run started: "Open log" opens the one that run wrote
     bool _modsOpen;   // the Mods page in place of the main page (HP1)
     Release _newer;
     static readonly HttpClient Http = new();
@@ -113,8 +114,8 @@ public sealed partial class MainWindow : Window
         _editionText = new() { Name = "EditionText", FontSize = 12, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis, MaxWidth = 420 },
         _editionDetail = new() { Name = "EditionDetail", FontSize = 12, TextWrapping = TextWrapping.Wrap, IsVisible = false, Margin = new Thickness(0, 6, 0, 0) },
         _editionChip = new() { Name = "EditionChip", FontSize = 13, VerticalAlignment = VerticalAlignment.Center },
-        _warningText = new() { Name = "WarningText", TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center },
-        _errorText = new() { Name = "ErrorText", TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
+        _warningText = new() { Name = "WarningText", VerticalAlignment = VerticalAlignment.Center },
+        _errorText = new() { Name = "ErrorText", VerticalAlignment = VerticalAlignment.Center };
     readonly Glyph _statusIcon = new() { Width = 16, Height = 16, StrokeThickness = 1.8, StrokeLineCap = PenLineCap.Round, StrokeJoin = PenLineJoin.Round, Stretch = Stretch.Uniform, VerticalAlignment = VerticalAlignment.Center };
     readonly Border _chipBox = new() { CornerRadius = new CornerRadius(99), Padding = new Thickness(8, 2), BorderThickness = new Thickness(1), VerticalAlignment = VerticalAlignment.Center };
     readonly StackPanel _hero = new() { Name = "Hero", Margin = new Thickness(24, 20, 24, 0) };
@@ -124,8 +125,7 @@ public sealed partial class MainWindow : Window
         _modsPage = new() { Name = "ModsPage", Spacing = 12, Margin = new Thickness(24, 16, 24, 0), IsVisible = false },
         _stepsList = new() { Spacing = 0 }, _actions = new() { Name = "Actions", Orientation = Orientation.Horizontal, Spacing = 12, Margin = new Thickness(24, 20, 24, 0) };
     readonly Border _stepsCard;
-    readonly TextBlock _hintText = new() { Text = "Supported: US 1.53 (exact) · UK 1.1 · Russian EA release.", FontSize = 12, TextWrapping = TextWrapping.Wrap },
-        _percent = new() { FontSize = 12, HorizontalAlignment = HorizontalAlignment.Right },
+    readonly TextBlock _percent = new() { FontSize = 12, HorizontalAlignment = HorizontalAlignment.Right },
         _resumeNote = new() { Text = "You can close the window: the copy resumes next time.", FontSize = 12, Margin = new Thickness(24, 10, 24, 0) };
     readonly ProgressBar _bar = new() { Name = "ProgressBar", Maximum = 1, Height = 6, MinHeight = 6, CornerRadius = new CornerRadius(3), Margin = new Thickness(0, 10, 0, 0) };
     readonly StackPanel _dropIdle = new() { Spacing = 8, HorizontalAlignment = HorizontalAlignment.Center };
@@ -148,6 +148,7 @@ public sealed partial class MainWindow : Window
     // An unrecognised release: HP1Setup's REPORT link (UEEdition.ReportUrl), opened from the warning banner.
     readonly Button _reportButton = new() { Name = "ReportButton", Content = "Report…", IsVisible = false };
     readonly Button _openLog = new() { Name = "OpenLogButton", Content = "Open log", IsVisible = false };
+    readonly Button _dismiss = new() { Name = "DismissButton", IsVisible = false };   // the error banner's ×
     readonly Button _updateOpen = new() { Content = "What's new" }, _updateInstall = new() { Name = "UpdateButton", Content = "Update" };
     bool _updating;
     readonly Button _menuButton = new() { Name = "MenuButton" }, _modsRow = new() { Name = "ModsRow" }, _modsBack = new() { Name = "ModsBack" };
@@ -172,7 +173,7 @@ public sealed partial class MainWindow : Window
         try { Icon = ShieldIcon.Make(); } catch (Exception) { /* no renderer for the bitmap: the default icon stays */ }
 
         _title.FontSize = 32; _title.FontWeight = FontWeight.Bold; _title.Foreground = Th.Title; _title.FontFamily = Th.Serif; _title.TextWrapping = TextWrapping.Wrap; _title.LineHeight = 35;
-        foreach (var t in new[] { _heroSub, _metaExtra, _editionDetail, _editionChip, _hintText, _percent, _resumeNote, _versionText, _modsValue }) t.Foreground = Th.Dim;
+        foreach (var t in new[] { _heroSub, _metaExtra, _editionDetail, _editionChip, _percent, _resumeNote, _versionText, _modsValue }) t.Foreground = Th.Dim;
         _chipBox.Child = _editionText; _chipBox.BorderBrush = Th.Stroke;
         _hero.Children.Add(_title);
         _hero.Children.Add(_heroSub);
@@ -193,9 +194,13 @@ public sealed partial class MainWindow : Window
         _reportButton.Classes.Add("quiet");
         _reportButton.Click += (_, _) => { if (_report != null) Open(_report); };
         _openLog.Classes.Add("quiet");
-        _openLog.Click += (_, _) => { if (File.Exists(LogFile(_hp2Tab))) Open(LogFile(_hp2Tab)); else OpenFolder(GameScope.LogsDir(_game, _hp2Tab)); };
+        _openLog.Click += (_, _) => { var f = LogToOpen(); if (f == GameScope.LogsDir(_game, _hp2Tab)) OpenFolder(f); else Open(f); };
+        _dismiss.Classes.Add("flat"); _dismiss.Width = 32; _dismiss.Height = 32; _dismiss.Padding = new Thickness(0); _dismiss.VerticalAlignment = VerticalAlignment.Top;
+        var cross = Glyph24(Cross, Th.Dim, 14); cross.HorizontalAlignment = HorizontalAlignment.Center; _dismiss.Content = cross;
+        Avalonia.Automation.AutomationProperties.SetName(_dismiss, "Dismiss"); ToolTip.SetTip(_dismiss, "Dismiss");
+        _dismiss.Click += (_, _) => DismissError();
         _warningBanner = MakeBanner(Th.Warn, Alert, _warningText, _reportButton);
-        _errorBanner = MakeBanner(Th.Err, Alert, _errorText, _openLog);
+        _errorBanner = MakeBanner(Th.Err, Stop, _errorText, _openLog, _dismiss);
         BuildSetupPanel();
         BuildReadyPanel();
         BuildModsPage();
@@ -246,7 +251,7 @@ public sealed partial class MainWindow : Window
         }
         var footer = new DockPanel { Margin = new Thickness(24, 10, 24, 12), Children = { Dock(_padHints, Avalonia.Controls.Dock.Right), _versionText } };
 
-        var page = new StackPanel { Children = { _hero, _warningBanner, _errorBanner, _setupPanel, _actions, _resumeNote, _readyPanel, _modsPage, _hp2Panel }, Margin = new Thickness(0, 0, 0, 16) };
+        var page = new StackPanel { Children = { _hero, _setupPanel, _actions, _resumeNote, _readyPanel, _modsPage, _hp2Panel, _warningBanner, _errorBanner }, Margin = new Thickness(0, 0, 0, 16) };
         var layout = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto,Auto") };
         Grid.SetRow(_updateBanner, 1); var scroll = new ScrollViewer { Content = page }; Grid.SetRow(scroll, 2);
         Grid.SetRow(_stripe1, 3); Grid.SetRow(_stripe2, 3); Grid.SetRow(footer, 4);
@@ -279,7 +284,9 @@ public sealed partial class MainWindow : Window
     static Control Dock(Control c, Dock d) { DockPanel.SetDock(c, d); return c; }
     bool Installed => _own || File.Exists(Path.Combine(_game, ".hp1-installed"));   // HP1Setup writes it last
     bool Setup => !Installed || _running || _inputs.Count > 0;
-    string Edition() => !File.Exists(Path.Combine(_game, ".hp1-installed")) ? null : File.ReadLines(Path.Combine(_game, ".hp1-installed")).FirstOrDefault(l => l.StartsWith("edition="))?[8..];
+    string Edition() => EditionOf(_hp2Tab ? Hp2Game : _game);   // the selected tab's game
+    static string EditionOf(string root) => !File.Exists(Path.Combine(root, ".hp1-installed")) ? null : File.ReadLines(Path.Combine(root, ".hp1-installed")).FirstOrDefault(l => l.StartsWith("edition="))?[8..];
+    void SetupError(string e) { if (_hp2Tab) _hp2Error = e; else _error = e; }   // the setup's errors: the selected tab's game
     // The engine and HP1Setup live in the HPEngine/ folder of the archive, beside the Launcher (make_launcher.sh); no other layout is built.
     string Exe(string n) => Path.Combine(_appDir, "HPEngine", OperatingSystem.IsWindows() ? n + ".exe" : n);
     string LogFile(bool hp2) => GameScope.ConsoleLog(_own ? Path.Combine(_game, "HPEngineData", "HPEngine.log") : Path.Combine(Path.GetDirectoryName(_game), "HPEngine.log"), hp2);
@@ -287,7 +294,7 @@ public sealed partial class MainWindow : Window
     // ---- look ----
     // 24-unit stroke icons (mockup.html symbols)
     const string Check = "M5,12.5 L9.5,17 L19,7.5", Spark = "M12,3 V7 M12,17 V21 M3,12 H7 M17,12 H21 M6,6 L8.5,8.5 M15.5,15.5 L18,18 M6,18 L8.5,15.5 M15.5,8.5 L18,6",
-        Alert = "M12,3 L22,21 H2 Z M12,10 V15 M12,18 V18.01", MenuLines = "M4,7 H20 M4,12 H20 M4,17 H20", Chev = "M9,6 L15,12 L9,18", BackChev = "M15,6 L9,12 L15,18",
+        Alert = "M12,3 L22,21 H2 Z M12,10 V15 M12,18 V18.01", Stop = "M8,3 H16 L21,8 V16 L16,21 H8 L3,16 V8 Z M9,9 L15,15 M15,9 L9,15", Cross = "M6,6 L18,18 M18,6 L6,18", MenuLines = "M4,7 H20 M4,12 H20 M4,17 H20", Chev = "M9,6 L15,12 L9,18", BackChev = "M15,6 L9,12 L15,18",
         Folder = "M3,7 A2,2 0 0 1 5,5 H9 L11,7 H19 A2,2 0 0 1 21,9 V17 A2,2 0 0 1 19,19 H5 A2,2 0 0 1 3,17 Z", Disc = "M3,12 A9,9 0 1 0 21,12 A9,9 0 1 0 3,12 M9.5,12 A2.5,2.5 0 1 0 14.5,12 A2.5,2.5 0 1 0 9.5,12",
         Ring = "M5,12 A7,7 0 1 0 19,12 A7,7 0 1 0 5,12";
     static Glyph Glyph24(string path, IBrush color, double size) => new() { Data = Geometry.Parse("M0,0 M24,24 " + path), Stroke = color, StrokeThickness = 1.8, Width = size, Height = size, Stretch = Stretch.Uniform,
@@ -429,24 +436,19 @@ public sealed partial class MainWindow : Window
         return new Border { Background = Th.Well, BorderBrush = Th.Stroke, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(12), Padding = new Thickness(16), Child = s };
     }
 
-    // Banner: dark well with the state colour as border, icon + text (More/Less shows the whole text) + its buttons.
-    static Border MakeBanner(IBrush color, string glyph, TextBlock text, Button extra = null)
+    // Banner (as the macOS Launcher's Banner, below the page's content): dark well with the state colour as border, icon,
+    // the whole text (wrapped) with its button under it, and its × at the top right.
+    static Border MakeBanner(IBrush color, string glyph, TextBlock text, Button extra = null, Button close = null)
     {
-        text.Foreground = Th.Text; text.FontSize = 13;
-        var more = new Button { Content = "More" };
-        more.Classes.Add("flat"); more.Foreground = color;
-        more.Click += (_, _) =>
-        {
-            var open = text.TextWrapping == TextWrapping.NoWrap;
-            text.TextWrapping = open ? TextWrapping.Wrap : TextWrapping.NoWrap; text.TextTrimming = open ? TextTrimming.None : TextTrimming.CharacterEllipsis;
-            more.Content = open ? "Less" : "More";
-        };
-        var icon = Icon18(glyph, color); icon.Margin = new Thickness(0, 0, 10, 0);
-        var g = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto"), ColumnSpacing = 4 };
-        g.Children.Add(icon); Grid.SetColumn(text, 1); g.Children.Add(text); Grid.SetColumn(more, 2); g.Children.Add(more);
-        if (extra != null) { Grid.SetColumn(extra, 3); g.Children.Add(extra); }
+        text.Foreground = Th.Text; text.FontSize = 13; text.TextWrapping = TextWrapping.Wrap;
+        var icon = Icon18(glyph, color); icon.Margin = new Thickness(0, 2, 10, 0); icon.VerticalAlignment = VerticalAlignment.Top;
+        var body = new StackPanel { Spacing = 8, Children = { text } };
+        if (extra != null) { extra.HorizontalAlignment = HorizontalAlignment.Left; body.Children.Add(extra); }
+        var g = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"), ColumnSpacing = 4 };
+        g.Children.Add(icon); Grid.SetColumn(body, 1); g.Children.Add(body);
+        if (close != null) { close.VerticalAlignment = VerticalAlignment.Top; Grid.SetColumn(close, 2); g.Children.Add(close); }
         var banner = new Border { Background = new SolidColorBrush(Colors.Black, 0.30), BorderBrush = color, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(10),
-            Padding = new Thickness(12, 4, 4, 4), Margin = new Thickness(24, 16, 24, 0), Child = g, IsVisible = false };
+            Padding = new Thickness(10), Margin = new Thickness(24, 16, 24, 0), Child = g, IsVisible = false };
         banner.Classes.Add("banner");
         return banner;
     }
@@ -468,7 +470,6 @@ public sealed partial class MainWindow : Window
         zone.Children.Add(new StackPanel { Margin = new Thickness(16), Spacing = 8, VerticalAlignment = VerticalAlignment.Center, Children = { _dropIdle, _inputsList, buttons } });
         _setupPanel.Children.Add(zone);
         _setupPanel.Children.Add(_stepsCard);
-        _setupPanel.Children.Add(_hintText);
     }
 
     async Task PickFiles()
@@ -548,11 +549,11 @@ public sealed partial class MainWindow : Window
         Group("THIS GAME", null);
         M("OpenSaves", "Open saved games folder", () => OpenFolder(_hp2Tab ? Hp2FrontEnd.SaveDir(_game) : Path.Combine(_game, "Save")), null, () => _hp2Tab ? Hp2Root != null : Installed);
         M("OpenLogs", "Open logs folder", () => OpenFolder(GameScope.LogsDir(_game, _hp2Tab)));
-        M("InstallAgain", "Install again from other files…", () => _ = PickFiles(), () => hp1() && !_own, () => !_running && !_playing);
-        M("Hp2Folder", "Change game folder…", () => _ = Hp2ChooseFolder(), () => _hp2Tab, () => !_playing);
+        M("InstallAgain", "Install again from other files…", () => _ = PickFiles(), () => _hp2Tab || !_own, () => !_running && !_playing);
+        M("Hp2Folder", "Change game folder…", () => _ = Hp2ChooseFolder(), () => _hp2Tab && !Hp2Installed, () => !_playing && !_running);
         M("ResetSettings", "Reset settings…", () => _ = ResetSettings(), hp1, () => Installed);
         M("ResetPad", "Reset gamepad buttons…", () => _ = ResetPad(), hp1, () => Installed && !_playing && PadReset.Rebound(_game) > 0);
-        var rm = M("RemoveGame", _own ? "Remove game: not for your own game folder" : "Remove game…", () => _ = RemoveGame(), hp1, () => !_own && Installed && !_running && !_playing);
+        var rm = M("RemoveGame", "Remove game…", () => _ = RemoveGame(), null, () => (_hp2Tab ? Hp2Installed : !_own && Installed) && !_running && !_playing);
         rm.Foreground = Th.Err;
         fly.Items.Add(new Separator());
         Group("LAUNCHER", null);
@@ -571,8 +572,9 @@ public sealed partial class MainWindow : Window
     void Refresh()
     {
         Th.Use(_hp2Tab); _stripe1.IsVisible = !_hp2Tab; _stripe2.IsVisible = _hp2Tab;
-        Tab(_tabHp1, !_hp2Tab, Installed ? Th.Ok : _running ? Th.Warn : null, _running ? "installing" : Installed ? null : "not set up");
-        Tab(_tabHp2, _hp2Tab, Hp2Root != null ? Th.Ok : null, Hp2Release.Caption(Hp2Release.Available, Hp2Root != null));
+        // a setup runs on the selected tab only (the tabs do not switch while it runs)
+        Tab(_tabHp1, !_hp2Tab, Installed ? Th.Ok : _running && !_hp2Tab ? Th.Warn : null, _running && !_hp2Tab ? "installing" : Installed ? null : "not set up");
+        Tab(_tabHp2, _hp2Tab, Hp2Root != null ? Th.Ok : _running && _hp2Tab ? Th.Warn : null, _running && _hp2Tab ? "installing" : Hp2Release.Caption(Hp2Release.Available, Hp2Root != null));
         _tabHp2.IsEnabled = Hp2Release.Available; ToolTip.SetTip(_tabHp2, Hp2Release.Tip(Hp2Release.Available)); ToolTip.SetShowOnDisabled(_tabHp2, true);
         if (_hp2Tab) { RefreshHp2(); KeepFocus(); return; }   // the HP2 tab (MainWindow.Hp2.cs); below, the HP1 tab
         _hp2Panel.IsVisible = false; _actions.IsVisible = !_modsOpen;
@@ -582,41 +584,7 @@ public sealed partial class MainWindow : Window
         _metaExtra.IsVisible = false;
         _hero.IsVisible = !_modsOpen; _modsPage.IsVisible = _modsOpen;
         _setupPanel.IsVisible = Setup && !_modsOpen; _readyPanel.IsVisible = !Setup && !_modsOpen;
-        // "US 1.53: exact" -> name in the chip + the tier (exact: verified, green; supported: gold; others the warning colour with the tier text)
-        var parts = (_edition ?? "").Split(": ");
-        var tier = parts.Length > 1 ? parts[^1] : "";
-        _editionText.Text = _edition == null ? (_own ? "Your game folder: " + _game : "Installed") : parts.Length > 1 ? string.Join(": ", parts[..^1]) : _edition;
-        var (cc, label) = tier switch { "exact" => (Th.Ok, "verified"), "supported" => (Th.Accent, "supported"), _ => (Th.Warn, tier.Length == 0 ? "unknown" : tier) };
-        bool steps = _running || _step >= 0;
-        _chipBox.IsVisible = (!Setup || steps) && (_edition != null || _own); _chipBox.Background = _edition != null ? Th.Surface : null; _chipBox.BorderThickness = new Thickness(_edition != null ? 1 : 0);
-        _editionText.Foreground = _edition != null ? Th.Text : Th.Dim;
-        _editionChip.IsVisible = _edition != null && (!Setup || steps); _editionChip.Text = label; _editionChip.Foreground = cc;
-        UpdateBanners();
-        _inputsList.Children.Clear();
-        foreach (var i in _inputs) _inputsList.Children.Add(new TextBlock { Text = Path.GetFileName(i.TrimEnd('/', '\\')) is { Length: > 0 } n ? n : i, TextTrimming = TextTrimming.CharacterEllipsis, HorizontalAlignment = HorizontalAlignment.Center });
-        _dropIdle.IsVisible = _inputs.Count == 0;
-        _dropRect.Stroke = Th.Stroke;
-        _stepsCard.IsVisible = steps; _hintText.IsVisible = !steps; ((Control)_dropRect.Parent).IsVisible = !_running;
-        _stepsList.Children.Clear();
-        for (int i = 0; i < SetupProtocol.Steps.Length; i++)
-        {
-            var done = i < _step; var cur = i == _step;
-            var mark = Glyph24(done ? Check : cur ? Spark : Ring, done ? Th.Ok : cur ? Th.Accent : Th.Dim, 16);
-            _stepsList.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Height = 34, Children = { mark,
-                new TextBlock { Text = SetupProtocol.Steps[i].Text, VerticalAlignment = VerticalAlignment.Center, FontWeight = cur ? FontWeight.SemiBold : FontWeight.Normal, Foreground = cur ? Th.Text : Th.Dim } } });
-        }
-        _bar.IsVisible = _running && _step >= 2; _bar.Value = _progress; _percent.IsVisible = _bar.IsVisible; _percent.Text = $"{Math.Round(_progress * 100)}%";
-        bool ready = Installed && !_running && _inputs.Count == 0;
-        _play2.IsVisible = ready; _play2.IsEnabled = !_playing;
-        _playSpin.IsVisible = _playing; ((StackPanel)_play2.Content).Children[1].IsVisible = !_playing; _playText.Text = _playing ? "Playing…" : "Play";
-        _installSpin.IsVisible = _running;
-        _install.IsVisible = !ready && (_inputs.Count > 0 || _running); _installText.Text = _running ? "Installing…" : Installed ? "Install Again" : "Install";
-        _install.IsEnabled = _inputs.Count > 0 && !_running && !_playing;
-        _resumeNote.IsVisible = _running;
-        // one gold button per screen: "Choose files…" while nothing is chosen, then Install
-        _choose.Classes.Set("gold", _inputs.Count == 0); _choose.Classes.Set("quiet", _inputs.Count > 0); _choose.Content = _inputs.Count == 0 ? "Choose files…" : "Add files…";
-        _clear.IsVisible = _inputs.Count > 0;
-        _primary = _modsOpen ? _modsBack : ready ? _play2 : _install.IsVisible ? _install : _choose;
+        RefreshSetup(Installed, Setup, _own);
         _loadingLanguage = true;
         try
         {
@@ -629,6 +597,7 @@ public sealed partial class MainWindow : Window
                 _editionDetail.Text = editionDisplay.Detail;
             }
             _editionDetail.IsVisible = _languages.Count > 1 && !Setup;
+            if (EditionLabel.Quiet(editionDisplay.Tier)) _chipBox.IsVisible = _editionChip.IsVisible = false;
             ToolTip.SetTip(_chipBox, editionDisplay.Tier == "different data"
                 ? "These files differ from the engine family's reference manifest. This alone does not establish that your disc was modified."
                 : null);
@@ -649,6 +618,48 @@ public sealed partial class MainWindow : Window
         KeepFocus();
     }
 
+    // The setup view and the edition chip, for the selected tab's game (HP1: its install root or the player's own folder;
+    // HP2: its install root). Both tabs, one look.
+    void RefreshSetup(bool installed, bool setup, bool own)
+    {
+        // "US 1.53: exact" -> name in the chip + the tier (exact: verified, green; supported: gold; others the warning colour with the tier text)
+        var parts = (_edition ?? "").Split(": ");
+        var tier = parts.Length > 1 ? parts[^1] : "";
+        _editionText.Text = _edition == null ? (own ? "Your game folder: " + _game : "Installed") : parts.Length > 1 ? string.Join(": ", parts[..^1]) : _edition;
+        var (cc, label) = tier switch { "exact" => (Th.Ok, "verified"), "supported" => (Th.Accent, "supported"), _ => (Th.Warn, tier.Length == 0 ? "unknown" : tier) };
+        bool steps = _running || _step >= 0;
+        bool quiet = EditionLabel.Quiet(tier);
+        _chipBox.IsVisible = (!setup || steps) && (_edition != null ? !quiet : own); _chipBox.Background = _edition != null ? Th.Surface : null; _chipBox.BorderThickness = new Thickness(_edition != null ? 1 : 0);
+        _editionText.Foreground = _edition != null ? Th.Text : Th.Dim;
+        _editionChip.IsVisible = _edition != null && !quiet && (!setup || steps); _editionChip.Text = label; _editionChip.Foreground = cc;
+        UpdateBanners();
+        _inputsList.Children.Clear();
+        foreach (var i in _inputs) _inputsList.Children.Add(new TextBlock { Text = Path.GetFileName(i.TrimEnd('/', '\\')) is { Length: > 0 } n ? n : i, TextTrimming = TextTrimming.CharacterEllipsis, HorizontalAlignment = HorizontalAlignment.Center });
+        _dropIdle.IsVisible = _inputs.Count == 0;
+        _dropRect.Stroke = Th.Stroke;
+        _stepsCard.IsVisible = steps; ((Control)_dropRect.Parent).IsVisible = !_running;
+        _stepsList.Children.Clear();
+        for (int i = 0; i < SetupProtocol.Steps.Length; i++)
+        {
+            var done = i < _step; var cur = i == _step;
+            var mark = Glyph24(done ? Check : cur ? Spark : Ring, done ? Th.Ok : cur ? Th.Accent : Th.Dim, 16);
+            _stepsList.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Height = 34, Children = { mark,
+                new TextBlock { Text = SetupProtocol.Steps[i].Text, VerticalAlignment = VerticalAlignment.Center, FontWeight = cur ? FontWeight.SemiBold : FontWeight.Normal, Foreground = cur ? Th.Text : Th.Dim } } });
+        }
+        _bar.IsVisible = _running && _step >= 2; _bar.Value = _progress; _percent.IsVisible = _bar.IsVisible; _percent.Text = $"{Math.Round(_progress * 100)}%";
+        bool ready = installed && !_running && _inputs.Count == 0;
+        _play2.IsVisible = ready; _play2.IsEnabled = !_playing;
+        _playSpin.IsVisible = _playing; ((StackPanel)_play2.Content).Children[1].IsVisible = !_playing; _playText.Text = _playing ? "Playing…" : "Play";
+        _installSpin.IsVisible = _running;
+        _install.IsVisible = !ready && (_inputs.Count > 0 || _running); _installText.Text = _running ? "Installing…" : installed ? "Install Again" : "Install";
+        _install.IsEnabled = _inputs.Count > 0 && !_running && !_playing;
+        _resumeNote.IsVisible = _running;
+        // one gold button per screen: "Choose files…" while nothing is chosen, then Install
+        _choose.Classes.Set("gold", _inputs.Count == 0); _choose.Classes.Set("quiet", _inputs.Count > 0); _choose.Content = _inputs.Count == 0 ? "Choose files…" : "Add files…";
+        _clear.IsVisible = _inputs.Count > 0;
+        _primary = _modsOpen ? _modsBack : ready ? _play2 : _install.IsVisible ? _install : _choose;
+    }
+
     void Status(string text, IBrush color, string icon)
     {
         _status.Text = text; _statusIcon.Data = Geometry.Parse("M0,0 M24,24 " + icon); _statusIcon.Stroke = color;
@@ -665,11 +676,24 @@ public sealed partial class MainWindow : Window
 
     void UpdateBanners()
     {
-        _warningText.Text = _warning; _warningBanner.IsVisible = _warning != null && !_hp2Tab; _reportButton.IsVisible = _report != null;   // HP1Setup's: HP1's
+        _warningText.Text = _warning; _warningBanner.IsVisible = _warning != null; _reportButton.IsVisible = _report != null;   // HP1Setup's: the selected tab's (reset on a tab switch)
         // An unfinished rollback of an earlier update stays on screen while its marker exists (SelfUpdate.IncompleteNotice).
         var error = GameScope.Error(_hp2Tab, _error, _hp2Error, _launcherError) ?? SelfUpdate.IncompleteNotice(_appDir);
         _errorText.Text = error; _errorBanner.IsVisible = error != null;
         _openLog.IsVisible = error != null && ReferenceEquals(error, _hp2Tab ? _hp2RunError : _runError);   // a failed run of this game: its log
+        _dismiss.IsVisible = GameScope.Error(_hp2Tab, _error, _hp2Error, _launcherError) != null;   // an unfinished rollback's notice stays
+    }
+
+    // Public for the headless check: what the error banner's "Open log" opens for the selected tab's last run (GameScope.LogToOpen).
+    public string LogToOpen() => GameScope.LogToOpen(GameScope.LogsDir(_game, _hp2Tab), LogFile(_hp2Tab), _hp2Tab ? _hp2RunLogsBefore : _runLogsBefore);
+
+    // The error banner's × (and pad B / Escape on its buttons): clears the shown error only (GameScope.Dismiss).
+    void DismissError()
+    {
+        (_error, _hp2Error, _launcherError) = GameScope.Dismiss(_hp2Tab, _error, _hp2Error, _launcherError);
+        if (_error == null) _runError = null;
+        if (_hp2Error == null) _hp2RunError = null;
+        UpdateBanners();
     }
 
     static Button Chevron(string name, string path, bool on)
@@ -775,6 +799,7 @@ public sealed partial class MainWindow : Window
     // The visible sub-page's Back (Mods, HP2 New/Load Game): pad B and Escape.
     void GoBack()
     {
+        if (_dismiss.IsEffectivelyVisible && FocusManager?.GetFocusedElement() is { } f && (f == _dismiss || f == _openLog)) { DismissError(); return; }   // on the error banner: close it
         if (this.GetLogicalDescendants().OfType<Button>().FirstOrDefault(b => b.Name is "ModsBack" or "Hp2Back" && b.IsEffectivelyVisible) is { } back) Click(back);
     }
 
@@ -812,18 +837,19 @@ public sealed partial class MainWindow : Window
     // Public for the headless check: a dropped or chosen path.
     public void Add(string path)
     {
-        if (_own) return;   // the game next to the Launcher is used: nothing to install
+        if (_own && !_hp2Tab) return;   // the HP1 game next to the Launcher is used: nothing to install
         if (!_inputs.Contains(path)) _inputs.Add(path);
-        _error = null; _step = -1; _modsOpen = false; Refresh();
+        SetupError(null); _step = -1; _modsOpen = false; Refresh();
     }
 
     void Install()
     {
-        if (_own || _inputs.Count == 0 || _running || _playing) return;
-        if (!File.Exists(Exe("HP1Setup"))) { _error = $"HP1Setup was not found (the HPEngine folder must stay next to the Launcher) ({Exe("HP1Setup")})."; Refresh(); return; }
-        _running = true; _error = null; _warning = null; _report = null; _step = 0; _progress = 0;
+        if ((_own && !_hp2Tab) || _inputs.Count == 0 || _running || _playing) return;
+        if (!File.Exists(Exe("HP1Setup"))) { SetupError($"HP1Setup was not found (the HPEngine folder must stay next to the Launcher) ({Exe("HP1Setup")})."); Refresh(); return; }
+        _running = true; SetupError(null); _warning = null; _report = null; _step = 0; _progress = 0;
         var psi = new ProcessStartInfo(Exe("HP1Setup")) { RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true, CreateNoWindow = true, UseShellExecute = false };
-        psi.ArgumentList.Add("--dest"); psi.ArgumentList.Add(_game);
+        if (_hp2Tab) { psi.ArgumentList.Add("--game"); psi.ArgumentList.Add("hp2"); }
+        psi.ArgumentList.Add("--dest"); psi.ArgumentList.Add(_hp2Tab ? Hp2Game : _game);
         foreach (var i in _inputs) psi.ArgumentList.Add(i);
         var odd = new List<string>();
         void Line(string l) => Dispatcher.UIThread.Post(() => { if (l != null) Handle(l, odd); });   // posted in line order per stream
@@ -841,13 +867,14 @@ public sealed partial class MainWindow : Window
                 Dispatcher.UIThread.Post(() =>   // after the queued output lines
                 {
                     _running = false;
-                    if (p.ExitCode != 0 && _error == null)
-                        _error = $"The setup stopped unexpectedly (code {p.ExitCode})." + (odd.Count > 0 ? " Its output: " + string.Join(" | ", odd.TakeLast(3)) : "");
+                    if (p.ExitCode != 0 && (_hp2Tab ? _hp2Error : _error) == null)
+                        SetupError($"The setup stopped unexpectedly (code {p.ExitCode})." + (odd.Count > 0 ? " Its output: " + string.Join(" | ", odd.TakeLast(3)) : ""));
+                    if (_hp2Tab) Hp2Scan();
                     Refresh();
                 });
             });
         }
-        catch (Exception e) { _error = e.Message; _running = false; }
+        catch (Exception e) { SetupError(e.Message); _running = false; }
         Refresh();
     }
 
@@ -859,7 +886,7 @@ public sealed partial class MainWindow : Window
         {
             case SetupKind.Step: _step = l.Index; _progress = 0; break;
             case SetupKind.Progress: _progress = l.Progress; break;
-            case SetupKind.Error: _error = l.Text; _edition = Edition(); break;   // the installed edition is still the marker's
+            case SetupKind.Error: SetupError(l.Text); _edition = Edition(); break;   // the installed edition is still the marker's
             case SetupKind.Warning: _warning = l.Text; break;
             case SetupKind.Report: _report = l.Text; break;
             case SetupKind.Edition: _edition = l.Text; break;
@@ -886,6 +913,7 @@ public sealed partial class MainWindow : Window
             var psi = new ProcessStartInfo(Exe("HPEngine")) { WorkingDirectory = _game, RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true, UseShellExecute = false, CreateNoWindow = true };
             foreach (var a in StartMap.PlayArgs(_game, SelectedMap)) psi.ArgumentList.Add(a);
             var said = new List<string>();   // the engine's console output, for the error banner
+            _runLogsBefore = GameScope.RunLogs(GameScope.LogsDir(_game, false));
             var p = Process.Start(psi); _play = p; p.StandardInput.Close();
             p.OutputDataReceived += (_, e) => { lock (log) if (e.Data != null) { log.WriteLine(e.Data); said.Add(e.Data); } };
             p.ErrorDataReceived += (_, e) => { lock (log) if (e.Data != null) { log.WriteLine(e.Data); said.Add(e.Data); } };
@@ -897,7 +925,7 @@ public sealed partial class MainWindow : Window
                 Dispatcher.UIThread.Post(() =>
                 {
                     _playing = false;
-                    if (p.ExitCode != 0) lock (log) _error = _runError = EngineError.Banner(said, p.ExitCode, $"Open log, or {logFile}.");
+                    if (p.ExitCode != 0) lock (log) _error = _runError = EngineError.Banner(said, p.ExitCode);
                     Refresh();
                 });
             });
@@ -929,7 +957,9 @@ public sealed partial class MainWindow : Window
     // Remove the installed game copy (saved games, settings and mods kept unless asked). Windows: Recycle Bin; Linux: permanent.
     async Task RemoveGame()
     {
-        if (_own || !Installed || _running || _playing) return;
+        bool hp2 = _hp2Tab;
+        if ((hp2 ? !Hp2Installed : _own || !Installed) || _running || _playing) return;
+        string root = hp2 ? Hp2Game : _game;
         var fate = OperatingSystem.IsWindows() ? "It is moved to the Recycle Bin." : "It is deleted permanently (there is no portable trash on Linux).";
         var all = new CheckBox { Name = "AlsoDelete", Content = "Also delete saved games, settings and mods" };
         var d = Dialog("Remove game?", 460);
@@ -937,11 +967,20 @@ public sealed partial class MainWindow : Window
         yes.Classes.Add("quiet"); no.Classes.Add("quiet");
         yes.Click += (_, _) => d.Close(true); no.Click += (_, _) => d.Close(false);
         d.Content = new StackPanel { Margin = new Thickness(20), Spacing = 14, Children = {
-            new TextBlock { Text = $"The installed game copy in {_game} is removed. Saved games, settings and mods are kept. {fate} Your own game files are not touched.", TextWrapping = TextWrapping.Wrap },
+            new TextBlock { Text = $"The installed game copy in {root} is removed. Saved games, settings and mods are kept. {fate} Your own game files are not touched.", TextWrapping = TextWrapping.Wrap },
             all, new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right, Children = { no, yes } } } };
         if (!await d.ShowDialog<bool>(this)) return;
-        try { GameRemoval.Remove(_game, all.IsChecked == true, OperatingSystem.IsWindows() ? Recycle : null); _error = null; _warning = null; _report = null; _step = -1; _edition = null; }
-        catch (Exception e) { _error = "Could not remove the game: " + e.Message; }
+        try
+        {
+            GameRemoval.Remove(root, all.IsChecked == true, OperatingSystem.IsWindows() ? Recycle : null);
+            // HP2's saved games and settings live beside its install root (Hp2FrontEnd.SaveDir, InstallRoot.Hp2DataDir)
+            if (hp2 && all.IsChecked == true)
+                foreach (var dir in new[] { Hp2FrontEnd.SaveDir(_game), GameScope.DataDir(_game, true) }.Where(Directory.Exists))
+                    if (OperatingSystem.IsWindows()) Recycle(dir); else GameRemoval.Walk(dir, false);
+            SetupError(null); _warning = null; _report = null; _step = -1; _edition = null;
+        }
+        catch (Exception e) { SetupError("Could not remove the game: " + e.Message); }
+        if (hp2) { _hp2Page = "Main"; Hp2Scan(); }
         Refresh();
     }
 
@@ -964,7 +1003,7 @@ public sealed partial class MainWindow : Window
     }
 
     async Task About() => await Confirm("HPEngine Launcher " + _version,
-        $"HPEngine runs {GameTitle.For(_edition)} (PC, 2001) from your own copy of the game. No game files are included. Game data: {_game}" + (_own ? " (your game folder, the one this Launcher is in)" : "")
+        $"HPEngine runs {GameTitle.For(EditionOf(_game))} (PC, 2001) from your own copy of the game. No game files are included. Game data: {_game}" + (_own ? " (your game folder, the one this Launcher is in)" : "")
         + (Hp2Root is { } h2 ? $"\n\n{Hp2Title}: {h2}. Its menu is drawn in HPEngine's own look (not the original dialog's); what it offers and starts is the original's." : ""), "OK", false);
 
     // A dialog in the selected game's colours.

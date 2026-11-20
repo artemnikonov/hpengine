@@ -195,6 +195,10 @@ static class Program
         Check("d1.actor_translucent", RenderRules.Blend(4) == want, $"mode 4 = {RenderRules.Blend(4)}, expected {want}");
         Check("d1.modulated", RenderRules.Blend(3) == (9, 3), $"mode 3 = {RenderRules.Blend(3)}, expected (9, 3)");
         Check("d1.highlighted", RenderRules.Blend(6) == (5, 6), $"mode 6 = {RenderRules.Blend(6)}, expected (5, 6)");
+        // HP2 Lumos carrier: the Lumos case only with both 0x800040 bits; 0x80900000 (live Quidditch_Intro WoodHatch) is opaque.
+        Check("d1.lumos_pipe", RenderRules.LumosPipe(unchecked((int)0x80900000)) == 0 && RenderRules.LumosPipe(unchecked((int)0x80800040)) == 9
+            && RenderRules.LumosPipe(0x00800040) == 8 && RenderRules.LumosPipe(0x00000044) == 2 && RenderRules.LumosPipe(0x00800002) == 1,
+            "LumosPipe: 0x80900000 -> 0, 0x80800040 -> 9, 0x800040 -> 8, 0x44 -> 2, 0x800002 -> 1");
     }
 
     // D-3, D-11: URender::DrawFrame (Render.dll.c:1108-1560): surface pass 1, actors with bVar13 = 0, pass 2,

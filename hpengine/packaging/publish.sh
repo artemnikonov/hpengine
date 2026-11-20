@@ -101,9 +101,11 @@ for root, _, files in os.walk(src):
 PY
     # E-mail: at least 3 characters before "@" and 2 in the first domain label. Shorter shapes occur by chance in the
     # composite ReadyToRun native code (2026-11-12, osx-x64 HPEngine.r2r.dll: one letter, "@", one letter, ".gj" between non-printable
-    # ones) and would fail a release at random; a real address that short is not a builder's.
+    # ones) and would fail a release at random; a real address that short is not a builder's. Local part raised to 4 and
+    # the domain lowercase after 2026-11-19 (osx-arm64 HPEngine.r2r.dll: "Ak3", "@", "kN.wu" in native code); a two-letter domain
+    # stays (a "me.com" address is real).
     bad=$(LC_ALL=C grep -r -o -a -E \
-        "$home[A-Za-z0-9._-]+|a\\.nikonov|hp1[-]core|[A-Za-z0-9._%+-]{3,}@[A-Za-z0-9-]{2,}(\\.[A-Za-z0-9-]+)*\\.[a-z]{2,}" \
+        "$home[A-Za-z0-9._-]+|a\\.nikonov|hp1[-]core|[A-Za-z0-9._%+-]{4,}@[a-z0-9-]{2,}(\\.[a-z0-9-]+)*\\.[a-z]{2,}" \
         "$1" "$u16" | grep -v -E ":(${home}(runner|phablet)|$upstream)\$" | sort -u)
     rm -rf "$u16"
     [ -z "$bad" ] || fail "$2: the output has personal paths/names/e-mail of the build machine: $bad"

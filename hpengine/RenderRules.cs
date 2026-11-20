@@ -19,8 +19,21 @@ namespace HPEngine
             // Fog map pass of a surface (DrawComplexSurface SetBlending(0x10000000), D3DDrv.dll.c:6258-6265):
             // PF_Highlighted -> ONE/INVSRCALPHA; no 0x80000000 (the mask 0x10000044 is set), so no Z write.
             7 => (ONE, INVSRCALPHA),
+            // HP2 Lumos carrier (DrawnWorld.Lumos): SetBlending's (flags & 0x800040) == 0x800040 case ahead of HP1's chain —
+            // ALPHABLEND, SRCBLEND INVSRCALPHA, DESTBLEND SRCALPHA [HP2 D3DDrv 0x10009315..0x10009349]; 8 without, 9 with Z
+            // write (the PolyFlags argument's bit 31, [0x10009434..0x1000944f]). Live: audit/captures_hp2_2026-11-16/lumos.
+            8 or 9 => (INVSRCALPHA, SRCALPHA),
             _ => (0, 0),
         };
+
+        // Pipeline of an HP2 Lumos carrier record (DrawnWorld.Lumos, SdlRenderer.DrawLumos) from Core's PolyFlags argument:
+        // SetBlending [HP2 D3DDrv 0x10009270] takes the Lumos case only when (flags & 0x800040) == 0x800040
+        // [0x10009315..0x10009349] — 8, or 9 with the z-write bit 31; any other carrier word (e.g. 0x80900000, a surface with
+        // only 0x800000) falls through to HP1's chain: Translucent 2, Modulated 3, Masked 1, else opaque 0 (the world batch
+        // modes, WorldMesh Blend). Live: Quidditch_Intro WoodHatch drawn opaque, 0x80900000 (hp2_campaign_2026-11-17).
+        public static bool LumosCase(int pf) => (pf & 0x800040) == 0x800040;
+        public static int LumosPipe(int pf) => LumosCase(pf) ? (pf < 0 ? 9 : 8)
+            : (pf & 0x4) != 0 ? 2 : (pf & 0x40) != 0 ? 3 : (pf & 0x2) != 0 ? 1 : 0;
 
         // Frame groups in draw order: URender::DrawFrame with SpanBased = 0 (D3DDrv sets 0, D3DDrv.dll.c:279):
         // pass 1 is surfaces without (PolyFlags | Texture.PolyFlags) & 0x47 (Invisible|Masked|Translucent|Modulated),

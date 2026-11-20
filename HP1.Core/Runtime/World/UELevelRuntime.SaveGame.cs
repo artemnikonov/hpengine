@@ -550,12 +550,12 @@ namespace HP1.UEScript
                     w.Write((byte)V.Resource); w.Write(rr.Class ?? ""); w.Write(rr.Name ?? "");
                     w.Write(rr.ObjectPath ?? ""); w.Write(rr.IdentityKey ?? ""); return;
                 case UClass c:
-                {
-                    // An import stub (a class literal of another package) stands for the class of its import's package.
-                    UClass real = UEClassRegistry.IsImportStub(c) ? UEClassRegistry.Shared.FindForStub(c) ?? c : c;
-                    AddSaveDeps(real);
-                    w.Write((byte)V.ClassIn); w.Write(real.Package?.PackageName ?? ""); w.Write(real.Name.ToString()); return;
-                }
+                    {
+                        // An import stub (a class literal of another package) stands for the class of its import's package.
+                        UClass real = UEClassRegistry.IsImportStub(c) ? UEClassRegistry.Shared.FindForStub(c) ?? c : c;
+                        AddSaveDeps(real);
+                        w.Write((byte)V.ClassIn); w.Write(real.Package?.PackageName ?? ""); w.Write(real.Name.ToString()); return;
+                    }
                 case UEModelRef mr: w.Write((byte)V.ModelRef); w.Write(mr.Name ?? ""); w.Write(mr.ExportIndex); return;
                 case UEObject u when u.IsStruct:
                     w.Write((byte)V.Struct); w.Write(u.Class?.Name?.ToString() ?? "");
@@ -761,25 +761,25 @@ namespace HP1.UEScript
                 case V.Long: r.ReadInt64(); return;
                 case V.String: case V.Name: r.ReadString(); return;
                 case V.Class:
-                {
-                    string name = r.ReadString();
-                    if (sc is not null && UEClassRegistry.Shared.Find(name) is null)
-                        throw new InvalidDataException($"save: #{owner}: class {name} not found");
-                    return;
-                }
+                    {
+                        string name = r.ReadString();
+                        if (sc is not null && UEClassRegistry.Shared.Find(name) is null)
+                            throw new InvalidDataException($"save: #{owner}: class {name} not found");
+                        return;
+                    }
                 case V.PackageObject:
-                {
-                    string path = r.ReadString();
-                    if (sc is not null && UEClassRegistry.Shared.FindExport(path) is null)
-                        throw new InvalidDataException($"save: #{owner}: package object {path} not found");
-                    return;
-                }
+                    {
+                        string path = r.ReadString();
+                        if (sc is not null && UEClassRegistry.Shared.FindExport(path) is null && UEClassRegistry.Shared.ResourceObjectRef(path) is null)
+                            throw new InvalidDataException($"save: #{owner}: package object {path} not found");
+                        return;
+                    }
                 case V.ClassIn:
-                {
-                    string pkg = r.ReadString(), name = r.ReadString();
-                    if (sc is not null) UEActorGraphLoader.ResolveSavedClass(pkg, name, sc.MapPath);
-                    return;
-                }
+                    {
+                        string pkg = r.ReadString(), name = r.ReadString();
+                        if (sc is not null) UEActorGraphLoader.ResolveSavedClass(pkg, name, sc.MapPath);
+                        return;
+                    }
                 case V.Vector: r.ReadSingle(); r.ReadSingle(); r.ReadSingle(); return;
                 case V.Rotator: r.ReadInt32(); r.ReadInt32(); r.ReadInt32(); return;
                 case V.Plane: r.ReadSingle(); r.ReadSingle(); r.ReadSingle(); r.ReadSingle(); return;
@@ -787,32 +787,32 @@ namespace HP1.UEScript
                 case V.ModelRef: r.ReadString(); r.ReadInt32(); return;
                 case V.Struct: r.ReadString(); SkipProps(r, total, owner, sc); return;
                 case V.ObjRef:
-                {
-                    int id = r.ReadInt32();
-                    if (id >= total) throw new InvalidDataException($"#{owner}: reference to object #{id} outside the table ({total})");
-                    return;
-                }
+                    {
+                        int id = r.ReadInt32();
+                        if (id >= total) throw new InvalidDataException($"#{owner}: reference to object #{id} outside the table ({total})");
+                        return;
+                    }
                 case V.ObjArray:
-                {
-                    int n = r.ReadInt32();
-                    if (n < 0) throw new InvalidDataException($"#{owner}: array length < 0");
-                    for (int i = 0; i < n; i++) { int id = r.ReadInt32(); if (id >= total) throw new InvalidDataException($"#{owner}: reference #{id} outside the table"); }
-                    return;
-                }
+                    {
+                        int n = r.ReadInt32();
+                        if (n < 0) throw new InvalidDataException($"#{owner}: array length < 0");
+                        for (int i = 0; i < n; i++) { int id = r.ReadInt32(); if (id >= total) throw new InvalidDataException($"#{owner}: reference #{id} outside the table"); }
+                        return;
+                    }
                 case V.StringList:
-                {
-                    int n = r.ReadInt32();
-                    if (n < 0) throw new InvalidDataException($"#{owner}: list length < 0");
-                    for (int i = 0; i < n; i++) r.ReadString();
-                    return;
-                }
+                    {
+                        int n = r.ReadInt32();
+                        if (n < 0) throw new InvalidDataException($"#{owner}: list length < 0");
+                        for (int i = 0; i < n; i++) r.ReadString();
+                        return;
+                    }
                 case V.List:
-                {
-                    int n = r.ReadInt32();
-                    if (n < 0) throw new InvalidDataException($"#{owner}: list length < 0");
-                    for (int i = 0; i < n; i++) SkipValue(r, total, owner, sc);
-                    return;
-                }
+                    {
+                        int n = r.ReadInt32();
+                        if (n < 0) throw new InvalidDataException($"#{owner}: list length < 0");
+                        for (int i = 0; i < n; i++) SkipValue(r, total, owner, sc);
+                        return;
+                    }
             }
             throw new InvalidDataException($"#{owner}: unknown tag {tag}");
         }
@@ -1025,65 +1025,66 @@ namespace HP1.UEScript
                 case V.Rotator: return new UERotator(r.ReadInt32(), r.ReadInt32(), r.ReadInt32());
                 case V.Plane: { float x = r.ReadSingle(), y = r.ReadSingle(), z = r.ReadSingle(), wv = r.ReadSingle(); return new UEPlane(x, y, z, wv); }
                 case V.Resource:
-                {
-                    string cls = r.ReadString(), name = r.ReadString(), path = r.ReadString(), ident = r.ReadString();
-                    return new UEResourceRef(cls, name, path.Length == 0 ? null : path, ident.Length == 0 ? null : ident);
-                }
+                    {
+                        string cls = r.ReadString(), name = r.ReadString(), path = r.ReadString(), ident = r.ReadString();
+                        return new UEResourceRef(cls, name, path.Length == 0 ? null : path, ident.Length == 0 ? null : ident);
+                    }
                 case V.ClassIn:
-                {
-                    string pkg = r.ReadString(), name = r.ReadString();
-                    try { return UEActorGraphLoader.ResolveSavedClass(pkg, name, _loadingSaveMapPath); }
-                    catch (InvalidDataException) when (_tolerantRead) { return new SaveUnresolved($"class {pkg}.{name}"); }
-                }
+                    {
+                        string pkg = r.ReadString(), name = r.ReadString();
+                        try { return UEActorGraphLoader.ResolveSavedClass(pkg, name, _loadingSaveMapPath); }
+                        catch (InvalidDataException) when (_tolerantRead) { return new SaveUnresolved($"class {pkg}.{name}"); }
+                    }
                 case V.Class:   // versions 1..3
-                {
-                    string name = r.ReadString();
-                    return (object)UEClassRegistry.Shared.Find(name)
-                        ?? (_tolerantRead ? new SaveUnresolved($"class {name}") : null)
-                        ?? throw new InvalidDataException($"LoadSavedWorld: {where}: class {name} not found");
-                }
+                    {
+                        string name = r.ReadString();
+                        return (object)UEClassRegistry.Shared.Find(name)
+                            ?? (_tolerantRead ? new SaveUnresolved($"class {name}") : null)
+                            ?? throw new InvalidDataException($"LoadSavedWorld: {where}: class {name} not found");
+                    }
                 case V.ModelRef: { string n = r.ReadString(); return new UEModelRef(n, r.ReadInt32()); }
                 case V.Struct:
-                {
-                    string cls = r.ReadString();
-                    var s = new UEObject { Class = cls.Length == 0 ? null : UEClassRegistry.Shared.Find(cls), Interp = interp, IsStruct = true };
-                    foreach (var kv in ReadProps(r, table, interp, where)) s.Props[kv.Key] = kv.Value;
-                    return s;
-                }
+                    {
+                        string cls = r.ReadString();
+                        var s = new UEObject { Class = cls.Length == 0 ? null : UEClassRegistry.Shared.Find(cls), Interp = interp, IsStruct = true };
+                        foreach (var kv in ReadProps(r, table, interp, where)) s.Props[kv.Key] = kv.Value;
+                        return s;
+                    }
                 case V.ObjRef:
-                {
-                    int id = r.ReadInt32();
-                    if (id < 0) return null;
-                    if (id >= table.Length || table[id] is null)
-                        throw new InvalidDataException($"LoadSavedWorld: {where}: reference to object #{id} outside the table");
-                    return table[id];
-                }
+                    {
+                        int id = r.ReadInt32();
+                        if (id < 0) return null;
+                        if (id >= table.Length || table[id] is null)
+                            throw new InvalidDataException($"LoadSavedWorld: {where}: reference to object #{id} outside the table");
+                        return table[id];
+                    }
                 case V.PackageObject:
-                {
-                    string path = r.ReadString();
-                    return (object)UEClassRegistry.Shared.FindExport(path)
-                        ?? (_tolerantRead ? new SaveUnresolved($"package object {path}") : null)
-                        ?? throw new InvalidDataException($"LoadSavedWorld: {where}: package object {path} not found");
-                }
+                    {
+                        string path = r.ReadString();
+                        // Not in a catalogued package: the package the linker opens from disk (UEClassRegistry.ResourceObjectRef).
+                        return (object)UEClassRegistry.Shared.FindExport(path) ?? (object)UEClassRegistry.Shared.ResourceObjectRef(path)
+                            ?? (_tolerantRead ? new SaveUnresolved($"package object {path}") : null)
+                            ?? throw new InvalidDataException($"LoadSavedWorld: {where}: package object {path} not found");
+                    }
                 case V.ObjArray:
-                {
-                    int n = r.ReadInt32();
-                    var arr = new UEObject[n];
-                    for (int i = 0; i < n; i++) { int id = r.ReadInt32(); arr[i] = id < 0 ? null : table[id]; }
-                    return arr;
-                }
+                    {
+                        int n = r.ReadInt32();
+                        var arr = new UEObject[n];
+                        for (int i = 0; i < n; i++) { int id = r.ReadInt32(); arr[i] = id < 0 ? null : table[id]; }
+                        return arr;
+                    }
                 case V.StringList:
-                {
-                    int n = r.ReadInt32(); var l = new List<string>(n);
-                    for (int i = 0; i < n; i++) l.Add(r.ReadString());
-                    return l;
-                }
+                    {
+                        int n = r.ReadInt32(); var l = new List<string>(n);
+                        for (int i = 0; i < n; i++) l.Add(r.ReadString());
+                        return l;
+                    }
                 case V.List:
-                {
-                    int n = r.ReadInt32(); var l = new List<object>(n);
-                    for (int i = 0; i < n; i++) l.Add(ReadValue(r, table, interp, where + "[" + i + "]"));
-                    return l;
-                }
+                    {
+                        int n = r.ReadInt32(); var l = new List<object>(n);
+                        for (int i = 0; i < n; i++) l.Add(ReadValue(r, table, interp, where + "[" + i + "]"));
+                        return l;
+                    }
             }
             throw new InvalidDataException($"LoadSavedWorld: {where}: unknown tag {tag}");
         }
@@ -1210,12 +1211,12 @@ namespace HP1.UEScript
                                 case 0: v = ReadValue(r, noTable, interp, "travel." + pk); break;
                                 case 1: { bool has = r.ReadBoolean(); string an = r.ReadString(); v = new TravelActorRef(has ? an : null); break; }
                                 case 2:
-                                {
-                                    var d = new TravelStructDelta();
-                                    for (int f = Count(r, "struct fields"); f > 0; f--)
-                                    { string fk = r.ReadString(); d.Fields[fk] = ReadValue(r, noTable, interp, "travel." + pk + "." + fk); }
-                                    v = d; break;
-                                }
+                                    {
+                                        var d = new TravelStructDelta();
+                                        for (int f = Count(r, "struct fields"); f > 0; f--)
+                                        { string fk = r.ReadString(); d.Fields[fk] = ReadValue(r, noTable, interp, "travel." + pk + "." + fk); }
+                                        v = d; break;
+                                    }
                                 default: throw new InvalidDataException("travel: unknown property kind");
                             }
                             if (c is null) continue;

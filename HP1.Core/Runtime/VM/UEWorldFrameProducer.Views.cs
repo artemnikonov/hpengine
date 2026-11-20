@@ -442,7 +442,7 @@ namespace HP1.UEScript
 
         // Original: Render.dll not exported: FUN_10b30c70 FDynamicSprite::Setup [HP1 0x10B30C70] — thunk 0x10b01131, called by
         // the FDynamicSprite ctor 0x10b307c3
-        bool MeshSpriteSetup(UEObject a, UESceneNode f, out UERenderVisibility.ScreenBounds sb)
+        internal bool MeshSpriteSetup(UEObject a, UESceneNode f, out UERenderVisibility.ScreenBounds sb)
         {
             sb = default;
             if (UEInterpreter.ClassIsA(a.Class, "ParticleFX"))
@@ -480,7 +480,7 @@ namespace HP1.UEScript
             _spriteActors = new List<int>();
             _actorViews = new Dictionary<int, List<int>>();
             ParticleDraws.Clear();
-            var meshDraws = new List<(int View, MeshPose Pose)>();
+            var meshDraws = _meshDraws = new List<(int View, MeshPose Pose)>();
             DirectSprites = 0;
             int rendMap = UEValue.ToInt(player.GetProp(PK.RendMap));
             // DrawLodMesh identity gate: URender+0x3c ≠ 0 (console REND WIRE, not ported — D-76, see
@@ -563,33 +563,7 @@ namespace HP1.UEScript
                     }
                     else
                     {
-                        // URender::DrawLodMesh LOD request of this draw (UEMeshLod.VertsRequested over this frame's
-                        // FDynamicSprite and FX) for the actor whose Mesh is drawn — the pawn, or the third-person weapon
-                        // during its swap (own mesh and LODBias, the pawn's sprite). Enhanced: no LOD (NOT ORIGINAL, D-62).
-                        int Request(UEObject owner)
-                        {
-                            if (EnhancedVisuals) return -1;
-                            // Not IsA ULodMesh: DrawMesh's UMesh branch, no LOD (Render 0x10b0e960..0x10b0e97e).
-                            if (owner.GetProp(PK.Mesh) is UEResourceRef { Class: var mc } && mc.Equals("Mesh", StringComparison.OrdinalIgnoreCase))
-                                return -1;
-                            var lod = MeshLodOf(owner.GetProp(PK.Mesh));
-                            // URender+0x4c GlobalShapeLOD as the process's URender holds it: Init's 1.0 unless MLOD stored
-                            // another (HP2's FESoundVideoPage; no HP1 code path writes it).
-                            return UEMeshLod.VertsRequested(lod.Lod, lod.ModelVerts, lod.SpecialVerts, lod.Skeletal,
-                                UEInterpreter.AsFloat(owner.GetProp(PK.LODBias)), sp.X1, sp.Y1, sp.X2, sp.Y2, f.FX,
-                                UEMeshLod.ConsoleGlobalShapeLOD);
-                        }
-                        // HP2 DrawActorSprite calls DrawMesh for DrawType 2 with a Mesh [HP2 0x10b33525 area]; DrawMesh's
-                        // ULodMesh branch calls DrawLodMesh (every DrawMesh in the live captures did).
-                        if (dt == 2 && a.GetProp(PK.Mesh) is UEResourceRef { Class: var dmc })
-                        {
-                            if (dmc.Equals("Mesh", StringComparison.OrdinalIgnoreCase))
-                                UEGameProfile.Stop(UEEdition.Game.HP2, "D-73 render slot: DrawMesh's UMesh branch (not a ULodMesh) between "
-                                    + $"two particle draws ({a.GetProp(PK.Name)}): its writes at the slot are not derived");
-                            Hp2RenderSlotGameWrite();
-                        }
-                        var poses = new List<MeshPose>();
-                        DrawMesh(a, identity, f.Coords, DrawnMeshes, poses, Request);
+                        var poses = DrawMeshSprite(a, f, sp.X1, sp.Y1, sp.X2, sp.Y2, identity);
                         foreach (MeshPose p in poses)
                         {
                             Drew(p.ObjectId);
@@ -602,6 +576,7 @@ namespace HP1.UEScript
                 // Corona block at the end of every DrawFrame (Render.dll 0x10b26742..0x10b26e0f); UECoronas gates it.
                 if (CoronaLineClear is null || CoronaActorsByExport is null || (EnhancedVisuals && CoronaPawnClear is null))
                     throw new InvalidOperationException("DrawFrame coronas: line check / export index not bound to the producer");
+                _coronaView = viewIndex[f];
                 CoronaTable.Step(f, player, levelActors, RenderDeviceCoronas, CoronaLevel, CoronaActorsByExport,
                     _viewportClock, CoronaClear);
             }
@@ -612,6 +587,42 @@ namespace HP1.UEScript
             _actorViewSets = MeshDrawParts(meshDraws);
             _drawOrder = Array.ConvertAll(drawOrder, l => l?.ToArray() ?? Array.Empty<int>());
             return drawn;
+        }
+
+        // DrawActorSprite's mesh branch for one FDynamicSprite of frame f (its screen bounds x1..y2): the DrawLodMesh LOD request,
+        // DrawMesh (UELevelRuntime.DrawMeshActor) with f's Coords; the poses it produced (the actor, then a third-person weapon).
+        // The world's DrawFrame and the canvas (UCanvas::execDrawActor -> URender::DrawActor) both run it.
+        List<MeshPose> DrawMeshSprite(UEObject a, UESceneNode f, int x1, int y1, int x2, int y2, bool identity)
+        {
+            int dt = UEValue.ToInt(a.GetProp(PK.DrawType));
+            // URender::DrawLodMesh LOD request of this draw (UEMeshLod.VertsRequested over this frame's
+            // FDynamicSprite and FX) for the actor whose Mesh is drawn — the pawn, or the third-person weapon
+            // during its swap (own mesh and LODBias, the pawn's sprite). Enhanced: no LOD (NOT ORIGINAL, D-62).
+            int Request(UEObject owner)
+            {
+                if (EnhancedVisuals) return -1;
+                // Not IsA ULodMesh: DrawMesh's UMesh branch, no LOD (Render 0x10b0e960..0x10b0e97e).
+                if (owner.GetProp(PK.Mesh) is UEResourceRef { Class: var mc } && mc.Equals("Mesh", StringComparison.OrdinalIgnoreCase))
+                    return -1;
+                var lod = MeshLodOf(owner.GetProp(PK.Mesh));
+                // URender+0x4c GlobalShapeLOD as the process's URender holds it: Init's 1.0 unless MLOD stored
+                // another (HP2's FESoundVideoPage; no HP1 code path writes it).
+                return UEMeshLod.VertsRequested(lod.Lod, lod.ModelVerts, lod.SpecialVerts, lod.Skeletal,
+                    UEInterpreter.AsFloat(owner.GetProp(PK.LODBias)), x1, y1, x2, y2, f.FX,
+                    UEMeshLod.ConsoleGlobalShapeLOD);
+            }
+            // HP2 DrawActorSprite calls DrawMesh for DrawType 2 with a Mesh [HP2 0x10b33525 area]; DrawMesh's
+            // ULodMesh branch calls DrawLodMesh (every DrawMesh in the live captures did).
+            if (dt == 2 && a.GetProp(PK.Mesh) is UEResourceRef { Class: var dmc })
+            {
+                if (dmc.Equals("Mesh", StringComparison.OrdinalIgnoreCase))
+                    UEGameProfile.Stop(UEEdition.Game.HP2, "D-73 render slot: DrawMesh's UMesh branch (not a ULodMesh) between "
+                        + $"two particle draws ({a.GetProp(PK.Name)}): its writes at the slot are not derived");
+                Hp2RenderSlotGameWrite();
+            }
+            var poses = new List<MeshPose>();
+            DrawMesh(a, identity, f.Coords, DrawnMeshes, poses, Request);
+            return poses;
         }
 
         // The per-draw GetFrame results (pose + the level the draw's face loop used, DrawMeshActor) merged into one

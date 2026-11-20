@@ -11,7 +11,7 @@ All Canvas semantics (pen, line wrap, glyph layout, clipping, PolyFlags) live in
 | Code | What |
 |---|---|
 | `HudBatcher.cs` `Rasterize` | tile: refusal when XL/YL ≤ 0, before the texture; text: Core glyphs, `null` = native font (not drawn), page by index; tint `Color/255`, alpha 1 |
-| `HudBatcher.DrawWithFlags` | scale `×Scale`; edges snapped to integer pixels, each separately (`Round` to even); a collapsed quad is not drawn; mode: `PF_Translucent(4)` → additive with tint, else `PF_Modulated(0x40)` → modulation with white + alpha test under `PF_Masked(2)`, else CanvasTile (under `PF_Masked` SrcAlpha/OneMinusSrcAlpha, else opaque); window `[U,U+UL)×[V,V+VL)` as is, in fractions of the logical size |
+| `HudBatcher.DrawWithFlags` | scale `×Scale`; corners X, X+XL, Y, Y+YL fractional and unrounded as D3DDrv DrawTile (its −0.5 is the D3D7 pixel centre; SDL_GPU centres are at +0.5); filter bilinear unless `PF_NoSmooth(0x800)` (SetBlending); mode: `PF_Translucent(4)` → additive with tint, else `PF_Modulated(0x40)` → modulation with white + alpha test under `PF_Masked(2)`, else CanvasTile (under `PF_Masked` SrcAlpha/OneMinusSrcAlpha, else opaque); window `[U,U+UL)×[V,V+VL)` as is, in fractions of the logical size |
 | `HudBatcher.FillBlack` | black opaque quad over a white texture |
 | `HudBatcher.Scale` | `WorldFrame.CanvasScale`: the scale Core built the frame's canvas with (`UEWorldFrameProducer.SetScreen`, `UEConfig.UIScaleFor`) |
 | `HudBatcher.ConsoleRegionWidth` | 4:3 menu region (Core input) |

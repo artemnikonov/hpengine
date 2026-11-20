@@ -152,9 +152,9 @@ static class Program
     // draws with), 800×600: screen x = (clip.x/w + 1)·400, y = (1 − clip.y/w)·300; w = depth along the view axis.
     static (float x, float y, float w) ProjectM1(UEVector p)
     {
-        var rows = new float[16];
+        var rows = new float[20];
         HPEngine.Camera.From(Cam(M1Eye, M1Pitch, M1Yaw)).Rows(800, 600, rows);
-        float Row(int i) => rows[i * 4] * p.x + rows[i * 4 + 1] * p.y + rows[i * 4 + 2] * p.z + rows[i * 4 + 3];
+        float Row(int i) => rows[i * 4] * (p.x - rows[16]) + rows[i * 4 + 1] * (p.y - rows[17]) + rows[i * 4 + 2] * (p.z - rows[18]) + rows[i * 4 + 3];
         float w = Row(3);
         return ((Row(0) / w + 1f) * 400f, (1f - Row(1) / w) * 300f, w);
     }
@@ -396,10 +396,15 @@ static class Program
     // ── Particles: vertex color, billboard, refusals ──────────────────────
     static void Particles()
     {
-        // Camera: FovAngle 0 has no projection (ComputeRenderSize) — a loud refusal, not an invented 90.
+        // Camera: FovAngle 0 has no projection (Proj.Z = FX2/tan 0 is infinite) — a loud refusal, not an invented 90.
+        var rows = new float[20];
         bool refused = false;
-        try { HPEngine.Camera.From(Cam(default, 0, 0, 0f)); } catch (InvalidOperationException) { refused = true; }
-        Check("camera.fov_refused", refused, "Camera.From(FovAngle 0) did not refuse");
+        try { HPEngine.Camera.From(Cam(default, 0, 0, 0f)).Rows(800, 600, rows); } catch (InvalidOperationException) { refused = true; }
+        Check("camera.fov_refused", refused, "Camera.Rows(FovAngle 0) did not refuse");
+        // FovAngle 200 (HP2 14050Riddle) is not clamped: ComputeRenderSize's negative Proj.Z turns the frame by 180°.
+        HPEngine.Camera.From(Cam(default, 0, 0, 200f)).Rows(800, 600, rows);
+        float pz200 = HP1.UEScript.UESceneNode.ProjZOf(800, 200f, pc24: false);
+        Check("camera.fov_over_180", pz200 < 0f && rows[1] == 2f * pz200 / 800f, $"Proj.Z {pz200}, row0.y {rows[1]}");
         var pb = new ParticleBuilder(Size, TexFlags);
         var cam = Cam(default, 0, 0);   // forward (1,0,0), right (0,1,0), up (0,0,1)
 
@@ -555,7 +560,7 @@ static class Program
     // 16248/16250), i.e. sz = (1 − 1/Z)·(1 + 2^-15): the expectation is that formula, the port's clip z/w through Camera.Rows.
     static void Depth()
     {
-        var rows = new float[16];
+        var rows = new float[20];
         HPEngine.Camera.From(Cam(default, 0, 0)).Rows(800, 600, rows);
         double k = 1.0 + Math.Pow(2, -15), worst = 0;
         foreach (float z in new[] { 1.5f, 10f, 100f, 1000f, 9783f, 20000f, 32768f, 40000f })

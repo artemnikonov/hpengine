@@ -44,15 +44,21 @@ struct VOut
     [[vk::location(6)]] float  alpha : TEXCOORD6;
 };
 
-// Clip matrix rows (Camera.Rows).
-[[vk::binding(0, 1)]] cbuffer VU : register(b0, space1) { float4 r0; float4 r1; float4 r2; float4 r3; };
+// Clip matrix rows (Camera.Rows): they act on the camera-relative point pos − eye.xyz; r2 (depth row) is for CPU users
+// only, the vertex shader derives clip z from clip w.
+[[vk::binding(0, 1)]] cbuffer VU : register(b0, space1) { float4 r0; float4 r1; float4 r2; float4 r3; float4 eye; };
 
 // mode.x: 0 lightmap, 1 texel, 2 vertex light (gamma), 3 fog map pass, 4 mirror;
 // mode.y: mask; mode.z/w: debug (HP1_DBG=red|tex|lm). uvoff.xy — clock-driven surface UV pan
 // (SurfacePan), uvoff.z — surface bSpecialLit pair (mode 0) / actor mesh vertex-fog admission
 // (mode 2: 1 — Opaque/Masked slot, 0 — Translucent/Modulated/AlphaBlend), uvoff.w — 1 for an
-// AlphaBlend batch (Opacity < 1: alpha output t.a·alpha), else alpha 1. clip — clip plane of the reflected
-// pass (0 — none). screen.xy — 1/target size; screen.z — 1: the fog map is drawn in its own pass (mode 3), not folded.
+// AlphaBlend batch (Opacity < 1: alpha output t.a·alpha), 2 for an HP2 Lumos carrier (mode 0: alpha output screen.w),
+// else alpha 1. clip — clip plane of the reflected pass (0 — none). screen.xy — 1/target size; screen.z — 1: the fog map
+// is drawn in its own pass (mode 3), not folded; screen.w — a Lumos carrier's alpha byte / 255. D3DDrv's multitexture
+// pass: stage 0 alpha MODULATE(texel alpha, diffuse alpha = the byte), stage 1 SELECTARG2(CURRENT); the texel alpha D3DDrv
+// uploads for every shipped carrier texture is 255 in every texel, palette entry 0 included (live TEXA lines,
+// audit/captures_hp2_2026-11-16/lumos; the 32 carrier textures are not bMasked and have palette alpha 255), while the
+// port's P8 expansion zeroes entry 0's alpha (read by no other blend) — so the byte alone.
 [[vk::binding(0, 3)]] cbuffer FU : register(b0, space3) { float4 mode; float4 uvoff; float4 clip; float4 screen; };
 
 // Spawned lights on BSP surfaces (C-1): pos.xyz+R, rgb+inner,
@@ -65,11 +71,24 @@ struct VOut
 [[vk::combinedImageSampler]] [[vk::binding(2, 2)]] Texture2D<float4> fogt : register(t2, space2);
 [[vk::combinedImageSampler]] [[vk::binding(2, 2)]] SamplerState sf : register(s2, space2);
 
+// Original: D3DDrv.dll ?DrawTriangles@UD3DRenderDevice@@UAEXPAUFSceneNode@@AAUFTextureInfo@@PAPAUFTransTexture@@HPAGHKPAVFSpanBuffer@@@Z [HP1 0x10005B60] [HP2 0x10005B80]
+// Original: D3DDrv.dll not exported: FUN_1000b360 [HP1 0x1000B360] [HP2 0x1000B350] (the only writer of +0xa34 = 0x3f800100, +0xa44 = 0xbf800100; xref: the DrawTriangles fmul/fadd of those fields)
+// Depth: rhw = Frame->RProj.Z·Pt.RZ = 1/Z, sz = rhw·[+0xa44] + [+0xa34] = (1 − 1/Z)·(1 + 2^-15) (HP1 disasm 0x10005d4e-0x10005d63,
+// HP2 0x10005d52-0x10005d67; constants HP1 0x1000d336/0x1000d34a, HP2 0x1000d317/0x1000d32b). Clip z and w from the one Z:
+// sz = a·(1 − 1/w), a = 32769/32768, stored REVERSED (D32_FLOAT, GREATER_OR_EQUAL, cleared to 0: Renderer.DepthCompare /
+// ClearDepth): d = 1 − sz, i.e. clip z = a − w/32768 (a − 1 = 2^-15, so z/w = a/w − 2^-15 = 1 − sz). A mirror of D3DDrv's
+// LESSEQUAL against its ClearZ 1.0: same order, same ties, same near (w = 1) and far (w = 32769) bounds; only the buffer's
+// spacing is finer (float near 0 instead of near 1), so a margin below 2^-24 in the original's own vertices (HP2
+// EntryHall_Hub candle bases over the table top, 0.7..1.8 units) is resolved by geometry, not by the draw order.
+// The point is camera-relative before the dots (Render.dll subtracts Coords.Origin before the axes, URender::Project ->
+// UERenderVisibility.Project): absolute world positions (~3000 uu) in float32 put independent ~2e-4 uu errors on two dot
+// products — ±20 units of 2^-24 in depth (HP2 EntryHall_Hub candle bases flipped behind the table top).
 VOut vs_main(VIn i)
 {
-    float4 p = float4(i.pos, 1.0);
+    float4 p = float4(i.pos - eye.xyz, 1.0);
     VOut o;
-    o.pos = float4(dot(r0, p), dot(r1, p), dot(r2, p), dot(r3, p));
+    float w = dot(r3, p);
+    o.pos = float4(dot(r0, p), dot(r1, p), (32769.0 / 32768.0) - w * (1.0 / 32768.0), w);
     o.uv = i.uv; o.uv2 = i.uv2; o.light = i.light; o.uv3 = i.uv3; o.wpos = i.pos;
     o.fog = i.fog;
     o.alpha = i.alpha;
@@ -110,6 +129,7 @@ float4 fs_main(VOut i) : SV_Target0
         lit = saturate(lit);
         if (screen.z < 0.5 && any(fg != 0.0)) lit = lit * (1.0 - fg.a) + fg.rgb;
         c = saturate(lit);
+        if (uvoff.w > 1.5) return float4(c, screen.w);
     }
     return float4(c, 1.0);
 }

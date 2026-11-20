@@ -281,6 +281,12 @@ namespace HP1.UEScript
             // of all its classes) is carried by the default object in its re-read form.
             if (gconfig is not null && Class is not null && UEObjectConfig.WasReloaded(Class))
                 UEObjectConfig.LoadConfig(gconfig, this, Class, Class, propagate: true, isInstance: false);
+            // StaticAllocateObject copies Class->Defaults: once the class's default object is built (ClassDefaultsBag), what
+            // script (`default.X = ...`, HP2 CutScript.GenerateUniqueCue `default.lastCueNum++`) or SET wrote there reaches
+            // every object made after it.
+            // Original: Core.dll ?StaticAllocateObject@UObject@@SAPAV1@PAVUClass@@PAV1@VFName@@K1PAVFOutputDevice@@1@Z [HP1 0x101618E0] [HP2 0x10164CB0] (InitProperties from the class Defaults, HP2 Core.dll.c:60689)
+            if (Interp?.BuiltClassDefaults(Class) is { } live && !ReferenceEquals(live, this))
+                foreach (var kv in live.Props) Props[kv.Key] = HP1.UEScript.UEValue.CopyValue(kv.Value);
             // NOTE: scalar props absent from BOTH the JSON and the defaultproperties block
             // stay ABSENT (GetProp → null); the VM coerces null→zero on read (ToInt/ToBool/
             // AsFloat), matching UE1's type-zero default. A blanket zero-init of every
@@ -333,13 +339,16 @@ namespace HP1.UEScript
         // VM's value-struct intrinsics; every other struct becomes an empty
         // IsStruct bag (member reads null-coerce to type zero, member writes
         // land on the bag — both matching a zero-filled UE1 struct).
-        internal static object ZeroStructValue(UELib.Core.UProperty prop)
+        internal static object ZeroStructValue(UELib.Core.UProperty prop) => ZeroStructValue((prop as UELib.Core.UStructProperty)?.Struct);
+
+        // The same for a struct itself (an imported struct must be resolved by the caller: a UELib import stub has no
+        // fields, so its bag gets no nested members).
+        internal static object ZeroStructValue(UELib.Core.UStruct st)
         {
-            string sn = (prop as UELib.Core.UStructProperty)?.Struct?.Name?.ToString();
+            string sn = st?.Name?.ToString();
             if (string.Equals(sn, "Vector", StringComparison.OrdinalIgnoreCase)) return Vector3.zero;
             if (string.Equals(sn, "Rotator", StringComparison.OrdinalIgnoreCase)) return new UERotator(0, 0, 0);
             if (string.Equals(sn, "Plane", StringComparison.OrdinalIgnoreCase)) return new UEPlane(Vector3.zero, 0f);
-            var st = (prop as UELib.Core.UStructProperty)?.Struct;
             var bag = new UEObject(UEPropLayout.ForStruct(st)) { IsStruct = true };
             PreallocStructMembers(bag, st);
             return bag;
@@ -684,27 +693,6 @@ namespace HP1.UEScript
                 return null;
             }
             return bag;
-        }
-
-        // Value of an INSTANCE struct (property tag of a placed actor): the same SerializeBin
-        // walk. The declaration is looked up by struct name along the owner class chain. null
-        // if the declaration is not found, the struct holds an object reference (see
-        // UEActorGraphLoader.DecodeStruct) or the bytes do not match the layout: the caller
-        // must stop loudly.
-        internal static UEObject DecodeInstanceStruct(UClass cls, string structName, byte[] b)
-        {
-            if (b == null || cls == null || string.IsNullOrEmpty(structName)) return null;
-            UELib.Core.UStruct def = null;
-            for (var c = cls; c != null && def == null; c = HP1.Core.UEClassRegistry.Shared.CanonicalSuper(c))
-                foreach (var p in c.EnumerateFields<UELib.Core.UStructProperty>())
-                    if (string.Equals(p.Struct?.Name?.ToString(), structName, StringComparison.OrdinalIgnoreCase))
-                    { def = p.Struct; break; }
-            if (def == null) return null;
-            foreach (var f in SerializeBinFields(def))
-                if (f is UELib.Core.UObjectProperty || f is UELib.Core.UStructProperty) return null;
-            int pos = 0;
-            var bag = ReadAtomicStruct(def, cls, b, ref pos);
-            return bag != null && pos == b.Length ? bag : null;
         }
 
         // The field order of UStruct::SerializeBin: TFieldIterator (Core 0x1012e910..0x1012e965) walks the struct's own

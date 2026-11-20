@@ -134,6 +134,11 @@ namespace HP1.UEScript
             journal.Add($"bsp nodes={bsp.NodeCount} leafHullValues={bsp.LeafHullValueCount}");
             n.SetBsp(bsp);
             n.SetReachSpecs(HeadlessBspModel.LoadReachSpecs(mapPath));
+            // UGameEngine::Init [HP2 Engine 0x103a0fa0, thunk 0x10301c5d] browses FURL("Entry") before the startup map: the
+            // Entry map's linker, so its names and its imports' (hgame...), are in the name table before the map's
+            // (UENameTable; the port loads Entry's world after the map's graph). Live HP2 Quidditch: the map spells
+            // 'PostFanFare_Win', hgame.u 'PostFanfare_Win'; the original prints hgame's.
+            UENameTable.Linker(UEInstallPath.File(Path.Combine(gameRoot, "Maps", "Entry.unr")));
             var actors = LoadActorGraph(mapPath, interp);
             journal.Add($"graph actors={actors.Count}");
             if (stops?.ActorGraphLoaded is { } afterGraph && !afterGraph(actors)) return null;
@@ -189,8 +194,8 @@ namespace HP1.UEScript
                 Interp.Invoke(c, Interp.FindGlobalFunction(c, "Notify"), (byte)2);
             return cur?.Class?.Name;
         }
-        // Menu click probe (window script verb `click <text>`): the control of the open menu book page whose Text is the
-        // given one gets Notify(DE_Click = 2), the call UWindowButton.Click makes for a mouse click (no cursor position
+        // Menu click probe (window script verb `click <text>` or `click @<Property>`): the control of the open menu book page
+        // whose Text is the given one (or held in that page property) gets Notify(DE_Click = 2), the call UWindowButton.Click makes for a mouse click (no cursor position
         // involved). Returns "<page class>.<control name>"; when the page has no such control, "NO SUCH CONTROL" and the
         // texts the page does have.
         public string MenuClickProbe(string text)
@@ -210,7 +215,9 @@ namespace HP1.UEScript
                 }
                 return null;
             }
-            if (Find(page, 0) is not UEObject control)
+            // "@<Property>": the page's control held in that property (HP2's bitmap buttons have no Text).
+            UEObject control = text.StartsWith('@') ? page?.GetProp(text[1..]) as UEObject : Find(page, 0);
+            if (control is null)
                 return $"NO SUCH CONTROL on {page?.Class?.Name.ToString() ?? "no page"}; it has: {string.Join(" | ", texts)}";
             Interp.Invoke(control, Interp.FindGlobalFunction(control, "Notify"), (byte)2);
             return $"{page.Class?.Name}.{control.GetProp(PK.Name)}";
@@ -234,6 +241,44 @@ namespace HP1.UEScript
                 n++;
             }
             return n;
+        }
+        // Snapshot probe (the live original probe's `pcall=<label> 1 <actor> Trigger player player`): Trigger(player, player) on
+        // the one actor of that Name. Returns its name, or "" when there is none.
+        public string TriggerProbe(string name)
+        {
+            if (Runtime.PlayerPawn is not UEObject p) return "";
+            foreach (UEObject a in new List<UEObject>(Runtime.Actors))
+            {
+                if (a is null || a.Destroyed || !string.Equals(a.GetProp(PK.Name)?.ToString(), name, StringComparison.OrdinalIgnoreCase)) continue;
+                Interp.Invoke(a, Interp.FindEventFunction(a, "Trigger")
+                    ?? throw new System.IO.InvalidDataException($"TriggerProbe: {name} has no Trigger"), p, p);
+                return name;
+            }
+            return "";
+        }
+        // Reach probe (window script `exec reach <actor>`, the headless HP2_BOOT_EVENT verb Reach): the player is FarMoveActor'd
+        // onto the actor of that Name and Touches it (a pickup, a bump-started cut); `exec bump <actor>`: Bump instead (a vendor,
+        // Characters.Bump). Not a route: one event.
+        public string ReachProbe(string name, string ev = "Touch")
+        {
+            if (Runtime.PlayerPawn is not UEObject p) return "";
+            foreach (UEObject a in new List<UEObject>(Runtime.Actors))
+            {
+                if (a is null || a.Destroyed || !string.Equals(a.GetProp(PK.Name)?.ToString(), name, StringComparison.OrdinalIgnoreCase)) continue;
+                _n.FarMoveActor(Interp, p, UEInterpreter.AsVector3(a.GetProp(PK.Location)), bTest: false, bNoCheck: false);
+                UELifecycle.CallEvent(Interp, a, ev, p);
+                return $"{name} state={a.CurrentStateName}";
+            }
+            return "";
+        }
+        // Peek probe (window script `exec peek <actor> <property>`): the live value of one property of the actor of that
+        // Name (HP2 has no GET). Read-only.
+        public string PeekProbe(string name, string prop)
+        {
+            foreach (UEObject a in Runtime.Actors)
+                if (a is not null && !a.Destroyed && string.Equals(a.GetProp(PK.Name)?.ToString(), name, StringComparison.OrdinalIgnoreCase))
+                    return $"{name}.{prop}={a.GetProp(prop)} state={a.CurrentStateName}";
+            return "";
         }
         // A host with real frame pacing (the windowed game): the original's load-time delta (UELevelRuntime.EmulateLoadStutter).
         public void SetRealFramePacing(bool on) => _n.Runtime.EmulateLoadStutter = on;

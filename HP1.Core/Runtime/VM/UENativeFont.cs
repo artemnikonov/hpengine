@@ -3,7 +3,7 @@
 // (WinDrv UWindowsViewport::CreateNativeFont: CreateFont(-Height, 0,0,0, 400, 0,0,0, charset, 0,0,
 // NONANTIALIASED_QUALITY, 0, Face)), and UCanvas::WrappedPrint hands such a font to UViewport::DrawString, which
 // measures and draws with GDI DrawText (DT_WORDBREAK). The port has no GDI: "MS Sans Serif" is served by the bundled
-// Liberation Sans. The layout (advances, line height, wrap points — what TextSize/StrLen give the script) is the
+// Philosopher (author 2026-11-20; Liberation Sans before). The layout (advances, line height, wrap points — what TextSize/StrLen give the script) is the
 // font at Height pixels with whole-pixel advances; glyph shapes, advances and therefore wrap points differ from the
 // Windows bitmap font sserife.fon. The glyph page is drawn antialiased (unhinted outlines, coverage), and the frontend
 // draws it from Coverage(scale) at the interface scale, so the drawn text is sharp at any window size (author
@@ -404,8 +404,8 @@ namespace HP1.UEScript
         static UETrueType Substitute()
         {
             if (_tt != null) return _tt;
-            using var s = typeof(UENativeFonts).Assembly.GetManifestResourceStream("HP1.Core.Fonts.LiberationSans-Regular.ttf")
-                ?? throw new InvalidOperationException("bundled font HP1.Core.Fonts.LiberationSans-Regular.ttf missing from HP1.Core");
+            using var s = typeof(UENativeFonts).Assembly.GetManifestResourceStream("HP1.Core.Fonts.Philosopher-Regular.ttf")
+                ?? throw new InvalidOperationException("bundled font HP1.Core.Fonts.Philosopher-Regular.ttf missing from HP1.Core");
             var ms = new MemoryStream();
             s.CopyTo(ms);
             return _tt = new UETrueType(ms.ToArray());
@@ -416,7 +416,7 @@ namespace HP1.UEScript
         // Any face (author 2026-11-15, NOT ORIGINAL): the original hands the face to GDI CreateFontW (WinDrv
         // UWindowsViewport::CreateNativeFont), whose font mapper substitutes a face that is not installed from the
         // user's Windows (FontSubstitutes), not from any shipped binary. The port serves every face with the bundled
-        // Liberation Sans, as 'MS Sans Serif' (RU edition), and says so once per (face, height). Characters the font has
+        // Philosopher, as 'MS Sans Serif' (RU edition), and says so once per (face, height). Characters the font has
         // no glyph for draw as its .notdef.
         public static UEResourceRef Create(string face, int height)
         {
@@ -432,7 +432,7 @@ namespace HP1.UEScript
                     _byName[name] = font;
                 }
                 if (_logged.Add(((face ?? "").ToUpperInvariant(), height)))
-                    UETrace.Info($"[Font] CreateNativeFont('{face}', {height}) -> bundled Liberation Sans (NOT ORIGINAL), line {font.LineHeight}");
+                    UETrace.Info($"[Font] CreateNativeFont('{face}', {height}) -> bundled Philosopher (NOT ORIGINAL), line {font.LineHeight}");
             }
             // A Font is a native class without script state: the VM carries it as a resource reference, the form a
             // Font literal has on the defaults path.

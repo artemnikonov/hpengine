@@ -30,6 +30,10 @@ public static class EditionLabel
         return new(nordic ? "Nordic multilingual data" : "Multilingual game data",
             nordic && name == "UK 1.1" && tier == "modified" ? "different data" : tier, detail);
     }
+
+    // Author 2026-11-20: HPEngine runs every copy; the launcher names the edition only to warn (a modified or unknown
+    // copy). A tested edition, and the genuine Nordic disc's manifest difference, show nothing.
+    public static bool Quiet(string tier) => tier is "exact" or "supported" or "different data";
 }
 
 public enum SetupKind { Step, Progress, Error, Warning, Edition, Report, Done, Malformed }
@@ -272,9 +276,10 @@ public static class EngineError
         return lines.LastOrDefault(Is("[Crash] ")) ?? lines.LastOrDefault(Is("Unhandled exception. "));
     }
 
-    // The banner: the engine's line when there is one, then where the whole log is.
-    public static string Banner(IEnumerable<string> lines, int code, string log) =>
-        $"The game stopped with an error (code {code})" + (Pick(lines, code) is string l ? ": " + l.Trim() : ".") + " See the log: " + log;
+    // The banner (author 2026-11-17): what happened in plain words, then the engine's line on its own line when there is one.
+    // No file path: "Open log" opens the right log (GameScope.LogToOpen).
+    public static string Banner(IEnumerable<string> lines, int code) =>
+        $"The game stopped with an error (code {code})." + (Pick(lines, code) is string l ? "\n" + l.Trim() : "");
 }
 
 // The launcher's gamepad (proposal §6), the ONE answer of both launchers: launcher/Launcher.swift PadMap mirrors it and
@@ -343,6 +348,21 @@ public static class GameScope
     public static string LogsDir(string hp1Game, bool hp2) => Path.Combine(DataDir(hp1Game, hp2), "logs");
     // The launcher's capture of a run's console output: HP1's file, HP2's beside it with "-HP2" (HPEngine.log, HPEngine-HP2.log).
     public static string ConsoleLog(string hp1Log, bool hp2) => hp2 ? hp1Log[..^4] + "-HP2.log" : hp1Log;
+    // The banner's × (author 2026-11-17): clears the error it shows — the launcher's own when that is shown, else the selected
+    // tab's game error; the other game's stays. A new error shows the banner again.
+    public static (string Hp1, string Hp2, string Launcher) Dismiss(bool hp2Tab, string hp1, string hp2, string launcher) =>
+        launcher != null ? (hp1, hp2, null) : hp2Tab ? (hp1, null, null) : (null, hp2, null);
+    // "Open log" of a failed run (author 2026-11-17): the run journal that run wrote (HPEngineProgram: logs/run_<yyyyMMdd_HHmmss>.log;
+    // holds the [Crash] trace) = the newest run_*.log that was not there when the run started (`before`: RunLogs just before the
+    // start; no clock or file-time compare, so a run in the same second as the previous one's journal is not confused with it);
+    // none (codes 4/5/6 stop before the journal starts) → the console capture; neither → the game's logs folder.
+    public static string[] RunLogs(string logsDir) =>
+        Directory.Exists(logsDir) ? Directory.GetFiles(logsDir).Select(Path.GetFileName).Where(n => n.StartsWith("run_", StringComparison.Ordinal) && n.EndsWith(".log", StringComparison.Ordinal)).ToArray() : Array.Empty<string>();
+    public static string RunLog(IEnumerable<string> now, IEnumerable<string> before) =>
+        now.Where(n => n.StartsWith("run_", StringComparison.Ordinal) && n.EndsWith(".log", StringComparison.Ordinal)).Except(before ?? Array.Empty<string>(), StringComparer.Ordinal)
+            .OrderBy(n => n, StringComparer.Ordinal).LastOrDefault();
+    public static string LogToOpen(string logsDir, string console, IEnumerable<string> before) =>
+        RunLog(RunLogs(logsDir), before) is string run ? Path.Combine(logsDir, run) : File.Exists(console) ? console : logsDir;
 }
 
 // "Reset Gamepad Bindings". PAD RESET RULE (the same text in HP1.Core UEInput.Gamepad.cs and launcher/Launcher.swift
@@ -726,38 +746,35 @@ public static class Hp2FrontEnd
         }
     }
 
-    // Localize's text from System/<package>.<[Engine.Engine] Language> with <package>.int as the fallback (UE1 Localize).
-    public static string Localize(string gameDir, string package, string section, string key)
+    // The launcher's own English words for HP2's front-end pages (author 2026-11-20, NOT ORIGINAL): the launcher is
+    // English, so its HP2 pages are too, whatever the game's language (they were the game's Startup/HPMenu Localize text,
+    // Russian on the RU EA edition beside English buttons). The words are the US edition's Startup.int / HPMenu.int. Same
+    // table as the macOS Launcher's Hp2FrontEnd.words (launcher/test_update.sh compares --hp2-menu).
+    static readonly Dictionary<string, string> Words = new()
     {
-        string lang = Ini(gameDir, "Default.ini", "Engine.Engine", "Language") ?? "int";
-        return Ini(gameDir, package + "." + lang, section, key) ?? Ini(gameDir, package + ".int", section, key) ?? key;
-    }
+        ["Startup/IDDIALOG_FrontEndPageMainMenu/IDC_Title"] = "Main Menu",
+        ["Startup/IDDIALOG_FrontEndPageMainMenu/IDC_Instructions"] = "To Play Harry Potter click on New Game or Load Game. Click on Options for Video, Sound and Joystick options.",
+        ["Startup/IDDIALOG_FrontEndPageMainMenu/IDC_NewGame"] = "New Game",
+        ["Startup/IDDIALOG_FrontEndPageMainMenu/IDC_LoadGame"] = "Load Game",
+        ["Startup/IDDIALOG_FrontEndPageMainMenu/IDC_Options"] = "Options",
+        ["Startup/IDDIALOG_FrontEndPageNewGame/IDC_Title"] = "New Game",
+        ["Startup/IDDIALOG_FrontEndPageNewGame/IDC_Instructions"] = "Start a NEW game by clicking on the slot you wish to use.",
+        ["Startup/IDDIALOG_FrontEndPageNewGame/IDC_SlotEmpty"] = "Empty",
+        ["Startup/IDDIALOG_FrontEndPageNewGame/IDC_SlotUsed"] = "Used",
+        ["Startup/IDDIALOG_FrontEndPageLoadGame/IDC_Title"] = "Loading Game",
+        ["Startup/IDDIALOG_FrontEndPageLoadGame/IDC_Instructions"] = "Load a game by clicking on a previously used slot.",
+        ["Startup/IDDIALOG_FrontEndPageLoadGame/IDC_SlotEmpty"] = "Empty",
+        ["Startup/IDDIALOG_FrontEndPageLoadGame/IDC_SlotUsed"] = "Used",
+        ["HPMenu/All/Select_Game_0001"] = "Are you sure you want to replace this game?",
+        ["HPMenu/All/Select_Game_0002"] = "Replace Game",
+    };
+    public static string Localize(string gameDir, string package, string section, string key)
+        => Words.TryGetValue(package + "/" + section + "/" + key, out var v) ? v : key;
 
     // HPEngine's arguments for the new process: the HP2 folder and the original's parameters, word for word
     // (--hp2-cmdline; the engine side belongs to the HP2 boot/saves lines).
     // --hp2-savedir: the port's HP2 save directory (SaveDir), where the slots are.
     public static List<string> PlayArgs(string gameDir, string saveDir, string cmdline) => new() { "--root", gameDir, "--launched-by-launcher", "--hp2-savedir", saveDir, "--hp2-cmdline", cmdline };
-
-    // A System/ file by name, any case (the shipped installs spell default.ini in lower case).
-    static string Ini(string gameDir, string name, string section, string key)
-    {
-        string[] lines;
-        try
-        {
-            var file = Directory.GetFiles(Path.Combine(gameDir, "System")).FirstOrDefault(f => string.Equals(Path.GetFileName(f), name, StringComparison.OrdinalIgnoreCase));
-            if (file == null) return null;
-            lines = File.ReadAllLines(file);
-        } catch (IOException) { return null; } catch (UnauthorizedAccessException) { return null; }
-        bool inSec = false;
-        foreach (var raw in lines)
-        {
-            var l = raw.Trim();
-            if (l.StartsWith('[')) { inSec = string.Equals(l.Trim('[', ']'), section, StringComparison.OrdinalIgnoreCase); continue; }
-            int eq = l.IndexOf('=');
-            if (inSec && eq > 0 && string.Equals(l[..eq], key, StringComparison.OrdinalIgnoreCase)) return l[(eq + 1)..];
-        }
-        return null;
-    }
 }
 
 // The Options pages of HP2's front-end dialog (Config: Video / Sound / Joystick). The launcher has no Options page (author

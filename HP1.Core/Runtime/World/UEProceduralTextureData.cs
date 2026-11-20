@@ -454,13 +454,13 @@ namespace HP1.UEScript
             return null;
         }
         static int Log2(int v) { int b = 0; while ((1 << b) < v) b++; return b; }
-        static int Cidx(byte[] b)
+        internal static int Cidx(byte[] b)
         {
             int p = 0; int b0 = b[p++]; bool neg = (b0 & 0x80) != 0; int v = b0 & 0x3f;
             if ((b0 & 0x40) != 0) { int sh = 6; for (int i = 0; i < 4; i++) { int bb = b[p++]; v |= (bb & 0x7f) << sh; sh += 7; if ((bb & 0x80) == 0) break; } }
             return neg ? -v : v;
         }
-        static string RefPath(UnrealPackage pkg, string pkgName, int idx)
+        internal static string RefPath(UnrealPackage pkg, string pkgName, int idx)
         {
             if (idx > 0) return UETextureSource.FullPathOf(pkgName, pkg.Exports[idx - 1]);
             if (idx < 0) { var chain = new List<string>(); for (UObjectTableItem o = pkg.Imports[-idx - 1]; o != null; o = o.Outer) chain.Add(o.ObjectName.ToString()); chain.Reverse(); return string.Join(".", chain); }

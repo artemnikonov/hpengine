@@ -9,6 +9,7 @@ struct type_VU
     float4 r1;
     float4 r2;
     float4 r3;
+    float4 eye;
 };
 
 struct vs_main_out
@@ -37,8 +38,9 @@ struct vs_main_in
 vertex vs_main_out vs_main(vs_main_in in [[stage_in]], constant type_VU& VU [[buffer(0)]])
 {
     vs_main_out out = {};
-    float4 _51 = float4(in.in_var_TEXCOORD0, 1.0);
-    out.gl_Position = float4(dot(VU.r0, _51), dot(VU.r1, _51), dot(VU.r2, _51), dot(VU.r3, _51));
+    float4 _57 = float4(in.in_var_TEXCOORD0 - VU.eye.xyz, 1.0);
+    float _60 = dot(VU.r3, _57);
+    out.gl_Position = float4(dot(VU.r0, _57), dot(VU.r1, _57), 1.000030517578125 - (_60 * 3.0517578125e-05), _60);
     out.out_var_TEXCOORD0 = in.in_var_TEXCOORD1;
     out.out_var_TEXCOORD1 = in.in_var_TEXCOORD2;
     out.out_var_TEXCOORD2 = in.in_var_TEXCOORD3;

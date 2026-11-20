@@ -163,6 +163,45 @@ namespace HP1.UEScript
                 + $"small_font_width={LoadNoticeWidth(interp, text).ToString(CultureInfo.InvariantCulture)} max={LoadNoticeMaxWidth}");
         }
 
+        // The level-start autosave's slot: FESlotPage.SaveSelectedSlot / LoadSelectedSlot with no slot selected
+        // (doLevelSave(99), `open save99.usa`).
+        const string LevelStartSaveStem = "save99";
+
+        // D-82 restart (NOT ORIGINAL): the map entered from its beginning as a level travel enters it, with `carried`.
+        void RestartLevelWithProgress(UEInterpreter interp, UELevelRuntime.PlayWorldConfig cfg, string map, string mapPath,
+            Dictionary<string, List<UELevelRuntime.TravelActor>> carried)
+        {
+            cfg.TravelInfo = carried;
+            Runtime.RetargetTravelToMap(map);
+            Runtime.TeardownPlayWorld(interp);
+            _localPlayer = Runtime.LoadAndBootstrapPlayWorld(interp, mapPath, cfg);
+            RunRestartLevelStartSave(interp);
+        }
+
+        // The rest of a level entry (2026-11-17, 0.4.1 F1): a script level change arms HPConsole's level-start autosave
+        // (ChangeLevel: bLoadNewLevel; HPConsole.Tick: SaveSelectedSlot), and the death reload's state is what that save
+        // wrote — FESlotPage.SaveSelectedSlot first raises lifePotions to MaxLifePotions / 2. The restart's set skipped it,
+        // so a set carried from other scripts (a Restored entry with lifePotions 0) killed Harry on the first tick
+        // (Harry.PlayerTick). Here the console's shipped SaveSelectedSlot runs on the restarted world before its first
+        // tick, as from inside a frame (no progress frame, UELevelRuntime.PaintProgress), and its files go to a scratch
+        // directory that is deleted: the player's slots are not overwritten (D-82). Scripts without the function: nothing.
+        void RunRestartLevelStartSave(UEInterpreter interp)
+        {
+            UEObject console = Runtime.ViewportConsole;
+            UFunction save = console is null ? null : interp.FindEventFunction(console, "SaveSelectedSlot");
+            if (save is null) { _journal.Add("restart_level_start_save none"); return; }
+            string keep = SaveDirOverride;
+            string scratch = Path.Combine(Path.GetTempPath(), "hpengine-restart-" + Guid.NewGuid().ToString("N"));
+            SaveDirOverride = scratch;
+            try { Runtime.RunAsInsideFrame(() => interp.Invoke(console, save)); }
+            finally
+            {
+                SaveDirOverride = keep;
+                try { if (Directory.Exists(scratch)) Directory.Delete(scratch, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            }
+            _journal.Add("restart_level_start_save done");
+        }
+
         // The notice is not part of the game: a save written while it is up does not carry it.
         void DropLoadNoticeForSave(UEInterpreter interp)
         {
@@ -510,6 +549,10 @@ namespace HP1.UEScript
                 // StaticLoadObject flags are LOAD_NoWarn | (MayFail ? LOAD_Quiet : 0) (Core.dll.c:63984);
                 // without -STRICT SafeLoadError (14713-14763) only logs and returns None,
                 // so a miss is NOT fatal for any MayFail (baseDialog.FindDialog expects None).
+                // The object is found by the same linker rule as any class (ResolveDynamicLoad: name + exact class, the
+                // path's group not compared, the last export by index). Live HP2 Duel01 (SwARc level host):
+                // Duellist.fillCommentArray's "AllDialog.PC_WCG_DuelIntro_03" is AllDialog.usa.PC_WCG_DuelIntro_03.
+                if (ResolveDynamicLoad(path, "Sound", null) is UEResourceRef linked) path = linked.ObjectPath;
                 UESoundRef sound = UESoundCatalog.Shared.Load(path, mayFail: true);
                 _journal.Add($"dynamic_load class=Sound path={path} found={(sound is not null).ToString().ToLowerInvariant()}"
                     + (sound is null ? "" : $" duration={sound.Duration:R}"));
@@ -1290,6 +1333,7 @@ namespace HP1.UEScript
         // (UELevelRuntime.CreateAnimChannel): a channel is a spawned actor, so the
         // spawn order, encroachment, hash residency and destroy path are world
         // state.
+        // Original: Engine.dll ?execCreateAnimChannel@AActor@@QAEXAAUFFrame@@QAX@Z [HP1 0x10408C50] [HP2 0x104165B0]
         private object CreateAnimChannel(UEInterpreter interp, UEFrame frame, object[] args)
         {
             UEObject owner = frame.Context ?? frame.Object;
@@ -1300,6 +1344,12 @@ namespace HP1.UEScript
             bool autoDestroy = args.Length > 3 && UEInterpreter.ToBool(args[3]);
             // HP2's fifth parameter, optional bool bNotReplaceable (HP1 declares four).
             bool notReplaceable = args.Length > 4 && UEInterpreter.ToBool(args[4]);
+            // HP2's exec does not zero the EAnimType dword before the byte argument lands in it [HP2 0x10416620] and the body
+            // compares the whole dword with 1 [HP2 0x1041611a]: a byte 1 (AT_Combine) depends on the stack bytes above it,
+            // a byte 0 or >= 2 never equals 1 (every shipped HP2 script call passes ByteConst 0). Undefined: a loud STOP.
+            if (UEGameProfile.Current.Game == UEEdition.Game.HP2 && animType == 1)
+                UEGameProfile.Stop(UEEdition.Game.HP2, "execCreateAnimChannel AT_Combine (the original compares an EAnimType dword "
+                    + "whose upper bytes its exec never writes)");
             return Runtime.CreateAnimChannel(interp, owner, cls, animType, boneName, autoDestroy, notReplaceable);
         }
 
@@ -1535,7 +1585,23 @@ namespace HP1.UEScript
                         }
                         catch (Exception e) when (e is InvalidDataException or NotSupportedException or IOException)
                         { badReason += $"; restart with progress impossible: {e.Message}"; }
-                        if (carried is null)
+                        // DEATH RELOAD OF AN UNUSABLE LEVEL-START SAVE — IMPROVEMENT, NOT ORIGINAL (2026-11-17, 0.4.1 F1): slot
+                        // 99 is the level-start autosave the death reload opens (FESlotPage.LoadSelectedSlot with no slot
+                        // selected: `open save99.usa`; baseHarry stateDead retries it every 0.5 s). The original's refusal lets
+                        // the old level play on, so a dead player retries forever (here: slot 99 holds a save of a map or mod
+                        // no longer in the game). The port restarts the CURRENT level with the travel set it was entered with
+                        // — what that slot would hold had this level written it.
+                        if (carried is null && string.Equals(Path.GetFileNameWithoutExtension(map), LevelStartSaveStem, StringComparison.OrdinalIgnoreCase)
+                            && Runtime.LoadedMapPath is string currentMapPath && File.Exists(currentMapPath))
+                        {
+                            string currentMap = Path.GetFileNameWithoutExtension(currentMapPath);
+                            var entry = Runtime.LevelEntryTravel;
+                            _journal.Add($"load_savegame_restart_current file={Path.GetFileName(targetPath)} map={currentMap} reason={badReason}");
+                            UETrace.Info($"[Save] {map} not loaded: {badReason}; restarting {currentMap} with the progress it was entered with");
+                            RestartLevelWithProgress(interp, cfg, currentMap, currentMapPath, entry);
+                            _loadNotice = "Level restarted from its beginning.";
+                        }
+                        else if (carried is null)
                         {
                             // Damaged or newer-build save, or one of other scripts without a level-entry set: LoadMap's catch,
                             // the old level plays on (UELevelRuntime.LoadMapBadSave). The reason also goes to the run log.
@@ -1561,10 +1627,7 @@ namespace HP1.UEScript
                             foreach (string d in dropped) _journal.Add($"load_savegame_restart_dropped {d}");
                             UETrace.Info($"[Save] {map}: {badReason}; restarting {savedMap} with the progress it was entered with ({carriedList})"
                                 + (dropped.Count == 0 ? "" : "; dropped: " + string.Join("; ", dropped)));
-                            cfg.TravelInfo = carried;
-                            Runtime.RetargetTravelToMap(savedMap);
-                            Runtime.TeardownPlayWorld(interp);
-                            _localPlayer = Runtime.LoadAndBootstrapPlayWorld(interp, savedMapPath, cfg);
+                            RestartLevelWithProgress(interp, cfg, savedMap, savedMapPath, carried);
                             const string restarted = "Level restarted from its beginning.";
                             string named = UELevelRuntime.SavedWithMods(data, ActiveMods) is { } savedWith ? $"{savedWith}. {restarted}" : null;
                             _loadNotice = named is not null && LoadNoticeWidth(interp, named) is >= 0f and <= LoadNoticeMaxWidth
@@ -1589,6 +1652,7 @@ namespace HP1.UEScript
                     {
                         _localPlayer = Runtime.Travel(interp, targetPath, cfg);
                     }
+                    Runtime.EndServerTravelBrowse(interp);
                     WorldFrame screen = Runtime.LastLoadMapScreen;
                     _journal.Add($"loadmap_levelinfo hud={screen?.Hud.Count ?? -1}");
                 }

@@ -141,9 +141,24 @@ namespace HP1.UEScript
             ("FEInputPage", "BeforePaint", OptionsBeforePaint),
             ("harry", "KeyDownEvent", (interp, self, args, original) => null),
             ("FEBook", "KeyEvent", Hp2KeyEventNoDebugToggle),
+            ("FEInputPage", "ShowWindow", Hp2InputShowsDifficulty),
         };
 
         static (string Class, string Function, Handler Body)[] Table => UEGameProfile.Current.Overrides;
+
+        // HP2 FEInputPage.ShowWindow (author decision 2026-11-16, NOT ORIGINAL, improvement): the shipped body shows the
+        // Difficulty label and combo only when HPConsole.bDebugMode is set (and hides them otherwise); Created gives them their
+        // own row below Auto-drink potion. They are shown for every player after the shipped body. The combo's handler is
+        // the shipped DifficultyChanged (PlayerPawn.Difficulty, read by harry.TakeDamage's fDamageMultiplier_*, DoJump,
+        // AdjustAim, the duel spells, Pawn.PreBeginPlay); saved by HideWindow's SaveConfig.
+        static object Hp2InputShowsDifficulty(UEInterpreter interp, UEObject self, object[] args, Func<object> original)
+        {
+            object r = original();
+            foreach (string name in new[] { "DifficultyLabel", "DifficultyCombo" })
+                Call(interp, self.GetProp(name) as UEObject ?? throw new InvalidOperationException("FEInputPage: no " + name), "ShowWindow");
+            return r;
+        }
+
 
         // The replaced functions by name (owner class or state, function), for the binding census of a mod's scripts
         // (HP1_PROBE_OVERRIDES, audit/mods_saves_e2e.sh).
@@ -410,6 +425,7 @@ namespace HP1.UEScript
             ("HP2_EN", "FESoundVideoPage.LoadAvailableSettings", "c6660162f025d6fe"),
             ("HP2_EN", "FESoundVideoPage.SettingsChanged", "64b6d4f7b0eac176"),
             ("HP2_EN", "UWindowWindow.PaintClients", "16a84e55917cbaf8"),
+            ("HP2_EN", "FEInputPage.ShowWindow", "57c4f29b4950ad9f"),
             ("HP2_RU_EA", "FEBook.KeyEvent", "4938db64bbcd5172"),
             ("HP2_RU_EA", "FEInputPage.BeforePaint", "355070a3b24bc824"),
             ("HP2_RU_EA", "FEInputPage.LoadExistingKeys", "b4778f4a3cfdd758"),
@@ -423,6 +439,7 @@ namespace HP1.UEScript
             ("HP2_RU_EA", "FESoundVideoPage.LoadAvailableSettings", "c6660162f025d6fe"),
             ("HP2_RU_EA", "FESoundVideoPage.SettingsChanged", "64b6d4f7b0eac176"),
             ("HP2_RU_EA", "UWindowWindow.PaintClients", "16a84e55917cbaf8"),
+            ("HP2_RU_EA", "FEInputPage.ShowWindow", "57c4f29b4950ad9f"),
             ("HP2_MODIFIED", "FEBook.KeyEvent", "4938db64bbcd5172"),
             ("HP2_MODIFIED", "FEInputPage.BeforePaint", "355070a3b24bc824"),
             ("HP2_MODIFIED", "FEInputPage.LoadExistingKeys", "b4778f4a3cfdd758"),
@@ -436,6 +453,7 @@ namespace HP1.UEScript
             ("HP2_MODIFIED", "FESoundVideoPage.LoadAvailableSettings", "c6660162f025d6fe"),
             ("HP2_MODIFIED", "FESoundVideoPage.SettingsChanged", "64b6d4f7b0eac176"),
             ("HP2_MODIFIED", "UWindowWindow.PaintClients", "16a84e55917cbaf8"),
+            ("HP2_MODIFIED", "FEInputPage.ShowWindow", "57c4f29b4950ad9f"),
         };
 
         // systemDir: the scripts to read; null = the directory of the loaded scripts (the game). A package that cannot be
@@ -672,21 +690,21 @@ namespace HP1.UEScript
 
         // HP2 FESoundVideoPage.LoadAvailableSettings (author decision 2026-11-16): the shipped body (filtered GetRes list, the
         // saved size selected, 16/32 bit into the Color Depth frame, the other items), then the resolution list rebuilt with
-        // every GetRes mode in order and the shipped selection kept, the Display Mode items in the Color Depth frame and its
-        // label control renamed.
+        // every GetRes mode in order and the size in use selected (GetCurrentRes, as HP1's shipped body; the saved
+        // Windowed*/Fullscreen* pair need not be the live size — 2026-11-18, Alt+Enter), the Display Mode items in the Color
+        // Depth frame and its label control renamed.
         static object Hp2VideoLoadSettings(UEInterpreter interp, UEObject self, object[] args, Func<object> original)
         {
             object r = original();
             Quiet(self, () =>
             {
                 UEObject res = Combo(self, "ResolutionCombo");
-                string selected = Call(interp, res, "GetValue") as string;
                 UEObject owner = Call(interp, self, "GetPlayerOwner") as UEObject
                     ?? throw new InvalidOperationException("FESoundVideoPage: no player owner");
                 Call(interp, res, "Clear");
                 foreach (string mode in (Call(interp, owner, "ConsoleCommand", "GetRes") as string ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries))
                     Call(interp, res, "AddItem", mode, "", 0);
-                Call(interp, res, "SetValue", selected, "");
+                Call(interp, res, "SetValue", Call(interp, owner, "ConsoleCommand", "GetCurrentRes") as string, "");
                 SelectDisplayMode(interp, self, null);
             });
             Call(interp, self.GetProp("ColorDepthLabel") as UEObject ?? throw new InvalidOperationException("FESoundVideoPage: no ColorDepthLabel"),
@@ -696,15 +714,19 @@ namespace HP1.UEScript
 
         // HP2 (author decision 2026-11-16): the page has no BeforePaint of its own (UWindowWindow's is empty, never dispatched
         // to an override), so UWindowWindow.PaintClients — final, run by every painted window after its Paint — is wrapped
-        // for it: the mode switched elsewhere (Alt+Enter) left Display Mode stale, and a later resolution pick would toggle it
-        // back (SettingsChanged compares the item with the device). Refilled as on opening, before the children paint. Only
-        // the mode is compared: HP2's body selects the SAVED size (Windowed*/Fullscreen* keys), which need not equal the live
-        // one, and a refill also re-sends MLOD.
+        // for it: the mode or size switched elsewhere (Alt+Enter) left Display Mode and Resolution stale, and a later pick
+        // would toggle it back (SettingsChanged compares the items with the device). Refilled as on opening, before the
+        // children paint, when either differs from the device (HP1's OptionsBeforePaint rule; a refill also re-sends MLOD).
         static object Hp2VideoPaintClients(UEInterpreter interp, UEObject self, object[] args, Func<object> original)
         {
             if (UEInterpreter.ClassIsA(self.Class, "FESoundVideoPage") && self.GetProp("ColorDepthCombo") is UEObject depth
-                && UEInterpreter.ToInt(Call(interp, depth, "GetSelectedIndex")) != (ViewportOf(interp).Fullscreen ? 0 : 1))
-                Call(interp, self, "LoadAvailableSettings");
+                && self.GetProp("ResolutionCombo") is UEObject res)
+            {
+                IViewportDevice vp = ViewportOf(interp);
+                if (UEInterpreter.ToInt(Call(interp, depth, "GetSelectedIndex")) != (vp.Fullscreen ? 0 : 1)
+                    || Call(interp, res, "GetValue") as string != vp.SizeX + "x" + vp.SizeY)
+                    Call(interp, self, "LoadAvailableSettings");
+            }
             return original();
         }
 
@@ -748,8 +770,8 @@ namespace HP1.UEScript
             return null;
         }
 
-        // Display Mode change applies at once (ToggleFullscreen saves the key pair of the new mode itself) plus
-        // StartupFullscreen for the next launch; resolution change — original body (SetRes, confirm dialog, revert on WindowDone).
+        // Display Mode change applies at once (ToggleDisplayMode: ToggleFullscreen saves the key pair of the new mode itself,
+        // plus StartupFullscreen for the next launch, as Alt+Enter); resolution change — original body (SetRes, confirm dialog, revert on WindowDone).
         static object OptionsSettingsChanged(UEInterpreter interp, UEObject self, object[] args, Func<object> original)
         {
             if (!UEInterpreter.ToBool(self.GetProp("bInitialized"))) return original();
@@ -758,8 +780,7 @@ namespace HP1.UEScript
             bool wantFull = Call(interp, Combo(self, "ColorDepthCombo"), "GetValue2") as string == Fullscreen;
             if (wantFull != vp.Fullscreen)
             {
-                UEConsoleCommand.ToggleFullscreen(cfg, vp);
-                UEConsoleCommand.Execute(cfg, "set ini:Engine.Engine.ViewportManager StartupFullscreen " + (vp.Fullscreen ? "True" : "False"), null, vp);
+                UEConsoleCommand.ToggleDisplayMode(cfg, vp);
                 Call(interp, self, "LoadAvailableSettings");
                 return null;
             }

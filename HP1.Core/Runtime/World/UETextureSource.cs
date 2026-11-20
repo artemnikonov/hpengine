@@ -25,7 +25,7 @@ namespace HP1.UEScript
         public sealed class TextureData
         {
             public string Path;
-            public string State;               // EXPORTED / EXPORTED_RGBA / PROCEDURAL_NO_PIXELS / NO_MIPS / DXT1_FATAL / NON_P8_UNDEFINED / NO_PALETTE
+            public string State;               // EXPORTED / EXPORTED_RGBA / PARAMETRIC / PROCEDURAL_NO_PIXELS / NO_MIPS / DXT1_FATAL / NON_P8_UNDEFINED / NO_PALETTE
             public int Width, Height;          // mip 0 (0 — no mips)
             public bool Masked;                // bMasked tag
             public int LodSet;                 // LODSet tag, else 1
@@ -33,6 +33,11 @@ namespace HP1.UEScript
             public byte[] Palette;             // 256×RGBA as in the package (EXPORTED; null for EXPORTED_RGBA)
             public (int U, int V, byte[] P8)[] Levels;   // every mip from 0; P8 null for a mip without full data (EXPORTED_RGBA: one mip of R,G,B,A bytes)
             public int LastUndefinedMip = -1;  // last P8 mip whose bulk data is missing or shorter than USize*VSize (-1: none)
+            public int UBits = -1, VBits = -1;   // P8: the UBits/VBits tags (UBitmap +0x30/+0x31), -1: untagged
+            // PARAMETRIC of class ScriptedTexture (or a subclass): UScriptedTexture::PostLoad's SourceTexture tag (full path,
+            // null: none).
+            public bool Scripted;
+            public string SourcePath;
 
             // B30. The device uploads every mip from the first one it draws (UD3DRenderDevice::SetTexture, loop
             // 0x10009fdb..0x1000a2b0: source mip pFVar9+0x34 + i); a mip whose DataPtr is null is skipped
@@ -48,7 +53,7 @@ namespace HP1.UEScript
 
         readonly string _root;
         List<string> _packages;                // exporter order
-        HashSet<string> _textureClasses, _fractalClasses;
+        HashSet<string> _textureClasses, _fractalClasses, _parametricClasses, _scriptedClasses;
         readonly Dictionary<string, UnrealPackage> _open = new(StringComparer.OrdinalIgnoreCase);
         readonly Dictionary<string, TextureData> _cache = new(StringComparer.OrdinalIgnoreCase);
 
@@ -74,6 +79,7 @@ namespace HP1.UEScript
         {
             if (_textureClasses is not null) return;
             var super = new Dictionary<string, string>(StringComparer.Ordinal);
+            var parametricTag = new Dictionary<string, bool>(StringComparer.Ordinal);   // a class's own bParametric default tag
             foreach (string pkgPath in UEInstallPath.PackageFiles(_root, "System").OrderBy(x => System.IO.Path.GetFileName(x), StringComparer.Ordinal))
             {
                 UnrealPackage pkg = HP1.UEScript.UEPackageOpen.Load(pkgPath, FileAccess.Read);
@@ -83,6 +89,8 @@ namespace HP1.UEScript
                     if (exp.Object is not UClass c) continue;
                     string sup = c.Super?.Name;
                     if (!string.IsNullOrEmpty(sup)) super[exp.ObjectName.ToString()] = sup;
+                    if (c.Properties?.Find("bParametric") is { } bp)
+                        parametricTag[exp.ObjectName.ToString()] = string.Equals(bp.Value, "true", StringComparison.OrdinalIgnoreCase);
                 }
             }
             HashSet<string> Derived(string root)
@@ -102,6 +110,12 @@ namespace HP1.UEScript
             }
             _textureClasses = Derived("Texture");
             _fractalClasses = Derived("FractalTexture");
+            _scriptedClasses = Derived("ScriptedTexture");
+            // The class default of bParametric: the nearest class of the chain whose defaultproperties tag it.
+            _parametricClasses = new HashSet<string>(StringComparer.Ordinal);
+            foreach (string name in _textureClasses)
+                for (string cur = name; cur is not null; cur = super.TryGetValue(cur, out string next) ? next : null)
+                    if (parametricTag.TryGetValue(cur, out bool on)) { if (on) _parametricClasses.Add(name); break; }
             if (!_textureClasses.Contains("Texture") || _fractalClasses.Count == 0)
                 throw new InvalidOperationException("textures: class tree from System/*.u not built (no Texture or FractalTexture)");
         }
@@ -264,27 +278,47 @@ namespace HP1.UEScript
             if (tex.Palette.Colors == null || tex.Palette.Colors.Count < 256) { d.State = "NO_PALETTE"; return d; }
             var mip = tex.Mips[0];
             d.Width = mip.USize; d.Height = mip.VSize;
+            if (int.TryParse(tex.Properties?.Find("UBits")?.Value, out int ubits)) d.UBits = ubits;
+            if (int.TryParse(tex.Properties?.Find("VBits")?.Value, out int vbits)) d.VBits = vbits;
+            // UTexture::Serialize, loading a bParametric texture (TextureFlags +0x84 & 8): every mip's DataArray is emptied
+            // before the mips are read and, after them, set to USize*VSize ZERO bytes — the package's mip bytes never
+            // survive the load (HP1 and HP2 bodies identical). Its texels are whatever code writes later: a FractalTexture's
+            // own procedural tick (PROCEDURAL_NO_PIXELS above, drawn by the frontend's ProcTex), a ScriptedTexture's Tick
+            // (Core: UEWorldFrameProducer.ScriptedTextures, WorldFrame.ScriptedTexels). State PARAMETRIC: zero levels.
+            // Original: Engine.dll ?Serialize@UTexture@@UAEXAAVFArchive@@@Z [HP1 0x10421B40] [HP2 0x104304A0]
+            string parametricTag = tex.Properties?.Find("bParametric")?.Value;
+            bool parametric = parametricTag is null ? _parametricClasses.Contains(cls)
+                : string.Equals(parametricTag, "true", StringComparison.OrdinalIgnoreCase);
+            if (parametric && !_fractalClasses.Contains(cls))
+            {
+                d.State = "PARAMETRIC";
+                d.Masked = string.Equals(tex.Properties?.Find("bMasked")?.Value, "true", StringComparison.OrdinalIgnoreCase);
+                d.Palette = PaletteBytes(tex.Palette);
+                d.Levels = tex.Mips.Select(m => (m.USize, m.VSize, new byte[m.USize * m.VSize])).ToArray();
+                if (d.Scripted = _scriptedClasses.Contains(cls))
+                {
+                    UnrealPackage pkg = Open(pkgPath);
+                    foreach (var kv in tex.GetRawPropertyValueBytesAll("SourceTexture"))
+                    { d.SourcePath = UEProceduralTextureData.RefPath(pkg, pkgName, UEProceduralTextureData.Cidx(kv.Value)); break; }
+                }
+                return d;
+            }
             byte[] idx = ReadBulk(pkgPath, mip.Data.StorageOffset, mip.Data.StorageSize);
             if (idx == null || idx.Length < d.Width * d.Height)
             {
                 // A FractalTexture descendant draws itself (UFractalTexture::PostLoad/Prime): the package has no
                 // pixels by design of the class.
-                if (_fractalClasses.Contains(cls)) { d.State = "PROCEDURAL_NO_PIXELS"; return d; }
+                if (_fractalClasses.Contains(cls))
+                {
+                    d.State = "PROCEDURAL_NO_PIXELS";
+                    d.Masked = string.Equals(tex.Properties?.Find("bMasked")?.Value, "true", StringComparison.OrdinalIgnoreCase);   // canvas tiles (SdlHudPass)
+                    return d;
+                }
                 throw new InvalidDataException($"texture {path}: mip 0 {d.Width}x{d.Height}, read {idx?.Length ?? 0} bytes at offset {mip.Data.StorageOffset}");
             }
             d.State = "EXPORTED";
             d.Masked = string.Equals(tex.Properties?.Find("bMasked")?.Value, "true", StringComparison.OrdinalIgnoreCase);
-            d.Palette = new byte[1024];
-            // UPalette::Serialize (Engine.dll.c:133894): for a package of version < 0x42 the alpha of EVERY colour is
-            // set to 0xFF on load (`Colors(i).A = 0xff`). Shipped has six such packages of version 61 (Detail, FireEng,
-            // GenFX, GreatFire, Liquids, Palettes) — their file stores A = 0. Verified against live original memory
-            // (GenFX.Palette44 — A = 0xFF).
-            bool alphaFF = tex.Palette.Package.Version < 0x42;
-            for (int i = 0; i < 256; i++)
-            {
-                var c = tex.Palette.Colors[i];
-                d.Palette[i * 4] = c.R; d.Palette[i * 4 + 1] = c.G; d.Palette[i * 4 + 2] = c.B; d.Palette[i * 4 + 3] = alphaFF ? (byte)0xff : c.A;
-            }
+            d.Palette = PaletteBytes(tex.Palette);
             var levels = new List<(int, int, byte[])> { (d.Width, d.Height, idx) };
             for (int k = 1; k < tex.Mips.Count; k++)
             {
@@ -296,6 +330,22 @@ namespace HP1.UEScript
             }
             d.Levels = levels.ToArray();
             return d;
+        }
+
+        // UPalette::Serialize (Engine.dll.c:133894): for a package of version < 0x42 the alpha of EVERY colour is
+        // set to 0xFF on load (`Colors(i).A = 0xff`). Shipped has six such packages of version 61 (Detail, FireEng,
+        // GenFX, GreatFire, Liquids, Palettes) — their file stores A = 0. Verified against live original memory
+        // (GenFX.Palette44 — A = 0xFF).
+        static byte[] PaletteBytes(UELib.Engine.UPalette palette)
+        {
+            var p = new byte[1024];
+            bool alphaFF = palette.Package.Version < 0x42;
+            for (int i = 0; i < 256; i++)
+            {
+                var c = palette.Colors[i];
+                p[i * 4] = c.R; p[i * 4 + 1] = c.G; p[i * 4 + 2] = c.B; p[i * 4 + 3] = alphaFF ? (byte)0xff : c.A;
+            }
+            return p;
         }
 
         // NON-P8 TEXTURE AS D3DDRV UPLOADS IT. UTexture::Lock (Engine 0x10421220) hands the device Format (+0x28) and
@@ -374,6 +424,9 @@ namespace HP1.UEScript
                     {
                         if (exp.Object is not UELib.Engine.UFont font) continue;
                         font.BeginDeserializing();
+                        // A read that threw half-way (UELib keeps the fields read so far) is not an empty font.
+                        if (font.ThrownException != null)
+                            throw new InvalidDataException($"font {FullPath(pkgName, exp)}: UELib read failed: {font.ThrownException.Message}");
                         // A stub (characters not read) is not a font; zero characters is a genuine empty font of the
                         // US build (Asian/Jap/Thai/System*): returned empty.
                         if (font.Characters == null || font.Textures == null) continue;

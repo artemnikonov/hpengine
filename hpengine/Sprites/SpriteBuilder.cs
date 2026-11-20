@@ -37,6 +37,12 @@ namespace HPEngine.Sprites
         // Core's WorldFrame.TextureFrames, same as for BSP batches (SdlRenderer.AnimateWorld); flags and size come from that frame.
         // Unset: the chain head.
         public Func<string, string> FrameOf = static p => p;
+        // Display fraction between logic ticks (FramePacing.cs; 1 = the tick's frame): the tile centre is the actor's
+        // Location interpolated with the pose rules (PoseHistory: consecutive ticks, no cut, no jerk), as meshes are — a
+        // sprite carried by a moving actor (HP1/HP2 Bludger_Halo, Snitch_Halo) otherwise steps at the logic rate.
+        public float Alpha = 1f;
+        readonly HPEngine.PoseHistory _at = new();
+        readonly UEVector[] _one = new UEVector[1];
 
         // size        — USize/VSize of the drawn texture (for IceTexture its SourceTexture;
         //               the reference :141 and :169 used the source size);
@@ -122,7 +128,7 @@ namespace HPEngine.Sprites
                     // real Location (Persp +0xb4, :38123). The same screen rectangle at depth Z is given by the point of
                     // the camera→Location ray at depth Z with sizes ×Z/depth.
                     // Z ≤ 0 (sprite nearer than SpriteProjForward): shipped DrawTile outcome unknown, reported loudly.
-                    UEVector c = a.Location;
+                    UEVector c = Located(a, frame.Tick);
                     float depth = UEVector.Dot(c - eye, fwd), z = depth - a.SpriteProjForward;
                     if (depth > 0f && z > 0f)
                     {
@@ -144,6 +150,12 @@ namespace HPEngine.Sprites
                     Draws.Add(d);
                 }
             }
+        }
+
+        UEVector Located(in ActorSnapshot a, int tick)
+        {
+            if (!_at.Has(a.ObjectId, tick)) { _one[0] = a.Location; _at.Store(a.ObjectId, tick, _one, a.Location); }
+            return _at.Get(a.ObjectId, Alpha)[0];
         }
 
         static void Put(SpriteDraw d, UEVector p, float u, float v, float glow)

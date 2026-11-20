@@ -47,19 +47,20 @@ namespace HP1.UEScript
         // The frame's world and actor uses, from the frame Core assembled (the snapshots name the textures the frontend draws).
         void TextureUses(WorldFrame f)
         {
-            foreach (string t in f.DrawnTextures) TextureUse(t);
+            foreach (string t in f.DrawnTextures) TextureUse(t);   // a ScriptedTexture among them ticked in DrawWorld
+            string Other(string path, string use) { RefuseScriptedUse(path, use); return TextureUse(path); }
             _snapshotOf.Clear();
             for (int i = 0; i < f.Actors.Count; i++) if (!f.Actors[i].Destroyed) _snapshotOf[f.Actors[i].ObjectId] = i;
             // DrawActorSprite: Texture->Get(Viewport->CurrentTime) for DT_Sprite (Render.dll.c:12024). DT_SpriteAnimOnce draws the
             // life-fraction frame with its AnimNext/AnimCur zeroed for the Get (Render.dll.c:12002-12005): not stepped here.
             foreach (int id in f.SpriteActors)
-                if (_snapshotOf.TryGetValue(id, out int i) && f.Actors[i].DrawType == DT_Sprite) TextureUse(f.Actors[i].TexturePath);
+                if (_snapshotOf.TryGetValue(id, out int i) && f.Actors[i].DrawType == DT_Sprite) Other(f.Actors[i].TexturePath, "DrawActorSprite");
             // FUN_10b15090: Textures[0]->Update(CurrentTime) for each drawn emitter (Render.dll.c:9703-9713).
             string emitted = null;   // an emitter's particles share its Textures[0]: one use per run (allocation-free skip)
             foreach (ParticleInstance p in f.Particles)
-                if (!ReferenceEquals(p.TexturePath, emitted)) TextureUse(emitted = p.TexturePath);
+                if (!ReferenceEquals(p.TexturePath, emitted)) Other(emitted = p.TexturePath, "a particle system");
             foreach (DecalInstance d in f.Decals)
-                if (_snapshotOf.TryGetValue(d.DecalId, out int i)) TextureUse(f.Actors[i].TexturePath);
+                if (_snapshotOf.TryGetValue(d.DecalId, out int i)) Other(f.Actors[i].TexturePath, "a decal");
             // DrawMesh/DrawLodMesh: every slot's GetTexture(i, Owner) is Updated (Render.dll.c:9241-9262), the empty-slot
             // texture is Locked (UTexture::Lock -> Update when the time changed).
             foreach (MeshPose mp in f.MeshPoses)
@@ -69,8 +70,8 @@ namespace HP1.UEScript
                 if (!mp.Weapon && a.DrawType != DT_Mesh) continue;
                 string[] slots = MeshSlotTextures?.Invoke(mp.MeshPath);
                 if (slots is null) continue;
-                for (int k = 0; k < slots.Length; k++) TextureUse(MeshSlotTexture(a, string.IsNullOrEmpty(slots[k]) ? null : slots[k], k));
-                TextureUse(MeshFallbackTexture(a, slots, p => p));
+                for (int k = 0; k < slots.Length; k++) Other(MeshSlotTexture(a, string.IsNullOrEmpty(slots[k]) ? null : slots[k], k), "a mesh slot");
+                Other(MeshFallbackTexture(a, slots, p => p), "a mesh");
             }
         }
 

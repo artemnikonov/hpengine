@@ -190,12 +190,41 @@ namespace HPEngine
             EmitViews(frame);
         }
 
+        // SpotReport (diagnostic, on demand): the mover's brush polygons, the triangles the last EmitViews emitted for it (the
+        // same test as EmitViews, recounted), and its polygons the coplanar cut replaced by pieces this tick.
+        public int PolyCount(UEMoverGeometry.Mover mv)
+        {
+            var s = new HashSet<int>();
+            for (int n = mv.FirstNode; n < mv.FirstNode + mv.NodeCount; n++) s.Add(Geo.PolyOfSurf[Geo.Geometry.Nodes[n].Surf]);
+            return s.Count;
+        }
+        public int EmittedTriangles(int moverId)
+        {
+            int n = 0;
+            for (int b = 0; b < _draws.Count && _cut is not null; b++)
+            {
+                long[] keys = _cut[b]?.TriKey ?? _triKey[b];
+                for (int v = 0; v < _lastNv; v++)
+                    foreach (long k in keys)
+                        if ((int)(k >> 32) == moverId && _viewSets[v].Contains(k) && _viewReflag[v].Contains(k) == _isReflag[b]) n++;
+            }
+            return n;
+        }
+        public int CutPolygons(int moverId)
+        {
+            int n = 0;
+            if (_cutFrom is not null) foreach (var k in _cutFrom.Keys) if (k.MoverId == moverId) n++;
+            return n;
+        }
+
         // Per view (WorldFrame.Drawn index = Core frame + 1) the triangles of the brush polygons Core drew there.
         readonly List<HashSet<long>> _viewSets = new(), _viewReflag = new();
+        int _lastNv;
         void EmitViews(WorldFrame frame)
         {
             _out.Clear();
             int nv = frame.Drawn?.Count ?? 0, used = 0;
+            _lastNv = nv;
             while (_viewSets.Count < nv) { _viewSets.Add(new HashSet<long>()); _viewReflag.Add(new HashSet<long>()); }
             for (int v = 0; v < nv; v++)
             {

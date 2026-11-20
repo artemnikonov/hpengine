@@ -123,7 +123,10 @@ namespace HPEngine
                 SDL_SyncWindow(_w);
                 float d = SDL_GetWindowPixelDensity(_w);
                 if (!(d > 0)) d = 1f;
-                var (mw, mh) = WindowMax();
+                // A judge window (hostIndependentModes: hidden, never on screen) takes the request as is, like the original's
+                // ResizeViewport (no clamp, WinDrv.dll.c:15322-15342): limited by the host's usable display area, the canvas
+                // (and script state read from it, HP2 CutSceneManager.fCurrBorderHeight) followed the Dock and menu bar.
+                var (mw, mh) = _hostIndependentModes ? (sizeX, sizeY) : WindowMax();
                 int w = Math.Min(sizeX, mw), h = Math.Min(sizeY, mh);
                 if (!SDL_SetWindowSize(_w, (int)MathF.Round(w / d), (int)MathF.Round(h / d))) return ViewportResizeOutcome.Rejected;
             }

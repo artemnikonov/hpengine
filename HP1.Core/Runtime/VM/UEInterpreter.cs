@@ -484,7 +484,9 @@ namespace HP1.UEScript
         }
 
         // Original body of a function replaced by the port (UEPortScriptOverrides) —
-        // re-entry with this flag runs the bytecode without the override.
+        // re-entry with this flag runs the bytecode without the override. The flag covers only that one entry: Invoke
+        // clears it, so the same function called again from inside the original body (UWindowWindow.PaintClients paints
+        // its children with PaintClients) is overridden for those calls too (InvokePortOverride's finally restores it).
         [ThreadStatic] static UFunction _portBypass;
 
         // The override closure lives in its own method: inside Invoke the capture
@@ -523,7 +525,8 @@ namespace HP1.UEScript
             // fallback path below.
             if (!fn.FunctionFlags.HasFlag(UELib.Flags.FunctionFlag.Native) && IsEmptyBody(fn))
                 return null;
-            if (!ReferenceEquals(_portBypass, fn) && UEPortScriptOverrides.TryGet(fn, out var portBody))
+            if (ReferenceEquals(_portBypass, fn)) _portBypass = null;
+            else if (UEPortScriptOverrides.TryGet(fn, out var portBody))
                 return InvokePortOverride(obj, fn, args, portBody);
             // Pooled (UEVmPool): released below only on the two normal returns (native body, script body); the
             // stub/import paths and exceptions leave the frame to the GC.
@@ -1005,9 +1008,10 @@ namespace HP1.UEScript
             public readonly int[] KeyIds;     // UEPropKeys.Id(Names[i])
             public readonly bool[] IsOut;
             public readonly bool AnyOut;      // Array.IndexOf(IsOut, true) >= 0
-            public ParamDesc(string[] names, bool[] isOut)
+            public readonly UProperty[] Props;
+            public ParamDesc(string[] names, bool[] isOut, UProperty[] props)
             {
-                Names = names; IsOut = isOut; AnyOut = Array.IndexOf(isOut, true) >= 0;
+                Names = names; IsOut = isOut; AnyOut = Array.IndexOf(isOut, true) >= 0; Props = props;
                 KeyIds = Array.ConvertAll(names, UEPropKeys.Id);
             }
         }
@@ -1018,14 +1022,16 @@ namespace HP1.UEScript
             if (_paramDescs.TryGetValue(fn, out ParamDesc d)) return d;
             var names = new List<string>();
             var outs = new List<bool>();
+            var props = new List<UProperty>();
             foreach (var p in fn.EnumerateFields<UProperty>())
             {
                 if (!p.PropertyFlags.HasFlag(UELib.Flags.PropertyFlag.Parm)) continue;
                 if (p.PropertyFlags.HasFlag(UELib.Flags.PropertyFlag.ReturnParm)) continue;
                 names.Add(p.Name.ToString());
                 outs.Add(p.PropertyFlags.HasFlag(UELib.Flags.PropertyFlag.OutParm));
+                props.Add(p);
             }
-            d = new ParamDesc(names.ToArray(), outs.ToArray());
+            d = new ParamDesc(names.ToArray(), outs.ToArray(), props.ToArray());
             _paramDescs[fn] = d;
             return d;
         }

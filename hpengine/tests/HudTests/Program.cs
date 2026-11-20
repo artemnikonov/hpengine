@@ -8,14 +8,18 @@ static class Program
 {
     static int _fail, _pass;
 
-    // Coronas are 3D-world tiles drawn through the HUD pass: bilinear as D3DDrv DrawTile (MAG/MINFILTER LINEAR at
-    // 0x1000ae9b/0x1000aeaa), point only for PF_NoSmooth; UI quads stay nearest.
+    // Every D3DDrv DrawTile samples bilinear unless PF_NoSmooth (SetBlending HP1 0x1000949c: MAG/MINFILTER =
+    // PF_NoSmooth ? POINT : LINEAR): coronas and UI tiles alike; a quad built without a flag (FillBlack) is nearest.
     static void CoronaSampling()
     {
         var q = ScreenEffects.CoronaQuad(0, 0, 10, 10, 0, 0, 1, 1, 1, 1, 1, "GenFX.LensFlar.Dot_A", noSmooth: false);
         Check("corona-bilinear", q.Smooth && q.Blend == HudBlend.Translucent, q.ToString());
         Check("corona-nosmooth-point", !ScreenEffects.CoronaQuad(0, 0, 10, 10, 0, 0, 1, 1, 1, 1, 1, "x", noSmooth: true).Smooth);
         Check("ui-quad-nearest", !new HudQuad(0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, HudBlend.Opaque, false, null, HudQuadSource.Fill, -1).Smooth);
+        var hb = NewBatcher();
+        var t = hb.Build(Frame(new[] { Tile(0, 0, 8, 8, 0, 0, 64, 32, pf: 0x2), Tile(0, 0, 8, 8, 0, 0, 64, 32, pf: 0x802) }), 640, 480, 0);
+        Check("ui-tile-smooth", t.Count == 2 && t[0].Smooth, t.Count > 0 ? t[0].ToString() : "no quad");
+        Check("ui-tile-nosmooth-point", t.Count == 2 && !t[1].Smooth, t.Count > 1 ? t[1].ToString() : "no quad");
     }
 
     static void Check(string name, bool ok, string detail = "")
@@ -124,9 +128,8 @@ static class Program
         Check("region-ultrawide", HudBatcher.ConsoleRegionWidth(true, 2560, 1080) == 1440, $"{HudBatcher.ConsoleRegionWidth(true, 2560, 1080)}");
     }
 
-    // 1920×1080 -> scale 2. Tile X=10.25 Y=20.5 XL=30.5 YL=11.25:
-    //   x=20.5 y=41 xl=61 yl=22.5 (HP1HudRender.cs:207);
-    //   x0=Round(20.5)=20 (to even), y0=41, x1=Round(81.5)=82, y1=Round(63.5)=64 (:215-216).
+    // 1920×1080 -> scale 2 (D-44). Tile X=10.25 Y=20.5 XL=30.5 YL=11.25: x=20.5 y=41 xl=61 yl=22.5; corners as
+    // D3DDrv DrawTile (HP1 0x10006145: (XB − 0.5) + X, no rounding; the −0.5 is the D3D7 pixel centre): 20.5, 41, 81.5, 63.5.
     // Window U=8 V=4 UL=16 VL=8 on a 64×32 texture: u 8/64..24/64, v 4/32..12/32 (top-left).
     // Colour (255,128,0) -> (1, 128/255, 0), alpha 1 (:51); PolyFlags 0 -> opaque (:224-225).
     static void TileGeometry1080()
@@ -136,15 +139,14 @@ static class Program
         Check("1080-count", q.Count == 1, $"quads {q.Count}");
         if (q.Count != 1) return;
         Check("1080-scale", hb.Scale == 2, $"{hb.Scale}");
-        Rect("1080-rect", q[0], 20, 41, 82, 64);
+        Rect("1080-rect", q[0], 20.5f, 41, 81.5f, 63.5f);
         Uv("1080-uv", q[0], 0.125f, 0.125f, 0.375f, 0.375f);
         Eq("1080-r", 1f, q[0].R); Eq("1080-g", 128f / 255f, q[0].G, 1e-7f); Eq("1080-b", 0f, q[0].B); Eq("1080-a", 1f, q[0].A);
         Check("1080-blend", q[0].Blend == HudBlend.Opaque && !q[0].AlphaClip, q[0].ToString());
         Check("1080-tex", q[0].Texture == "HUD.Icons.Bolt" && q[0].Source == HudQuadSource.Tile && q[0].Command == 0, q[0].ToString());
     }
 
-    // 1280×720 -> scale 1: x0=Round(10.25)=10, y0=Round(20.5)=20 (to even),
-    // x1=Round(40.75)=41, y1=Round(31.75)=32.
+    // 1280×720 -> scale 1: corners are the fractional canvas numbers, 10.25, 20.5, 40.75, 31.75.
     static void TileGeometry720()
     {
         var hb = NewBatcher();
@@ -152,32 +154,30 @@ static class Program
         Check("720-count", q.Count == 1, $"quads {q.Count}");
         if (q.Count != 1) return;
         Check("720-scale", hb.Scale == 1, $"{hb.Scale}");
-        Rect("720-rect", q[0], 10, 20, 41, 32);
-        // 21.5 -> 22 (to even), 22.5 -> 22: distinguishes round-to-even from away-from-zero.
-        q = hb.Build(Frame(new[] { Tile(21.5f, 22.5f, 10f, 10f, 0, 0, 64, 32) }), 1280, 720, 0);
-        Rect("720-to-even", q[0], 22, 22, 32, 32);
+        Rect("720-rect", q[0], 10.25f, 20.5f, 40.75f, 31.75f);
     }
 
-    // Adjacent tiles share the edge: A X=10.6 XL=99.8 -> x0=11, x1=Round(110.4)=110;
-    // B X=110.4 -> x0=110 (HP1HudRender.cs:208-217, the right edge is Round(x+xl), not x0+Round(xl)=111).
+    // Adjacent tiles: A X=10.6 XL=99.8 -> right edge X+XL = 110.4 (float sum, as fadd [ebp+0x18] at 0x100063a5);
+    // B X=110.4 starts there.
     static void AdjacentTiles()
     {
         var hb = NewBatcher();
         var q = hb.Build(Frame(new[] { Tile(10.6f, 0, 99.8f, 10, 0, 0, 64, 32), Tile(110.4f, 0, 50, 10, 0, 0, 64, 32) }), 640, 480, 0);
         Check("adjacent-count", q.Count == 2, $"quads {q.Count}");
         if (q.Count != 2) return;
-        Rect("adjacent-A", q[0], 11, 0, 110, 10);
-        Check("adjacent-shared-edge", q[0].X1 == q[1].X0, $"A.X1={q[0].X1} B.X0={q[1].X0}");
+        Rect("adjacent-A", q[0], 10.6f, 0, 10.6f + 99.8f, 10);
+        Check("adjacent-shared-edge", MathF.Abs(q[0].X1 - q[1].X0) < 1e-4f, $"A.X1={q[0].X1} B.X0={q[1].X0}");
     }
 
-    // XL<=0 before scaling — refused BEFORE the texture (Calls, but not Tiles, :57); a width collapsed
-    // by snapping (X=10.1, XL=0.3 -> 10..Round(10.4)=10) is not drawn (:218).
+    // XL<=0 before scaling — refused BEFORE the texture (Calls, but not Tiles, :57); a sub-pixel tile (X=10.1, XL=0.3)
+    // is drawn as D3DDrv draws it (no refusal in DrawTile; the rasterizer decides coverage).
     static void DegenerateTiles()
     {
         var hb = NewBatcher();
         var q = hb.Build(Frame(new[] { Tile(5, 5, 0, 10, 0, 0, 1, 1), Tile(5, 5, 10, -1, 0, 0, 1, 1),
                                        Tile(10.1f, 0, 0.3f, 10, 0, 0, 1, 1), Tile(0, 0, 4, 4, 0, 0, 1, 1, tex: "No.Such.Tex") }), 640, 480, 0);
-        Check("degenerate-none-drawn", q.Count == 0, $"quads {q.Count}");
+        Check("degenerate-subpixel-drawn", q.Count == 1, $"quads {q.Count}");
+        if (q.Count == 1) Rect("degenerate-subpixel-rect", q[0], 10.1f, 0, 10.1f + 0.3f, 10);
         Check("degenerate-counters", hb.Calls == 4 && hb.Tiles == 2 && hb.TexHit == 1 && hb.TexMiss == 1,
             $"calls={hb.Calls} tiles={hb.Tiles} hit={hb.TexHit} miss={hb.TexMiss}");
         Check("missing-texture-named", hb.MissingTextures.Contains("No.Such.Tex"), string.Join(",", hb.MissingTextures));

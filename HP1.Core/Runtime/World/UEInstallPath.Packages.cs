@@ -148,10 +148,15 @@ namespace HP1.UEScript
             var names = new List<string>();
             if (dir is not null)
                 foreach (string e in Directory.EnumerateFiles(dir))
-                    if (WildMatch(pattern, 0, Path.GetFileName(e), 0)) names.Add(Path.GetFileName(e));
+                    if (!IsMacMetadata(Path.GetFileName(e)) && WildMatch(pattern, 0, Path.GetFileName(e), 0)) names.Add(Path.GetFileName(e));
             names.Sort(StringComparer.OrdinalIgnoreCase);
             return names;
         }
+
+        // NOT ORIGINAL (author 2026-11-18): "._<name>" files are macOS AppleDouble metadata (written next to every file
+        // copied from a Mac to FAT/exFAT, SMB or a Mac-made tar), never game data: "._Core.u" matched *.u and the boot
+        // failed ("not an Unreal package"). The original never met them; the port skips them in every package listing.
+        public static bool IsMacMetadata(string fileName) => fileName.StartsWith("._", StringComparison.Ordinal);
 
         static bool WildMatch(string p, int i, string n, int j)
         {
@@ -179,6 +184,7 @@ namespace HP1.UEScript
                 foreach (string f in Directory.EnumerateFileSystemEntries(dir))
                 {
                     string leaf = Path.GetFileName(f);
+                    if (IsMacMetadata(leaf)) continue;
                     bool isFile = System.IO.File.Exists(f);
                     if (isFile) { Files.Add(f); _exact.Add(leaf); }
                     _first.TryAdd(leaf, isFile ? f : null);   // File: the first matching entry, null when it is a directory

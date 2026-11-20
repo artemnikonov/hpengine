@@ -1,5 +1,69 @@
 # Changelog
 
+## 0.5.0-beta — 2026-11-20
+
+Updating from 0.4.0: the launcher updates itself; your game, saves, settings and mods stay where they are.
+
+New — Harry Potter and the Chamber of Secrets (first beta):
+
+- The launcher's **Harry Potter 2** tab is open: drop your copy of the second game (the installed game folder or the
+  English retail CD) onto the window and click **Install**, then **New Game** or **Load Game** from the tab. Tested on
+  the English retail release and the Russian EA "Hit-Parade" edition; re-releases with changed game scripts install
+  and run with a warning. See the README's [Requirements](README.md#harry-potter-2-tested-editions) and [Install](README.md#install).
+- It runs on the same engine as the first game: widescreen without stretching, smooth motion at high frame rates,
+  gamepad support (Back opens the map, B skips a cut-scene, the d-pad picks the duel spell), and Difficulty shown on
+  the options input page for every player (not original). See [differences](docs/differences.md).
+- It is installed as its own copy with its own saves and settings (`HP2Data`, see the README); your original
+  installation is not changed. Saves are in HPEngine's own format: start a new game (the original's `.usa` saves are
+  not read).
+- Widescreen: the loading screen is a centred 4:3 picture like the menus at every resolution; the shop (vendor) bar
+  keeps the world full-width (not original). Alt+Enter switches fullscreen; the options page shows the mode in use and
+  the choice is kept for the next start.
+
+Known limits of Chamber of Secrets in this beta:
+
+- The campaign has not yet been played through to the end on HPEngine; please report anything that stops you.
+- Mods are not tested yet, and the launcher cannot switch them on and off yet.
+- Rebinding keys or buttons on its Controls page is not available yet.
+
+Fixed (Philosopher's Stone):
+
+- Loading a save made with a mod (for example Restored) while that mod is switched off restarts the level as before, but
+  Harry no longer dies at once: the restart now finishes the level start the game itself does (Harry's health is
+  topped up to half, as at every level start). Your save slots are still not overwritten by such a restart (not
+  original: the original has no mod switch).
+- If the save the game reloads after Harry dies (the level-start save) cannot be loaded — for example it was made on a
+  map of a mod that is now off — the current level restarts from its beginning instead of retrying forever with Harry
+  lying on the floor (not original: the original keeps retrying).
+- Harry's shadow moves smoothly with Harry at high frame rates instead of stepping at 60 Hz.
+- Glows drawn on moving actors (the Bludger's and the Snitch's halos), particles carried by a moving emitter, and HUD
+  items (the cut-scene bars, sliding text) move smoothly at high frame rates instead of stepping at 60 Hz.
+- Launchers: a game error is shown as plain text in a banner below the page; **Open log** opens the log of that run and
+  × dismisses the banner. On Windows and Linux the banner looks as on macOS.
+- The game's blue "Saving…" frame is shown while a game is saved (it was never drawn: the game went on at once).
+- The first time the pause menu opens no longer stutters (about 0.1 s).
+
+Fixed (both games):
+
+- macOS: a game started from the launcher keeps the keyboard focus (before, it often stayed behind until a click).
+- Launchers: the Harry Potter 2 pages (main menu, new game, load game) are in English like the rest of the launcher,
+  whatever the game's language (they were partly Russian with the Russian edition).
+- Russian editions of both games: menu, book and on-screen text is drawn with the book-style font Philosopher (with
+  Cyrillic) instead of the plain Liberation Sans (**not original**: the original draws Windows' MS Sans Serif); mods that
+  ask for another font get it too.
+- macOS: the game started from the launcher gets keyboard and mouse at once, without a click (the system cursor stayed
+  visible after the splash screen).
+- Gamepad: the left stick works exactly like the arrow keys (no slow walk at a partial tilt); the right stick turns and
+  aims fast by default (Settings: `GamepadLookSpeed`), and the Sensitivity slider applies to it.
+- Steam Deck: the on-screen keyboard no longer opens when the game starts.
+- Game folders copied from a Mac (with hidden `._` files next to every file) install and start; such a copy could fail
+  to start, for example on the Steam Deck.
+- No more occasional single-frame freezes (the game asked the system for the display's refresh rate every frame).
+- After the splash the game's first moments are shown, not played behind a blank window.
+- Menus and HUD are placed to the sub-pixel as in the original instead of rounded to whole pixels.
+- Surfaces lying almost on top of each other (candle bases on tables, plates on walls) no longer flicker: depth is
+  computed as precisely as the original's Direct3D renderer does.
+
 ## 0.4.0-beta — 2026-11-17
 
 Updating from 0.3.0:
@@ -66,12 +130,6 @@ Fixed:
 - More of the original engine is available to mods: config arrays and per-object config files, object/class/struct
   values in property text and console commands, console `SET <class> <property> <value>`, fonts with stored
   properties, the original's localized True/False words in other languages.
-
-Known issues:
-
-- Loading a save made with a mod (for example Restored) while that mod is switched off restarts the level, and Harry
-  can die at once, with a death reload that never completes. Switch the mod back on to load such a save. A fix is
-  planned for 0.4.1.
 
 ## 0.3.0-beta — 2026-11-15
 

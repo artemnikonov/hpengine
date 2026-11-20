@@ -192,12 +192,12 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## Liberation Sans 2.1.5 — SIL Open Font License 1.1
+## Philosopher 2.001 — SIL Open Font License 1.1
 
-`HP1.Core/Fonts/LiberationSans-Regular.ttf`, unmodified, embedded in HP1.Core. It stands in for the Windows system font
-"MS Sans Serif" that the game asks for and that no game install contains (not original). Reserved Font Names:
-"Liberation", "Arimo". The full license text is in `HP1.Core/Fonts/` next to the font.
-https://github.com/liberationfonts/liberation-fonts
+`HP1.Core/Fonts/Philosopher-Regular.ttf`, unmodified, embedded in HP1.Core. Copyright 2011 The Philosopher Project
+Authors. It stands in for the Windows system font "MS Sans Serif" that the game asks for and that no game install
+contains (not original). The full license text is in `HP1.Core/Fonts/` next to the font.
+https://github.com/alexeiva/philosopher
 
 ## Cormorant Garamond Bold (Cormorant v4.002) — SIL Open Font License 1.1
 

@@ -19,6 +19,8 @@ namespace HP1.UEScript
             public readonly UEActorLighting.Exported[] Lights = new UEActorLighting.Exported[UEActorLighting.ExportCap];
             public int Count;
             public UEActorLighting.ActorInputs In;
+            // DrawLodMesh accepted no face in this frame (MeshTriangleOrder.AnyAccepted): no SetupForActor, nothing drawn.
+            public bool NoFaces;
         }
 
         public readonly UEActorLighting Lighting = new();
@@ -46,6 +48,7 @@ namespace HP1.UEScript
         public int[] TriangleOrder(in ActorSnapshot a, int view, int[] triWedge, int[] wedgeVertex, int[] triMaterial,
             int[] materialFlags, UEVector[] points)
         {
+            if (_sets.TryGetValue((a.ObjectId, view), out Set ns) && ns.NoFaces) return Array.Empty<int>();
             // A plain UMesh: DrawMesh's UMesh branch decides its triangle list itself (MeshTriangleOrder.UMeshOrder), always.
             if (_rt?.FindActorById(a.ObjectId)?.GetProp(PK.Mesh) is UEResourceRef { Class: var mc } mr
                 && mc.Equals("Mesh", StringComparison.OrdinalIgnoreCase))
@@ -112,6 +115,19 @@ namespace HP1.UEScript
             // 0x10b32ea1 the actor, 0x10b33085 the weapon): its SetupForActor call follows the pawn's.
             Dictionary<int, int> weaponOf = rt.FrameProducer?.WeaponPawns;
             ReadOnlySpan<ActorSnapshot> span = frame.ActorSpan;
+            // Each pawn's weapons as span indices in span order: the same calls in the same order as scanning the whole
+            // span per actor (that scan was actors^2 per frame: HP2 Entryhall_hub ticks 50-100 ms).
+            Dictionary<int, List<int>> weaponsOf = null;
+            if (weaponOf is { Count: > 0 })
+            {
+                weaponsOf = new Dictionary<int, List<int>>();
+                for (int w = 0; w < span.Length; w++)
+                    if (weaponOf.TryGetValue(span[w].ObjectId, out int pawn))
+                    {
+                        if (!weaponsOf.TryGetValue(pawn, out List<int> l)) weaponsOf[pawn] = l = new List<int>();
+                        l.Add(w);
+                    }
+            }
             foreach (UESceneNode node in post)
             {
                 int view = viewOf[node];
@@ -120,16 +136,17 @@ namespace HP1.UEScript
                     ref readonly ActorSnapshot a = ref span[i];
                     if (weaponOf is not null && weaponOf.ContainsKey(a.ObjectId)) continue;
                     AddIfDrawn(in a);
-                    if (weaponOf is null || weaponOf.Count == 0) continue;
-                    for (int w = 0; w < span.Length; w++)
-                        if (weaponOf.TryGetValue(span[w].ObjectId, out int pawn) && pawn == a.ObjectId) AddIfDrawn(in span[w]);
+                    if (weaponsOf is not null && weaponsOf.TryGetValue(a.ObjectId, out List<int> ws))
+                        foreach (int w in ws) AddIfDrawn(in span[w]);
                 }
                 void AddIfDrawn(in ActorSnapshot a)
                 {
                     if (a.Destroyed || !drawn.Contains(a.ObjectId)) return;
                     if (!frame.ActorViews.SetOf.TryGetValue(a.ObjectId, out int si))
                         throw new InvalidOperationException($"actor lights: mesh {a.Name} drawn without frame membership (WorldFrame.ActorViews)");
-                    if (Array.IndexOf(frame.ActorViews.Sets[si], view) >= 0) Add(rt, in a, view, node, viewportSeconds);
+                    if (Array.IndexOf(frame.ActorViews.Sets[si], view) < 0) return;
+                    if (FacesAccepted(rt, in a, view, node)) Add(rt, in a, view, node, viewportSeconds);
+                    else { Set n = NextSet(); n.Count = 0; n.NoFaces = true; _sets[(a.ObjectId, view)] = n; }
                 }
             }
             // The tags SetupForActor wrote on the light actors this frame (UEActorLighting.TagsTaken), as ints on the actors.
@@ -143,11 +160,60 @@ namespace HP1.UEScript
             Lighting.TagsTaken.Clear();
         }
 
-        void Add(UELevelRuntime rt, in ActorSnapshot a, int view, UESceneNode node, double viewportSeconds)
+        Set NextSet()
         {
             Set s = _used < _pool.Count ? _pool[_used] : null;
             if (s is null) { s = new Set(); _pool.Add(s); }
             _used++;
+            s.NoFaces = false;
+            return s;
+        }
+
+        // DrawLodMesh's face-loop gate (MeshTriangleOrder.AnyAccepted) for the LOD part frame `view` draws, on that part's
+        // tick pose; a plain UMesh: DrawMesh's own UMesh branch and its accepted count (MeshTriangleOrder.UMeshOrder).
+        bool FacesAccepted(UELevelRuntime rt, in ActorSnapshot a, int view, UESceneNode node)
+        {
+            MeshPose mp = default; bool found = false;
+            foreach (MeshPose m in _frame.MeshPoses) if (m.ObjectId == a.ObjectId) { mp = m; found = true; break; }
+            if (!found) throw new InvalidOperationException($"actor lights: mesh {a.Name} drawn without a pose (WorldFrame.MeshPoses)");
+            UEMeshSource src = rt.MeshSource;
+            string cls = src?.Find(mp.MeshPath)?.Class;
+            int[] wedgeVertex, materialFlags, tri, mat;
+            if (string.Equals(cls, "SkeletalMesh", StringComparison.OrdinalIgnoreCase))
+            {
+                UERawSkeletalMesh r = src.Skeletal(mp.MeshPath);
+                (wedgeVertex, materialFlags, tri, mat) = (r.wedgeVertex, r.materialFlags, r.triWedge, r.triMaterial);
+            }
+            else if (string.Equals(cls, "LodMesh", StringComparison.OrdinalIgnoreCase))
+            {
+                UERawVertexMesh r = src.Vertex(mp.MeshPath);
+                (wedgeVertex, materialFlags, tri, mat) = (r.wedgeVertex, r.materialFlags, r.triWedge, r.triMaterial);
+            }
+            else if (string.Equals(cls, "Mesh", StringComparison.OrdinalIgnoreCase))
+            {
+                if (rt.FindActorById(a.ObjectId)?.GetProp(PK.Mesh) is not UEResourceRef mr)
+                    throw new InvalidOperationException($"actor lights: plain mesh {a.Name} without a live Mesh");
+                MeshTriangleOrder.UMeshOrder(node, rt.MeshCatalog.GetVertexMesh(mr.Name, mr.ObjectPath), mp.Points,
+                    rt.ReadSpanBased(), _viewerId != 0 && a.OwnerId == _viewerId, out int acc);
+                return acc > 0;
+            }
+            else throw new InvalidOperationException($"actor lights: mesh {a.Name} of class {cls ?? "?"} ({mp.MeshPath}): DrawLodMesh face gate not read");
+            UEVector[] points = mp.Points;
+            if (mp.LodParts is { Count: > 0 } parts)
+            {
+                MeshLodPart? part = null;
+                foreach (MeshLodPart pt in parts) if (Array.IndexOf(_frame.ActorViews.Sets[pt.ViewSet], view) >= 0) { part = pt; break; }
+                if (part is not { } p) throw new InvalidOperationException($"actor lights: mesh {a.Name}: frame {view} in no LOD part");
+                if (p.Verts >= 0) (tri, mat) = src.LodFaces(mp.MeshPath, p.Verts);
+                points = p.Points ?? points;
+            }
+            return MeshTriangleOrder.AnyAccepted(node, tri, wedgeVertex, mat, materialFlags, points,
+                MeshTriangleOrder.ActorPolyFlags(a.Style, a.Opacity));
+        }
+
+        void Add(UELevelRuntime rt, in ActorSnapshot a, int view, UESceneNode node, double viewportSeconds)
+        {
+            Set s = NextSet();
             s.In = UEActorLighting.Inputs(a, rt.ZoneAmbientHSB(a.ZoneNumber), viewportSeconds);
             // Unlit actors and actors in leaf -1 get no list: SetupForActor gates (UEActorLighting.Gather).
             // Dispatched dynamics: the frame's sprite of the actor carries LeafLights[iLeaf] (UESprite.LeafLights). A

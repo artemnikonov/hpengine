@@ -90,7 +90,7 @@ were read in the disassembly (`../HP1.Core/Runtime/World/UEEdition.cs` header li
 
 - **Font.** The Russian `HPConsole.SetupLanguage` asks for native fonts (`CreateNativeFont('MS Sans Serif', 24/16/10/12)`),
   which the original draws with GDI through `UWindowsViewport::DrawString` (box-measuring `DrawText`, word-break, optional
-  centre) for `UCanvas::WrappedPrint` (native-font branch 0x10387d80..0x10387e08) and `FUN_10388530`. The port substitutes the bundled Liberation Sans for that
+  centre) for `UCanvas::WrappedPrint` (native-font branch 0x10387d80..0x10387e08) and `FUN_10388530`. The port substitutes the bundled Philosopher (Liberation Sans before 0.5.0) for that
   face (D-39, not original), and since 0.4.0 for any other face a mod asks for; wrap points can differ, and the
   underline of an `&` mnemonic is not drawn. The glyphs are drawn antialiased at the interface scale (0.4.0, not
   original: the original's GDI text is aliased pixels at the canvas resolution); the layout (advances, line height,

@@ -92,6 +92,15 @@ namespace HP1.UEScript
             //    USubsystem.h:198 `TextureDetail = "High"`.
             //
             // Result: byte 0 -> Details(0) -> "High".
+            //
+            // HP2 (hgame.u asks the same key; [WinDrv.WindowsClient] of HP2 default.ini has none) — the same chain on HP2's
+            // own bodies: UClient::StaticConstructor [HP2 Engine 0x10303fdf -> body 0x1038e5f0, Engine.dll.c:245014-245135] fills
+            // Details High, Medium, Low, Ultra Low (UTF-16 at 0x104d8e1c / 0x104d8e0c / 0x104d8e00 / 0x104d8de8) and
+            // declares TextureDetail UByteProperty +0x7c, Display, 0x4000; UClient::UClient [HP2 0x10304070] writes
+            // 0x2c/0x30/0x34, UWindowsClient::UWindowsClient [HP2 WinDrv] 0xa0/0x108/0x174/0x178/0x17c/0xfc (disasm
+            // stores; HP2 drops HP1's 0x180..0x186 hotkey atoms, not properties); UWindowsClient::StaticConstructor [HP2
+            // WinDrv 0x11101177] declares 0xa4..0xc8 only. Core UClass::Register, InitClassDefaultObject, InitProperties:
+            // HP2 = HP1 (tools/hp2/body_diff.py: identical but assert line numbers / the reviewed varargs formatter).
             new Entry("WinDrv.WindowsClient", "TextureDetail", "High",
                 "Engine.dll.c:121814-121845 (enum Details: High,Medium,Low,UltraLow); "
                 + "Engine.dll.c:121917-121924 (UByteProperty TextureDetail @0x7c, Display, config); "

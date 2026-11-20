@@ -1210,12 +1210,32 @@ namespace HP1.UEScript
             _capturedUrl = target;
             url = target.Map + target.OptionsString;
             _travelTakenLevel = level; _travelTakenUrl = next;
+            _serverTravelBrowsing = true;
             // The new map's package is named after URL.Map (see LevelPackageName).
             _pendingLevelPackage = System.IO.Path.GetFileNameWithoutExtension(target.Map);
             Log($"travel_take next={next} url={url} items={items} restart={_travelRestart}");
             return true;
         }
         UEObject _travelTakenLevel; string _travelTakenUrl;
+        bool _serverTravelBrowsing;
+
+        // Original: Engine.dll ?Tick@UGameEngine@@UAEXM@Z [HP1 0x103a11f0..0x103a124c] [HP2 0x103aa329..0x103aa38d] (the
+        // server-travel block right after `call [edx+0xb0]` Browse): GLevel is RE-READ (`mov ebx,[ebx+0x70]` HP1,
+        // `mov edi,[edi+0x78]` HP2) and "" is written to ITS LevelInfo.NextURL (+0x49c HP1, +0x4f8 HP2). After a load that is
+        // the NEW level: a ServerTravel its script made while LoadMap ran (SpawnPlayActor -> Login / TravelPostAccept, e.g.
+        // HP2 Grounds_hub: SetLocation to the SmartStart touches the door Trigger7 -> TriggerChangeLevel1) is dropped. After
+        // a refused load it is the old level's own request. The client-travel block (TravelURL) does not write NextURL.
+        internal void EndServerTravelBrowse(UEInterpreter interp)
+        {
+            if (!_serverTravelBrowsing) return;
+            _serverTravelBrowsing = false;
+            UEObject level = interp.GetLevelInfo();
+            if (level is null) return;
+            if (level.GetProp(PK.NextURL) is string dropped && dropped.Length != 0)
+                Log($"travel_nexturl_cleared level={level.GetProp(PK.Name)} dropped={dropped}");
+            level.Props["NextURL"] = "";
+            _travelTakenLevel = null; _travelTakenUrl = null;
+        }
 
         // Client travel block of UGameEngine::Tick (0x103a1346-0x103a1622): Viewport(0).TravelURL non-empty ->
         // Browse(FURL(LastURL, TravelURL, TravelType)) and TravelURL = "". The request is queued by OPEN
@@ -1250,7 +1270,7 @@ namespace HP1.UEScript
         bool _openRequestItems;
 
         // Fixture seam: drop a captured but not yet loaded travel.
-        internal void ClearTravelCapture() { _capturedUrl = null; _travelRestart = false; _openRequestUrl = null; _openRequestType = UEUrl.Partial; _openRequestItems = false; _travelTakenLevel = null; _travelTakenUrl = null; }
+        internal void ClearTravelCapture() { _serverTravelBrowsing = false; _capturedUrl = null; _travelRestart = false; _openRequestUrl = null; _openRequestType = UEUrl.Partial; _openRequestItems = false; _travelTakenLevel = null; _travelTakenUrl = null; }
 
         // Set by AdoptLoadedUrl before ClientInit. Shipped SpawnPlayActor always receives LoadMap's URL; a missing one is a
         // port caller outside the bootstrap — loud, no cfg.Portal stand-in.
@@ -1663,8 +1683,11 @@ namespace HP1.UEScript
         internal static object ApplyStructDelta(object target, TravelStructDelta delta, UELib.Core.UStruct st, string where, out bool failed)
         {
             failed = false;
-            if (target is null)
-                throw new InvalidOperationException($"travel_accept: {where} — the receiving actor has no struct");
+            // An absent struct value (the port keeps Props sparse) is the zero struct: the original imports into the
+            // receiver's property memory, which always exists. `st` is resolved (StructOf), so an imported struct (Core
+            // BoundingBox in hgame HDiffindo.bbArea) gets its nested members (Min, Max) — ZeroStructValue(prop) of the
+            // import stub would not, and the nested delta would have nothing to write into.
+            target ??= UEObject.ZeroStructValue(st);
             foreach (var f in delta.Fields)
             {
                 int br = f.Key.IndexOf('[');

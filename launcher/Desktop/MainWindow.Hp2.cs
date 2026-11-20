@@ -25,12 +25,17 @@ public sealed partial class MainWindow
     readonly StackPanel _hp2Panel = new() { Name = "Hp2Panel", Spacing = 12, IsVisible = false };
     readonly Button _tabHp1 = new() { Name = "TabHp1" }, _tabHp2 = new() { Name = "TabHp2" };
 
-    // The HP2 game folder the player chose (an installed HP2: System/Engine.dll and System/Startup.int), kept beside the
-    // HP1 data directory; HP1's data is not touched.
+    // HP2's install root: HP1Setup --game hp2 installs here (<HP2Data>/game, beside HP2's saves and settings); installed
+    // once its marker is written (the copy's last step), as HP1's.
+    string Hp2Game => Path.Combine(Path.GetDirectoryName(Hp2FrontEnd.SaveDir(_game)), "game");
+    bool Hp2Installed => File.Exists(Path.Combine(Hp2Game, ".hp1-installed"));
+    // Without an installed copy: an HP2 game folder the player chose (an installed HP2: System/Engine.dll and
+    // System/Startup.int; Menu "Change game folder…"), kept beside the HP1 data directory; HP1's data is not touched.
     string Hp2RootFile => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(_game)) ?? _game, "hp2-root.txt");
     string Hp2Root
     {
         get { if (!Hp2Release.Available) return null;   // the release switch off: the saved folder is ignored
+              if (Hp2Installed) return Hp2Game;
               try { var r = File.Exists(Hp2RootFile) ? File.ReadAllText(Hp2RootFile).Trim() : null; return Hp2Valid(r) ? r : null; } catch (IOException) { return null; } }
     }
     static bool Hp2Valid(string r) => r != null && File.Exists(Path.Combine(r, "System", "Engine.dll")) && File.Exists(Path.Combine(r, "System", "Startup.int"));
@@ -46,9 +51,16 @@ public sealed partial class MainWindow
                 new TextBlock { Text = text, VerticalAlignment = VerticalAlignment.Center },
                 new TextBlock { FontSize = 12, FontWeight = FontWeight.Medium, Foreground = Th.Dim, VerticalAlignment = VerticalAlignment.Center } } };
         }
-        _tabHp1.Click += (_, _) => { _hp2Tab = false; _modsOpen = false; Refresh(); };
-        _tabHp2.Click += (_, _) => { if (!Hp2Release.Available) return; _hp2Tab = true; _hp2Page = "Main"; Hp2Scan(); Refresh(); };
+        _tabHp1.Click += (_, _) => { if (_running) return; SwitchTo(false); _modsOpen = false; Refresh(); };
+        _tabHp2.Click += (_, _) => { if (!Hp2Release.Available || _running) return; SwitchTo(true); _modsOpen = false; _hp2Page = "Main"; Hp2Scan(); Refresh(); };
         return new[] { _tabHp1, _tabHp2 };
+    }
+
+    // The setup state (chosen files, steps, warning, edition) is the selected tab's game: a switch starts the other's afresh.
+    void SwitchTo(bool hp2)
+    {
+        if (_hp2Tab == hp2) return;
+        _hp2Tab = hp2; _inputs.Clear(); _step = -1; _warning = null; _report = null; _edition = Edition();
     }
 
     // The dialog's OnInitDialog: the slot scan (MakeDirectory, used/unused, an unused slot cleared) — each time the menu
@@ -82,34 +94,27 @@ public sealed partial class MainWindow
     {
         _setupPanel.IsVisible = _readyPanel.IsVisible = _modsPage.IsVisible = _actions.IsVisible = _resumeNote.IsVisible = false; _hp2Panel.IsVisible = true;
         var root = Hp2Root;
-        _title.Text = Hp2Title;
-        var (st, col, icon) = _playing ? ("Playing", Th.Ok, Check) : root != null ? ("Ready to play", Th.Ok, Check) : ("No game folder", Th.Dim, Ring);
+        _title.Text = Hp2Title; _editionDetail.IsVisible = false;
+        if (root == null || _running || _inputs.Count > 0)
+        {
+            // Not installed, or files chosen to install (again): HP1's setup view, installing HP2 (HP1Setup --game hp2).
+            _hp2Panel.IsVisible = _metaExtra.IsVisible = _startMapBox.IsVisible = false; _hero.IsVisible = _setupPanel.IsVisible = _actions.IsVisible = true;
+            var (s, c, i) = _running ? ("Installing…", Th.Accent, Spark) : Hp2Installed ? ("Ready to play", Th.Ok, Check) : ("Not installed", Th.Dim, Ring);
+            Status(s, c, i);
+            _heroSub.Text = "Set up once from your own copy of the game. Nothing of the game is included."; _heroSub.IsVisible = !Hp2Installed && !_running;
+            RefreshSetup(Hp2Installed, true, false);
+            return;
+        }
+        var (st, col, icon) = _playing ? ("Playing", Th.Ok, Check) : ("Ready to play", Th.Ok, Check);
         Status(st, col, icon);
-        _chipBox.IsVisible = _editionChip.IsVisible = _editionDetail.IsVisible = false;
+        RefreshSetup(Hp2Installed, false, false);   // the edition chip (an installed copy)
         int used = _hp2Slots.Count(s => s.Used);
-        _metaExtra.Text = used == 1 ? "1 saved game" : $"{used} saved games"; _metaExtra.IsVisible = root != null;
-        _heroSub.Text = "Point HPEngine at the folder where the game is installed."; _heroSub.IsVisible = root == null;
-        _hero.IsVisible = root == null || _hp2Page == "Main";
+        _metaExtra.Text = used == 1 ? "1 saved game" : $"{used} saved games"; _metaExtra.IsVisible = true;
+        _heroSub.IsVisible = false;
+        _hero.IsVisible = _hp2Page == "Main";
         UpdateBanners();
         _hp2Panel.Children.Clear();
         _hp2Panel.Margin = new Thickness(24, _hero.IsVisible ? 20 : 16, 24, 0);
-        if (root == null)
-        {
-            var choose = Hp2Button("Hp2ChooseFolder", "Choose game folder…", "gold", !_playing);
-            choose.HorizontalAlignment = HorizontalAlignment.Center; choose.Margin = new Thickness(0, 6, 0, 0);
-            choose.Click += async (_, _) => await Hp2ChooseFolder();
-            var folder = Glyph24(Folder, Th.Accent, 30); folder.HorizontalAlignment = HorizontalAlignment.Center;
-            var zone = new Grid { MinHeight = 208 };
-            zone.Children.Add(new Rectangle { RadiusX = 14, RadiusY = 14, StrokeThickness = 2, StrokeDashArray = new Avalonia.Collections.AvaloniaList<double> { 4, 3 }, Stroke = Th.Stroke, Fill = new SolidColorBrush(Colors.Black, 0.18) });
-            zone.Children.Add(new StackPanel { Margin = new Thickness(16), Spacing = 8, VerticalAlignment = VerticalAlignment.Center, Children = { folder,
-                new TextBlock { Text = "Choose your installed game folder", FontSize = 16, FontWeight = FontWeight.SemiBold, HorizontalAlignment = HorizontalAlignment.Center },
-                new TextBlock { Text = "The folder that contains System\\Engine.dll — for example C:\\Program Files\\EA Games\\Harry Potter and the Chamber of Secrets", FontSize = 13, Foreground = Th.Dim,
-                    MaxWidth = 400, TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap, HorizontalAlignment = HorizontalAlignment.Center },
-                choose } });
-            _hp2Panel.Children.Add(zone);
-            _primary = choose;
-            return;
-        }
         string L(string page, string key) => Hp2FrontEnd.Localize(root, "Startup", page, key);
         string section = "IDDIALOG_FrontEndPage" + (_hp2Page == "Main" ? "MainMenu" : _hp2Page);
         // A sub-page: Back + the page's title (Startup.int) in the serif, its instructions under it.
@@ -204,6 +209,7 @@ public sealed partial class MainWindow
             var psi = new ProcessStartInfo(Exe("HPEngine")) { WorkingDirectory = root, RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true, UseShellExecute = false, CreateNoWindow = true };
             foreach (var a in Hp2FrontEnd.PlayArgs(root, Hp2FrontEnd.SaveDir(_game), cmdline)) psi.ArgumentList.Add(a);
             var said = new List<string>();
+            _hp2RunLogsBefore = GameScope.RunLogs(GameScope.LogsDir(_game, true));
             var p = Process.Start(psi); _play = p; p.StandardInput.Close();
             p.OutputDataReceived += (_, e) => { lock (log) if (e.Data != null) { log.WriteLine(e.Data); said.Add(e.Data); } };
             p.ErrorDataReceived += (_, e) => { lock (log) if (e.Data != null) { log.WriteLine(e.Data); said.Add(e.Data); } };
@@ -215,7 +221,7 @@ public sealed partial class MainWindow
                 Dispatcher.UIThread.Post(() =>
                 {
                     _playing = false;
-                    if (p.ExitCode != 0) lock (log) _hp2Error = _hp2RunError = EngineError.Banner(said, p.ExitCode, $"Open log, or {logFile}.");
+                    if (p.ExitCode != 0) lock (log) _hp2Error = _hp2RunError = EngineError.Banner(said, p.ExitCode);
                     _hp2Page = "Main"; Hp2Scan(); Refresh();
                 });
             });

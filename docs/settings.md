@@ -20,6 +20,10 @@
   | Start / Menu | the book (pause menu) |
   | d-pad | in menus: move between controls; free to bind in the game |
 
+  Chamber of Secrets (HP2) differs: A also does the broom action; B skips a cut-scene; **Back / View** opens the map;
+  the d-pad picks the duel spell (Left Rictusempra, Down Mimblewimble, Right Expelliarmus; Up drinks Wiggenweld and, in a duel, cycles the spell); the left
+  stick also steers spell lessons.
+
   With a gamepad in use, **Options → Controls** shows the gamepad's buttons under their own names (Xbox, PlayStation
   or Nintendo) and binds gamepad buttons; with the keyboard it is the original page. A button you bind stops doing
   what it did before. B, Start and the right stick are fixed. Camera and menu cursor speed follow the mouse
@@ -40,7 +44,7 @@ Optional keys in the `[HPEngine]` section of `<game folder>/HPEngineData/Default
 | `UIScaleStep` | `0` | the Interface Size choice above (`-1`, `0`, `1`; saved by the menu) |
 | `SmoothMotion` | `True` | `False`: no interpolated frames between game ticks, one frame per tick |
 | `Anisotropy` | `16` | anisotropic texture filtering, `0` or `1` turns it off |
-| `GamepadLookSpeed` | `8` | right stick speed (camera and menu cursor), before the Sensitivity slider |
+| `GamepadLookSpeed` | `24` (HP2 `72`) | right stick speed at full tilt, pixels per 1/60 s (camera; the menu cursor moves 8 at the default), before the Sensitivity slider |
 | `GamepadDefaults` | `True` | `False`: no default gamepad bindings, only the ones you bind |
 
 Linux: the game prefers X11 (XWayland) to native Wayland; set the environment variable `SDL_VIDEO_DRIVER=wayland` to

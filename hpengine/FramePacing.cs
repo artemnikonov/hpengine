@@ -7,7 +7,9 @@
 // next tick. Display latency is at most one logic tick. Presentation only: nothing is written to Core.
 //
 // Interpolated: camera and level clock (here), skeleton and wand poses (ActorBuilder), movers (SdlMovers),
-// particles (shifted back along velocity). Sprites, decals and static meshes run at the logic rate.
+// particles (by Core identity; newborns shifted back along velocity), decals (shifted with their own record,
+// Interp.Decals), sprite tiles (actor Location, SpriteBuilder.Alpha), canvas items (Interp.Hud). Audit of every category:
+// hpengine/tests/InterpAuditTests.
 using HP1.UEScript;
 
 namespace HPEngine
@@ -122,7 +124,8 @@ namespace HPEngine
 
         static bool CameraLerps(in CameraSnapshot a, in CameraSnapshot b, float t)
             => !(t >= 1f || !a.Valid || !b.Valid || a.ViewActorId != b.ViewActorId
-                 || IsCut(a.Location, b.Location) || IsCut(a.Rotation, b.Rotation));
+                 || IsCut(a.Location, b.Location) || IsCut(a.Rotation, b.Rotation)
+                 || (a.FovAngle < 180f) != (b.FovAngle < 180f));   // Proj.Z changes sign: a lerp would pass the collapsed 180
 
         // The camera the window draws a display frame from: a frame without one (the held loading screen of the browsing
         // tick after a travel or load, UGameEngine::Tick returns after Browse) keeps the last drawn camera; the travel gate
@@ -136,22 +139,160 @@ namespace HPEngine
                 Lerp(a.FovAngle, b.FovAngle, t), b.BehindView);
         }
 
-        // Particle without identity: back along its own velocity by the missing tick fraction (dt = logic step), and its
-        // spin back by the same time (UParticle::Update advances SpinPos += dt·SpinRate, as Pos by Vel), otherwise the
-        // billboard turns at the logic rate while it moves at the draw rate. The View (the DrawParticleSystem call that kept
-        // it) stays: without it every view of the emitter drew every call's particles (doubled in a mirror between ticks).
-        public static IReadOnlyList<ParticleInstance> Particles(IReadOnlyList<ParticleInstance> cur, float t, float dt)
+        // Particle between ticks. Drawn in both ticks (same Core particle: ParticleInstance.Serial, emitter and view): its
+        // position is lerped between the two ticks — a particle the emitter carries (HP2 duel spells: Vel 0, moved with the
+        // flying emitter) otherwise stepped at the logic rate (InterpAuditTests, Duel01). A move above CutDistance is a cut
+        // (the tick's). Born this tick (no previous position): back along its own velocity by the missing tick fraction
+        // (dt = logic step). The spin goes back by the same time in both cases (UParticle::Update advances SpinPos +=
+        // dt·SpinRate), otherwise the billboard turns at the logic rate while it moves at the draw rate. The View (the
+        // DrawParticleSystem call that kept it) stays: without it every view of the emitter drew every call's particles
+        // (doubled in a mirror between ticks).
+        public static IReadOnlyList<ParticleInstance> Particles(IReadOnlyList<ParticleInstance> prev, IReadOnlyList<ParticleInstance> cur, float t, float dt)
         {
             if (t >= 1f || cur is null || cur.Count == 0) return cur;
+            Dictionary<(int, int, int), UEVector> before = PrevParticles(prev);
             float back = (1f - t) * dt;
             var r = new ParticleInstance[cur.Count];
             for (int i = 0; i < cur.Count; i++)
             {
                 ParticleInstance p = cur[i];
-                var pos = new UEVector(p.Pos.x - p.Vel.x * back, p.Pos.y - p.Vel.y * back, p.Pos.z - p.Vel.z * back);
-                r[i] = new ParticleInstance(p.EmitterId, pos, p.Width, p.Length, p.Alpha, p.Color, p.SpinPos - p.SpinRate * back, p.TexturePath, p.Vel, p.DripTimer, p.SpinRate, p.View);
+                UEVector pos = p.Serial != 0 && before.TryGetValue((p.EmitterId, p.Serial, p.View), out UEVector a) && !IsCut(a, p.Pos)
+                    ? Lerp(a, p.Pos, t)
+                    : new UEVector(p.Pos.x - p.Vel.x * back, p.Pos.y - p.Vel.y * back, p.Pos.z - p.Vel.z * back);
+                r[i] = new ParticleInstance(p.EmitterId, pos, p.Width, p.Length, p.Alpha, p.Color, p.SpinPos - p.SpinRate * back, p.TexturePath, p.Vel, p.DripTimer, p.SpinRate, p.View, p.Serial);
             }
             return r;
+        }
+
+        // The previous tick's particle positions by identity, built once per previous list (display frames of one tick pair
+        // share it). Window thread only.
+        static IReadOnlyList<ParticleInstance> _prevList;
+        static readonly Dictionary<(int, int, int), UEVector> _prevPos = new();
+        static Dictionary<(int, int, int), UEVector> PrevParticles(IReadOnlyList<ParticleInstance> prev)
+        {
+            if (ReferenceEquals(prev, _prevList)) return _prevPos;
+            _prevList = prev; _prevPos.Clear();
+            if (prev is not null) foreach (ParticleInstance p in prev) if (p.Serial != 0) _prevPos.TryAdd((p.EmitterId, p.Serial, p.View), p.Pos);
+            return _prevPos;
+        }
+
+        // Decal between ticks (author report 2026-11-17: Harry's shadow jerked while he was interpolated). The original draws
+        // one frame per tick and re-attaches the shadow every frame its owner moved more than MoveThreshold (1 uu,
+        // ActorShadow.Update from SetupDynamics), so the shadow follows its owner. A record on the same surface in both ticks
+        // is interpolated piece by piece: a piece with the same node, view and point count is lerped point by point with
+        // its U/V (a piece is the record's rectangle clipped by fixed polygon edges, so its points move linearly while the
+        // rectangle moves); another piece of that record (its clip changed) is moved by the record's step d =
+        // lerp(prev, cur, t) - cur of the record centre (Base + (V0 + V2) / 2), projected on the record's plane. A record
+        // with no counterpart on its surface, or a cut, stays the current tick's. α = 1 is the tick's frame untouched.
+        // ponytail: a record that appears or vanishes between the ticks (the decal crossing onto another surface, a
+        // MultiDecalLevel neighbour) is drawn as the tick's — its in-between part (at most one tick's step wide) is only
+        // known to a re-clip; Core would have to clip per display frame to draw it.
+        public static IReadOnlyList<DecalInstance> Decals(IReadOnlyList<DecalInstance> prev, IReadOnlyList<DecalInstance> cur, float t)
+        {
+            if (t >= 1f || prev is null || cur is null || cur.Count == 0) return cur;
+            var match = new DecalInstance?[cur.Count];
+            bool any = false;
+            for (int i = 0; i < cur.Count; i++)
+                foreach (DecalInstance p in prev)
+                {
+                    if (p.DecalId != cur[i].DecalId || p.Surf != cur[i].Surf) continue;
+                    UEVector a = Centre(p), b = Centre(cur[i]);
+                    if (IsCut(a, b)) break;
+                    match[i] = p; any = true;
+                    break;
+                }
+            if (!any) return cur;
+            var r = new DecalInstance[cur.Count];
+            for (int i = 0; i < cur.Count; i++)
+            {
+                DecalInstance c = cur[i];
+                if (match[i] is not { } p || c.Pieces is null) { r[i] = c; continue; }
+                UEVector a = Centre(p), b = Centre(c), n = c.Normal;
+                var d = new UEVector((a.x - b.x) * (1f - t), (a.y - b.y) * (1f - t), (a.z - b.z) * (1f - t));
+                float nn = n.x * n.x + n.y * n.y + n.z * n.z, k = nn > 0f ? (d.x * n.x + d.y * n.y + d.z * n.z) / nn : 0f;
+                d = new UEVector(d.x - n.x * k, d.y - n.y * k, d.z - n.z * k);
+                DecalPiece[] old = p.Pieces;
+                var pieces = new DecalPiece[c.Pieces.Length];
+                for (int j = 0; j < pieces.Length; j++)
+                {
+                    DecalPiece pc = c.Pieces[j];
+                    if (pc.Points is null) { pieces[j] = pc; continue; }
+                    int m = pc.Points.Length;
+                    var pts = new UEVector[m];
+                    if (old is not null && j < old.Length && old[j].Node == pc.Node && old[j].View == pc.View && old[j].Points?.Length == m)
+                    {
+                        DecalPiece o = old[j];
+                        float[] u = new float[m], v = new float[m];
+                        for (int q = 0; q < m; q++)
+                        { pts[q] = Lerp(o.Points[q], pc.Points[q], t); u[q] = Lerp(o.U[q], pc.U[q], t); v[q] = Lerp(o.V[q], pc.V[q], t); }
+                        pieces[j] = new DecalPiece(pc.Node, pts, u, v, pc.View);
+                        continue;
+                    }
+                    for (int q = 0; q < m; q++) pts[q] = new UEVector(pc.Points[q].x + d.x, pc.Points[q].y + d.y, pc.Points[q].z + d.z);
+                    pieces[j] = new DecalPiece(pc.Node, pts, pc.U, pc.V, pc.View);
+                }
+                r[i] = new DecalInstance(c.DecalId, c.OwnerId, c.Surf, c.Normal, c.Base, c.V0, c.V1, c.V2, c.V3, c.Nodes, pieces,
+                    c.SurfPolyFlags, c.SurfTexturePolyFlags);
+            }
+            return r;
+        }
+        static UEVector Centre(in DecalInstance d)
+            => new(d.Base.x + (d.V0.x + d.V2.x) * 0.5f, d.Base.y + (d.V0.y + d.V2.y) * 0.5f, d.Base.z + (d.V0.z + d.V2.z) * 0.5f);
+
+        // Canvas items between ticks: the HUD is script output per tick (PostRender), so an animated item (the cut-scene
+        // bars, HPBase/HGame.Icons.leftPanel tiles growing from the screen edges; a sliding line of text; InterpAuditTests)
+        // moved at 60 Hz over a world drawn at the display rate. An item at the same index in both ticks, the same in
+        // everything but its place (kind, texture window, text, font, colour, style, glyph windows and their offsets; a
+        // tile may also change its size), is drawn at the lerped place and size, a text's glyphs moved with it; anything
+        // else (another texture window: a digit, a bar fill), a list of another length, a canvas actor (HudKind.Actor) or a
+        // move above HudCut canvas units is the tick's. α = 1 is the tick's list untouched.
+        public const float HudCut = 128f;
+        public static IReadOnlyList<HudCommand> Hud(IReadOnlyList<HudCommand> prev, IReadOnlyList<HudCommand> cur, float t)
+        {
+            if (t >= 1f || prev is null || cur is null || prev.Count != cur.Count) return cur;
+            HudCommand[] r = null;
+            for (int i = 0; i < cur.Count; i++)
+            {
+                HudCommand a = prev[i], b = cur[i];
+                float dx = a.X - b.X, dy = a.Y - b.Y, dw = a.XL - b.XL, dh = a.YL - b.YL;
+                if (dx == 0f && dy == 0f && dw == 0f && dh == 0f || dx * dx + dy * dy > HudCut * HudCut
+                    || dw * dw + dh * dh > HudCut * HudCut || !SameItem(a, b)) continue;
+                r ??= cur.ToArray();
+                float ox = dx * (1f - t), oy = dy * (1f - t);
+                HudGlyph[] g = b.Glyphs;
+                if (g is not null)
+                {
+                    g = new HudGlyph[b.Glyphs.Length];
+                    for (int k = 0; k < g.Length; k++)
+                    {
+                        HudGlyph q = b.Glyphs[k];
+                        g[k] = new HudGlyph(q.Page, q.X + ox, q.Y + oy, q.XL, q.YL, q.U, q.V, q.UL, q.VL);
+                    }
+                }
+                r[i] = new HudCommand(b.Kind, b.X + ox, b.Y + oy, b.XL + dw * (1f - t), b.YL + dh * (1f - t), b.U, b.V, b.UL, b.VL, b.TexturePath, b.Text, b.FontPath,
+                    b.Color, b.Style, b.Smooth, b.Clipped, g, b.PolyFlags, b.ActorId);
+            }
+            return r ?? cur;
+        }
+
+        // The same texture window: equal up to float noise of the script's arithmetic (1 vs 0.99999994).
+        static bool Near(float a, float b) => MathF.Abs(a - b) <= 1e-4f * MathF.Max(1f, MathF.Abs(b));
+        static bool SameItem(in HudCommand a, in HudCommand b)
+        {
+            if (b.Kind == HudKind.Actor || a.Kind != b.Kind || a.TexturePath != b.TexturePath || a.Text != b.Text || a.FontPath != b.FontPath
+                || (b.Kind != HudKind.Tile && (a.XL != b.XL || a.YL != b.YL))
+                || !Near(a.U, b.U) || !Near(a.V, b.V) || !Near(a.UL, b.UL) || !Near(a.VL, b.VL) || a.Color != b.Color
+                || a.Style != b.Style || a.Smooth != b.Smooth || a.Clipped != b.Clipped || a.PolyFlags != b.PolyFlags || a.ActorId != b.ActorId)
+                return false;
+            if (a.Glyphs is null || b.Glyphs is null) return a.Glyphs is null && b.Glyphs is null;
+            if (a.Glyphs.Length != b.Glyphs.Length) return false;
+            for (int k = 0; k < a.Glyphs.Length; k++)
+            {
+                HudGlyph p = a.Glyphs[k], q = b.Glyphs[k];
+                if (p.Page != q.Page || p.U != q.U || p.V != q.V || p.UL != q.UL || p.VL != q.VL || p.XL != q.XL || p.YL != q.YL
+                    || p.X - a.X != q.X - b.X || p.Y - a.Y != q.Y - b.Y) return false;
+            }
+            return true;
         }
 
         // Child display frames (WorldFrame.Views): M, NearClip and the frame Coords are interpolated with the camera, view by
@@ -210,16 +351,18 @@ namespace HPEngine
             return r;
         }
 
-        // A node in both ticks keeps the current tick's side and draw-record flags (BackNodes / Reflagged of b, plus a's
-        // for the polygons b did not draw).
+        // A node in both ticks keeps the current tick's side, draw-record flags and Lumos arguments (BackNodes / Reflagged /
+        // Lumos of b, plus a's for the polygons b did not draw).
         static DrawnWorld Union(DrawnWorld a, DrawnWorld b)
             => new(b.Nodes.Union(a.Nodes).ToArray(),
                 b.Movers.Union(a.Movers).ToArray(),
                 b.SkyWindows.Union(a.SkyWindows).ToArray(),
                 b.BackNodes.Union(a.BackNodes.Except(b.Nodes)).ToArray(),
-                b.Reflagged.Concat(a.Reflagged.Where(r => r.Node >= 0 ? !b.Nodes.Contains(r.Node) : !b.Movers.Contains(r.Mover))).ToArray());
+                b.Reflagged.Concat(a.Reflagged.Where(r => r.Node >= 0 ? !b.Nodes.Contains(r.Node) : !b.Movers.Contains(r.Mover))).ToArray(),
+                b.Lumos.Concat(a.Lumos.Where(r => r.Node >= 0 ? !b.Nodes.Contains(r.Node) : !b.Movers.Contains(r.Mover))).ToArray());
 
-        // Display frame: camera and particles interpolated, world polygons the union of both ticks, the rest is the current tick.
+        // Display frame: camera, canvas items, particles and decals interpolated, world polygons the union of both ticks, the
+        // rest is the current tick.
         public static WorldFrame Frame(WorldFrame prev, WorldFrame cur, float t, float dt)
         {
             if (t >= 1f || prev is null || cur is null) return cur;
@@ -227,13 +370,13 @@ namespace HPEngine
             IReadOnlyList<ViewFrame> views = lerps ? Views(prev.Views, cur.Views, t) : cur.Views;
             bool sameTree = lerps && SameTree(prev.Views, cur.Views);
             return new WorldFrame(cur.Tick, cur.Label, cur.Actors, Lerp(prev.Camera, cur.Camera, t), cur.Audio, cur.Music,
-                cur.Hud, Particles(cur.Particles, t, dt), cur.LocalPlayerId, cur.LevelAmbient, cur.HighDetailActors,
-                cur.Decals, cur.Paused, cur.ViewFlash, cur.DrawWorld, cur.Reverb,
+                Hud(prev.Hud, cur.Hud, t), Particles(prev.Particles, cur.Particles, t, dt), cur.LocalPlayerId, cur.LevelAmbient, cur.HighDetailActors,
+                Decals(prev.Decals, cur.Decals, t), cur.Paused, cur.ViewFlash, cur.DrawWorld, cur.Reverb,
                 views, cur.MeshPoses, cur.SpriteActors,
                 cur.AudioChannels, cur.AudioResumeSerial, cur.ActorViews, cur.Coronas, cur.EnhancedVisuals,
                 lerps ? Drawn(prev.Drawn, cur.Drawn, sameTree) : cur.Drawn,
                 lerps ? cur.DrawnTextures.Union(prev.DrawnTextures, StringComparer.OrdinalIgnoreCase).ToArray() : cur.DrawnTextures,
-                cur.AudioCallStops, cur.AudioMixDt, cur.DrawOrder, cur.CanvasScale, cur.TextureFrames);
+                cur.AudioCallStops, cur.AudioMixDt, cur.DrawOrder, cur.CanvasScale, cur.TextureFrames, cur.ScriptedTexels);
         }
 
         // The tick's frame with its own copy of the actor list: Core rotates three snapshot buffers (WorldFrameProjector.
@@ -250,7 +393,7 @@ namespace HPEngine
                 f.Decals, f.Paused, f.ViewFlash, f.DrawWorld, f.Reverb,
                 f.Views, f.MeshPoses, f.SpriteActors,
                 f.AudioChannels, f.AudioResumeSerial, f.ActorViews, f.Coronas, f.EnhancedVisuals,
-                f.Drawn, f.DrawnTextures, f.AudioCallStops, f.AudioMixDt, f.DrawOrder, f.CanvasScale, f.TextureFrames);
+                f.Drawn, f.DrawnTextures, f.AudioCallStops, f.AudioMixDt, f.DrawOrder, f.CanvasScale, f.TextureFrames, f.ScriptedTexels);
         }
 
         static bool SameTree(IReadOnlyList<ViewFrame> prev, IReadOnlyList<ViewFrame> cur)

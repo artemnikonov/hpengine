@@ -22,8 +22,9 @@
 #              (CI) makes the flat engine-only ones under the same names, so do not share an --out between the two.
 # Version: launcher/VERSION, the release tag without "v" (a "-" suffix marks a pre-release); Info.plist HPEngineVersion,
 # compared with the GitHub release tags; CFBundleShortVersionString is its numeric part.
-# HP2 in the launcher (Logic.cs / Launcher.swift Hp2Release): a release build (the default) shows the HP2 tab disabled,
-# "Coming soon"; HPENGINE_HP2=1 makes a preview build with the HP2 tab on (-p:HPEngineHp2=true, Info.plist HPEngineHp2).
+# HP2 in the launcher (Logic.cs / Launcher.swift Hp2Release): from 0.5.0 (author 2026-11-17) a release build has the HP2
+# tab on (the default, HPENGINE_HP2=1: -p:HPEngineHp2=true, Info.plist HPEngineHp2); HPENGINE_HP2=0 builds the HP2 tab
+# disabled, "Coming soon" (the 0.4.x release).
 # Needs .NET SDK 9 and network access for the pinned downloads (or a filled HPENGINE_TOOLS_CACHE); osx-* also needs
 # an Apple Silicon Mac with Rosetta, Xcode Command Line Tools (swiftc, lipo, codesign, ditto) and cmake.
 # Nothing of the game is packed: publish.sh --check refuses game files, and HP1Setup carries only SHA-1 hashes.
@@ -33,7 +34,7 @@ REPO=$(cd "$HERE/../.." && pwd)
 fail() { echo "FAILED: $*" >&2; exit 1; }
 # As publish.sh RELEASE_PROPS: no debug symbols, source paths mapped (publish.sh --check refuses both in the package).
 RELEASE_PROPS="-p:DebugType=none -p:DebugSymbols=false -p:PathMap=$REPO=/_/"
-HP2_PREVIEW=; [ "${HPENGINE_HP2:-}" = 1 ] && HP2_PREVIEW=1 && echo "HPENGINE_HP2=1: a preview build, the HP2 tab on"
+HP2_PREVIEW=; [ "${HPENGINE_HP2:-1}" = 1 ] && HP2_PREVIEW=1 || echo "HPENGINE_HP2=0: the HP2 tab off (Coming soon)"
 
 OUT="$REPO/.artifacts/hpengine-packages"; REUSE=0
 while [ $# -gt 0 ]; do

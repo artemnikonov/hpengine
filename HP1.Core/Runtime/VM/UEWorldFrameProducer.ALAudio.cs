@@ -48,12 +48,18 @@ namespace HP1.UEScript
             al.World = nw; al.LipHost = nw;
         }
 
-        // The OpenAL calls since the last frame, for the frame the HP2 Draw publishes (WorldFrame.ALCommands); drained.
-        public void AttachALCommands(WorldFrame frame)
+        // The OpenAL calls since the last published frame (WorldFrame.ALCommands), drained, and the device time the clock
+        // advanced over that span (WorldFrame.AudioMixDt): the frontend mixes that much audio, then executes the calls.
+        // Build publishes them on every frame it builds; a frame built elsewhere carries none and they wait for the next.
+        long _alMixedClock;
+        (UEALAudio.Command[] Calls, float MixDt) DrainALCommands()
         {
             UEALAudio al = Al;
-            frame.ALCommands = al.Commands.ToArray();
+            UEALAudio.Command[] calls = al.Commands.ToArray();
             al.Commands.Clear();
+            float dt = (float)((al.Clock - _alMixedClock) * (1.0 / 4294967296.0));
+            _alMixedClock = al.Clock;
+            return (calls, dt);
         }
 
         // ── USound -> UEALAudio.Sound ─────────────────────────────────────────

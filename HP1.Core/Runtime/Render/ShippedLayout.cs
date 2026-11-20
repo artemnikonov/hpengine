@@ -63,14 +63,30 @@ namespace HP1.UEScript.Render
 
         // An imported struct stub is replaced ONLY by an export with the same
         // full path; no exact match or several matches → Mark.
+        // The answer is cached per stub until the package catalogue changes (UEClassRegistry.Generation): the scan of every
+        // export of every package cost ~10 ms per persistent actor, so HP2's SAVEPACTORS (harry.LoadLevel, right before
+        // every travel) froze the world for 0.5-2 s (author 2026-11-19, "stutters before the level changes").
+        sealed class Resolved { public HP1.Core.UEClassRegistry Registry; public int Generation; public (UStruct, string) Answer; }
+        static readonly System.Runtime.CompilerServices.ConditionalWeakTable<UStruct, Resolved> _resolved = new();
+
         public static (UStruct Struct, string Mark) ResolveStruct(UStruct s)
         {
             if (s is null) return (null, "!NOSTRUCT");
             if (HasFields(s)) return (s, null);
+            var reg = HP1.Core.UEClassRegistry.Shared;
+            if (_resolved.TryGetValue(s, out var hit) && ReferenceEquals(hit.Registry, reg) && hit.Generation == reg.Generation)
+                return hit.Answer;
+            var answer = ResolveStub(s, reg);
+            _resolved.AddOrUpdate(s, new Resolved { Registry = reg, Generation = reg.Generation, Answer = answer });
+            return answer;
+        }
+
+        static (UStruct Struct, string Mark) ResolveStub(UStruct s, HP1.Core.UEClassRegistry reg)
+        {
             string want = FullPath(s);
             var cands = new List<UStruct>();
             var shown = new List<string>();
-            foreach (UnrealPackage pkg in HP1.Core.UEClassRegistry.Shared.Packages)
+            foreach (UnrealPackage pkg in reg.Packages)
                 foreach (var exp in pkg.Exports)
                 {
                     if (!string.Equals(exp.ObjectName.ToString(), s.Name, StringComparison.OrdinalIgnoreCase)) continue;

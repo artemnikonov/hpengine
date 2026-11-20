@@ -77,6 +77,10 @@ namespace HP1.UEScript
             _stubDecl[fn] = real;
             return real;
         }
+        // The zero of a parameter's type; object references stay null (None).
+        static object ZeroOfParam(UProperty p) => p.Type == UELib.Types.PropertyType.StructProperty
+            ? UEObject.ZeroStructValue(p) : UEObject.ZeroValueForType(p.Type);
+
         static (object[] args, List<UELValueRef?> outRefs)
             CollectArgsWithOuts(UEInterpreter interp, UEFrame frame, UFunction targetFn, string label)
         {
@@ -84,6 +88,7 @@ namespace HP1.UEScript
             if (targetFn != null) targetFn = interp.ResolveStubDeclaration(targetFn);
             ParamDesc pd = targetFn != null ? ParamsOf(targetFn) : null;
             bool[] paramOutFlags = pd != null ? pd.IsOut : Array.Empty<bool>();
+            bool isNative = pd != null && targetFn.FunctionFlags.HasFlag(UELib.Flags.FunctionFlag.Native);
             int depth = interp._argDepth++;
             if (depth == interp._argLists.Count) interp._argLists.Add(new List<object>(8));
             var args = interp._argLists[depth];
@@ -131,8 +136,16 @@ namespace HP1.UEScript
                     }
                     else
                     {
+                        bool skipped = frame.Tokens[frame.Cursor] is Tok.NothingToken or Tok.EmptyParmToken;
                         var r = interp.EvalNext(frame);
-                        args.Add(r.Value);
+                        object v = r.Value;
+                        // A native's optional parameter (P_GET_X_OPTX, e.g. HP1 execSpawn 0x1040ca8f..: the default is
+                        // written, then Stack.Step overwrites it) keeps its default only for a skipped argument (EX_Nothing
+                        // writes nothing). Any other expression writes its value: a local or skipped script parameter the
+                        // port holds as null is the zero of its type in UE1's zeroed Locals (CallFunction), not "omitted".
+                        if (v is null && !skipped && isNative && idx < pd.Props.Length)
+                            v = ZeroOfParam(pd.Props[idx]);
+                        args.Add(v);
                         if (anyOut) outRefs.Add(null);
                     }
                     idx++;

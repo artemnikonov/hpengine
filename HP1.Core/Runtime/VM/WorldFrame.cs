@@ -710,7 +710,10 @@ namespace HP1.UEScript
     // Tile carries the texture + UV window; Text carries the string + font.
     // X/Y are the canvas pen (CurX/CurY + origin) at emit time; Color is the
     // canvas DrawColor RGB; Style is ERenderStyle; Smooth mirrors !bNoSmooth.
-    public enum HudKind { Tile, Text }
+    // Actor: UCanvas::execDrawActor of a mesh actor (URender::DrawActor on the canvas frame = the master frame, after
+    // RenDev->ClearZ): the frontend clears depth here and draws ActorId's master-frame mesh draw (WorldFrame.MeshPoses,
+    // ActorViews view −1, DrawOrder master) with the master camera, at this place in the HUD order — not in the world pass.
+    public enum HudKind { Tile, Text, Actor }
 
     // One glyph shipped draws with RenDev->DrawTile from FUN_10388b60 (Engine.dll 0x10388b60): Core has
     // already done text layout (FUN_10388530), CharRemap, font page, clipping to ClipX/ClipY
@@ -760,11 +763,13 @@ namespace HP1.UEScript
         // (TextPolyFlags: by Style | 0x1000802) with which FUN_10388b60 calls RenDev->DrawTile. The frontend
         // takes the blend mode FROM HERE, not from Style.
         public readonly int PolyFlags;
+        public readonly int ActorId;   // Actor: the drawn actor's ObjectId
         public HudCommand(HudKind kind, float x, float y, float xl, float yl,
             float u, float v, float ul, float vl, string texturePath, string text,
             string fontPath, UEVector color, int style, bool smooth, bool clipped,
-            HudGlyph[] glyphs = null, int polyFlags = 0)
+            HudGlyph[] glyphs = null, int polyFlags = 0, int actorId = -1)
         {
+            ActorId = actorId;
             Kind = kind; X = x; Y = y; XL = xl; YL = yl; U = u; V = v; UL = ul; VL = vl;
             TexturePath = texturePath; Text = text; FontPath = fontPath;
             Color = color; Style = style; Smooth = smooth; Clipped = clipped;
@@ -852,13 +857,16 @@ namespace HP1.UEScript
         // The view (frame index) of the DrawParticleSystem call that drew this particle (-1: every view of the emitter,
         // the reference render pass). Core's billboard pass decides per call which particles are drawn, with which Alpha.
         public readonly int View;
+        // Presentation identity of the Core particle (UEWorldFrameProducer.Particle.Serial; 0 = none): the same particle in
+        // two ticks has the same Serial. Read only by the frontend's interpolation between logic ticks; no game value.
+        public readonly int Serial;
         public ParticleInstance(int emitterId, UEVector pos, float width, float length,
             float alpha, UEVector color, float spinPos, string texturePath,
-            UEVector vel, float dripTimer, float spinRate = 0f, int view = -1)
+            UEVector vel, float dripTimer, float spinRate = 0f, int view = -1, int serial = 0)
         {
             EmitterId = emitterId; Pos = pos; Width = width; Length = length;
             Alpha = alpha; Color = color; SpinPos = spinPos; TexturePath = texturePath;
-            Vel = vel; DripTimer = dripTimer; SpinRate = spinRate; View = view;
+            Vel = vel; DripTimer = dripTimer; SpinRate = spinRate; View = view; Serial = serial;
         }
     }
 
@@ -992,6 +1000,18 @@ namespace HP1.UEScript
         // HP2: the OpenAL calls the ALAudio device (UEALAudio, Core) made since the previous frame, in call order — the
         // frontend executes them (HPEngine ALExecutor) and decides nothing. Null for HP1 (Galaxy: AudioChannels).
         public IReadOnlyList<UEALAudio.Command> ALCommands { get; internal set; }
+        // The canvas frame Canvas.DrawActor drew this frame's HudKind.Actor commands with, when it is not the master frame
+        // (Hor+ widened the master; UEWorldFrameProducer.CanvasSceneNode): its FovAngle and size in canvas pixels. The
+        // frontend projects those actors' batches with the frame camera at this FovAngle over this size scaled by
+        // CanvasScale from the top-left, like the HUD's tiles. 0 — the master camera as it is.
+        public float CanvasFovAngle { get; internal set; }
+        // ScriptedTexture texels: every ScriptedTexture this frame's DrawFrame updated, as its UScriptedTexture::Tick and
+        // the RenderTexture event left them (Core: UEWorldFrameProducer.TickScriptedTextures). The frontend uploads exactly
+        // these P8 texels with their palette and never reads a ScriptedTexture's mip from the package (its mips are zeroed
+        // at load: UETextureSource state PARAMETRIC). A texture absent here was not updated this frame: it keeps the
+        // texels the frontend last got. A property, as ALCommands: frame data the projector does not build.
+        public IReadOnlyList<ScriptedTexels> ScriptedTexels { get; internal set; }
+        public (int X, int Y) CanvasFrameSize { get; internal set; }
         // K2: pool voices the frame's device calls freed before its Update, and the dt that Update advanced the audio clock by
         // (UEGalaxyAudio.LastCallStops / LastMixDt): the frontend stops them, mixes the frame's audio, then applies the table.
         public readonly IReadOnlyList<int> AudioCallStops;
@@ -1009,8 +1029,10 @@ namespace HP1.UEScript
             ActorViewSets actorViews = null, IReadOnlyList<CoronaInstance> coronas = null, bool enhancedVisuals = true,
             IReadOnlyList<DrawnWorld> drawn = null, IReadOnlyList<string> drawnTextures = null,
             IReadOnlyList<int> audioCallStops = null, float audioMixDt = 0f, IReadOnlyList<int[]> drawOrder = null,
-            int canvasScale = 1, IReadOnlyDictionary<string, string> textureFrames = null)
+            int canvasScale = 1, IReadOnlyDictionary<string, string> textureFrames = null,
+            IReadOnlyList<ScriptedTexels> scriptedTexels = null)
         {
+            ScriptedTexels = scriptedTexels ?? System.Array.Empty<ScriptedTexels>();
             DrawOrder = drawOrder; CanvasScale = canvasScale; TextureFrames = textureFrames ?? _noTextureFrames;
             AudioCallStops = audioCallStops ?? System.Array.Empty<int>(); AudioMixDt = audioMixDt;
             Drawn = drawn; DrawnTextures = drawnTextures ?? _noTextures;
@@ -1033,6 +1055,17 @@ namespace HP1.UEScript
         static readonly string[] _noTextures = new string[0];
         static readonly IReadOnlyDictionary<string, string> _noTextureFrames = new Dictionary<string, string>();
         static readonly MeshPose[] _noPoses = new MeshPose[0];
+    }
+
+    // One ScriptedTexture's texels after this frame's Tick: mip 0 (USize x VSize palette indices) and the palette it is
+    // drawn with (256 x R,G,B,A; UScriptedTexture::PostLoad's SourceTexture palette), both copies owned by the frame.
+    public sealed class ScriptedTexels
+    {
+        public readonly string Path;
+        public readonly int USize, VSize;
+        public readonly byte[] Palette, Mip0;
+        public ScriptedTexels(string path, int uSize, int vSize, byte[] palette, byte[] mip0)
+        { Path = path; USize = uSize; VSize = vSize; Palette = palette; Mip0 = mip0; }
     }
 
     // -- CHILD FRAME --

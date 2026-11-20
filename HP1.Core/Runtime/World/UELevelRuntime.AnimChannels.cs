@@ -209,12 +209,9 @@ namespace HP1.UEScript
             // root lies inside the new root's contiguous RefSkeleton subtree are
             // destroyed through ULevel::DestroyActor (vtable +0x98), then the
             // new one is appended (27813-27852).
-            // HP2's exec does not zero the EAnimType dword before the byte argument lands in it [HP2 0x10416620] and the body
-            // compares the whole dword with 1 [HP2 0x1041611a]: a byte 1 (AT_Combine) depends on the stack bytes above it,
-            // a byte 0 or >= 2 never equals 1 (every shipped HP2 call passes ByteConst 0). Undefined: a loud STOP.
-            if (hp2 && animType == 1)
-                UEGameProfile.Stop(UEEdition.Game.HP2, "CreateAnimChannel AT_Combine (the original compares an EAnimType dword "
-                    + "whose upper bytes its exec never writes)");
+            // The body compares the whole EAnimType dword with 1 [HP2 0x1041611a]. From AActor::PlayAnim the dword is defined
+            // (execPlayAnim / execLoopAnim zero it before the byte lands [HP2 0x104179ac] [HP2 0x10417b30]); only the script
+            // exec leaves its upper bytes unwritten: that STOP lives in the exec (UEGameEngineNatives.CreateAnimChannel).
             if (animType == 1)
             {
                 channels.Insert(0, new AnimChannelEntry

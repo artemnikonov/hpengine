@@ -29,6 +29,8 @@ namespace HP1.UEScript
     public sealed class Hp1FontPage
     {
         public bool HasTexture;           // FFontPage.Texture != NULL
+        public int TextureRef;            // the package's object index of FFontPage.Texture (0: none)
+        public string TexturePath;        // its full path (Hp1FontCatalog.Get; null: none)
         public Hp1FontChar[] Characters;
     }
 
@@ -64,6 +66,9 @@ namespace HP1.UEScript
         readonly Dictionary<string, Hp1FontMetrics> _cache = new(UEPropNameComparer.Instance);
         readonly Dictionary<string, (UnrealPackage Pkg, byte[] Bytes)> _packages = new(UEPropNameComparer.Instance);
         public Hp1FontCatalog(string systemDir) { _systemDir = systemDir; }
+
+        // The texture of a font page (the ScriptedTexture text natives lock it: execDrawText passes Pages(i).Texture).
+        public string PageTexturePath(string fontPath, int page) => Get(fontPath).Pages[page].TexturePath;
 
         public Hp1FontMetrics Get(string path)
         {
@@ -101,6 +106,8 @@ namespace HP1.UEScript
             var names = new string[loaded.Pkg.Names.Count];
             for (int i = 0; i < names.Length; i++) names[i] = loaded.Pkg.Names[i].Name;
             var metrics = ReadSerialized(path, names, (int)loaded.Pkg.Version, loaded.Bytes, export.SerialOffset, export.SerialSize);
+            foreach (Hp1FontPage pg in metrics.Pages)
+                pg.TexturePath = UEProceduralTextureData.RefPath(loaded.Pkg, pkgName, pg.TextureRef);
             _cache[path] = metrics;
             return metrics;
         }
@@ -146,7 +153,7 @@ namespace HP1.UEScript
                 var chars = new Hp1FontChar[n];
                 for (int j = 0; j < n; j++)
                     chars[j] = new Hp1FontChar(Int(), Int(), Int(), Int());
-                pages[i] = new Hp1FontPage { HasTexture = tex != 0, Characters = chars };
+                pages[i] = new Hp1FontPage { HasTexture = tex != 0, TextureRef = tex, Characters = chars };
             }
             int cpp = Int();
             if ((cpp & (cpp - 1)) != 0)

@@ -9,15 +9,16 @@
 //   * "virtual keys" for what only the console reads: East (B) -> Space, Start -> Escape; in a UWindow menu South (A) ->
 //     LeftMouse and East (B) -> Escape;
 //   * right stick -> MouseX/MouseY axis events (camera via the MouseX/MouseY bindings; in a menu WindowConsole moves the
-//     cursor with them), through the WinDrv dead zone, scale [HPEngine] GamepadLookSpeed (pixels per poll at full tilt);
-//     in a menu also times MouseSensitivity / its shipped default (MenuCursorSensitivity; author decision 2026-11-13);
+//     cursor with them), through the WinDrv dead zone, scale [HPEngine] GamepadLookSpeed = pixels per 1/60 s at full tilt
+//     (times 60 x the poll's delta, so the turn rate does not follow the frame rate; author decision 2026-11-18). In a menu
+//     8/default of it (MenuLookFraction), times MouseSensitivity / its shipped default (MenuCursorSensitivity; 2026-11-13);
 //   * in a menu the d-pad snaps the cursor to controls, steps sliders and open lists; B closes an open list (UEInput.MenuNav.cs).
 //
 // ONE BINDING MODEL (author decision 2026-11-13). Every rebindable pad control is a key with one effective binding:
-//   * the left stick is four ANALOG keys Joy13 (up), Joy14 (down), Joy15 (left), Joy16 (right) — slots no pad button uses —
-//     and nothing else: the pad feeds no JoyX/JoyY. A direction is down while the stick is past the WinDrv dead zone that
-//     way; while it is held, every poll runs its binding as an axis event scaled by the tilt (PollStickAnalog), so an Axis
-//     alias (MoveForward) is analog and a Button command is a plain press;
+//   * the left stick is four keys Joy13 (up), Joy14 (down), Joy15 (left), Joy16 (right) — slots no pad button uses — and
+//     nothing else: the pad feeds no JoyX/JoyY. A direction is a held key while the stick is past the WinDrv dead zone that
+//     way, exactly like a keyboard key: Press, Hold every poll at the key's speed (no tilt scaling), Release (author
+//     decision 2026-11-18: the analog layer is gone);
 //   * a key's effective binding is the user's [Engine.Input] line, else its port default (GamepadDefaultBindings; the stick
 //     directions carry the arrow keys' commands, broom Buttons included; the d-pad has no default). The defaults are a fallback of the key dispatch while a
 //     gamepad is connected (from the poll that reads it to the end of the poll that finds it gone, so the final loop's
@@ -160,8 +161,10 @@ namespace HP1.UEScript
         // DefUser.ini where a key keeps its function: Jump (Ctrl: "Jump | Button bBroomAction"), AltFire = cast (Alt), the
         // arrow keys' commands on the left stick directions (HP2's carry the spell-lesson Buttons, without HP1's strafes).
         // Y, LB, RB keep HP1's commands (LookToggle, bBroomBrake, bBroomBoost: hgame reads them; HP2's DefUser.ini binds
-        // Enter to bSkipCutScene and Z/A to nothing / StrafeLeft). HP2-only keys (Tab map, 1-3 duel spells, Enter skip) get
-        // no pad default: an author choice (inventory hp2_improvements_parity.md); the player can bind them.
+        // Enter to bSkipCutScene and Z/A to nothing / StrafeLeft). HP2-only keys (Tab map, 1-3 duel spells, Enter skip):
+        // author decision 2026-11-16: the map on Back (Joy7 = Tab's "button bOpenMap"), the duel spells on the d-pad
+        // (Left/Down/Right = the 1/2/3 keys' Rictusempra/Mimblewimble/Expelliarmus; HP1's d-pad has no game default); Up =
+        // Space's Wiggenweld potion / duel spell cycle (decided by the coordinator 2026-11-16, by recommendation) — rebindable like every pad default; cut-scene skip on B (VirtualOf, fixed like HP1's B).
         static readonly (string Key, string Command)[] Hp2GamepadDefaultBindings =
         {
             ("Joy1", "Jump | Button bBroomAction"),
@@ -174,12 +177,22 @@ namespace HP1.UEScript
             ("Joy14", "MoveBackward | Button bBroomPitchDown | Button bSpellLessonDown"),
             ("Joy15", "RotLeft | Button bBroomYawLeft | Button bSpellLessonLeft"),
             ("Joy16", "RotRight | Button bBroomYawRight | Button bSpellLessonRight"),
+            ("Joy7", "button bOpenMap"),
+            ("JoyPovLeft", "Button bDuelRictusempra"),
+            ("JoyPovDown", "Button bDuelMimblewimble"),
+            ("JoyPovRight", "Button bDuelExpelliarmus"),
+            ("JoyPovUp", "Button bDrinkWiggenwell | button bDuelCycleSpell"),
         };
         // The pad's keys are the EInputKey Joy* family (Joy1-16, JoyX..JoyV, JoyPov*); no other key name starts with "Joy".
         internal static bool IsPadKey(string key) => key is not null && key.StartsWith("Joy", StringComparison.OrdinalIgnoreCase);
         public const string GamepadDefaultsKey = "GamepadDefaults", GamepadLookSpeedKey = "GamepadLookSpeed",
             GamepadBindingsSavedKey = "GamepadBindingsSaved";
-        const float DefaultLookSpeed = 8f;
+        // HP1: full tilt hits harry's turn cap (baseHarry turnRate 1000 after PlayerMove's 0.24) from Sensitivity 2.4 up: 176
+        // deg/s standing, 132 moving (UpdateRotation 32 / 24 x DeltaTime x aTurn); HP1_PROBE_PADTURN measures it. HP2 has no
+        // such cap and turns linearly (2.97 deg/s per unit at Sensitivity 3; HP2_BOOT_PADTURN): 72 -> 214 deg/s.
+        static float DefaultLookSpeed => UEGameProfile.Current.Game == UEEdition.Game.HP2 ? 72f : 24f;
+        // The menu cursor: 8 px per 1/60 s at the default (the 2026-11-13 speed) in both games.
+        static float MenuLookFraction => 8f / DefaultLookSpeed;
 
         // The console's UWindow (menu) is up; a test seam for the menu layout without running the menu script.
         internal static Func<UEObject, bool> MenuActive = c => c is not null && UEInterpreter.ToBool(c.GetProp("bUWindowActive"));
@@ -196,7 +209,9 @@ namespace HP1.UEScript
         static string VirtualOf(int button, bool menu) => button switch
         {
             PadSouth => menu ? "LeftMouse" : "",
-            PadEast => menu ? "Escape" : "Space",
+            // HP2 (author decision 2026-11-16, NOT ORIGINAL): in the game B skips a cut-scene — the shipped skip key Enter
+            // (DefUser.ini Enter=button bSkipCutScene; harry.PlayerInput -> HPConsole.StartFastForward); HP1's B is Space.
+            PadEast => menu ? "Escape" : UEGameProfile.Current.Game == UEEdition.Game.HP2 ? "Enter" : "Space",
             PadStart => "Escape",
             _ => "",
         };
@@ -283,36 +298,6 @@ namespace HP1.UEScript
         bool ControlsCapturing() => _controlsPad && _controlsPage is not null
             && UEInterpreter.ToBool(_controlsPage.GetProp("bPolling")) && UEInterpreter.ToBool(_controlsPage.GetProp("bWindowVisible"));
 
-        // Left stick, analog part: every poll a held direction runs its binding as an axis event whose delta is the tilt
-        // through the WinDrv axis formula (JoystickAxis: dead zone, ScaleXYZ — 1000 at full tilt in the shipped ini). Under it
-        // an AXIS command's Speed is divided by AnalogSpeedDivisor (UEInput.Exec): Hold adds dt*Speed, the axis event adds
-        // delta*Speed*0.01, so Speed/600 makes full tilt add Speed/60 — the keyboard's Hold amount of one 60 Hz tick
-        // (MoveForward 300 -> 0.5, RotRight 150 -> 0.25, StrafeRight 300 -> 0.5). BUTTON/PULSE/TOGGLE and exec functions act
-        // on Press/Release only, so the Hold pass skips these keys (IsAnalogKey). X before Y.
-        internal const float AnalogSpeedDivisor = 600f;
-        float _stickX, _stickY;   // right = +, up = +
-        bool _analog;
-        bool IsAnalogKey(string key)
-        {
-            if (_gamepad is null) return false;
-            IReadOnlyList<string> names = KeyNamesByIndex();
-            for (int slot = JoyStickUp; slot <= JoyStickRight; slot++)
-                if (string.Equals(names[199 + slot], key, StringComparison.OrdinalIgnoreCase)) return true;
-            return false;
-        }
-        void PollStickAnalog(UEInterpreter interp, UEObject pawn)
-        {
-            if (pawn?.Class is null) return;
-            IReadOnlyList<string> names = KeyNamesByIndex();
-            foreach (var (slot, amount) in new[] { (JoyStickLeft, -_stickX), (JoyStickRight, _stickX), (JoyStickUp, _stickY), (JoyStickDown, -_stickY) })
-            {
-                string key = names[199 + slot];
-                if (!(amount > 0f) || !_down.Contains(key) || !TryGetDispatchBinding(key, out string command)) continue;
-                _analog = true;
-                try { ExecInputCommands(interp, pawn, command, InputAction.Axis, amount); } finally { _analog = false; }
-            }
-        }
-
         // Before the joystick block: the virtual keys and the right stick, then the JoyInfo the ported block consumes.
         bool PollGamepad(UEInterpreter interp, UEObject console, UEObject pawn, out JoyInfo j)
         {
@@ -344,15 +329,16 @@ namespace HP1.UEScript
             if (capture && Has(PadSouth) && (_padPrev & (1u << PadSouth)) == 0) _padLatch[PadSouth] = "";   // the page waits for a key: A is Joy1
             _padPrev = g.Buttons;
             bool Latched(string key) => _padLatch[PadSouth] == key || _padLatch[PadEast] == key || _padLatch[PadStart] == key;
-            // Virtual keys in IK order (LeftMouse 1, Escape 27, Space 32): an edge of the pad state, not KeyDownTable (the
+            // Virtual keys in IK order (LeftMouse 1, Enter 13 — HP2's B in the game, Escape 27, Space 32): an edge of the pad state, not KeyDownTable (the
             // console consumes Escape, so the table would re-press it every poll); held -> slot handled, so the final loop
             // does not release it through the keyboard state.
             Virtual(interp, console, pawn, "LeftMouse", 1, Latched("LeftMouse"));
+            Virtual(interp, console, pawn, "Enter", 13, Latched("Enter"));
             Virtual(interp, console, pawn, "Escape", 27, Latched("Escape"));
             Virtual(interp, console, pawn, "Space", 32, Latched("Space"));
 
             IReadOnlyList<string> names = KeyNamesByIndex();
-            float look = menu ? _lookSpeed * MenuCursorSensitivity(pawn) : _lookSpeed;
+            float look = (menu ? _lookSpeed * MenuLookFraction * MenuCursorSensitivity(pawn) : _lookSpeed) * 60f * _pollDelta;
             float mx = JoystickAxis((uint)(g.RightX + 32768), look, true);
             float my = JoystickAxis((uint)(g.RightY + 32768), -look, true);   // mouse Y: up = +
             if (mx != 0f) InputEvent(interp, console, pawn, names[0xe4], InputAction.Axis, mx);
@@ -371,12 +357,12 @@ namespace HP1.UEScript
             if (g.RightTrigger > TriggerPressed) joy |= 1u << (JoyRightTrigger - 1);
             // Left stick: the values the WinDrv block gives a joystick's X/Y axes (ScaleXYZ, DeadZoneXYZ, InvertVertical); a
             // direction key is down while its value is past zero.
-            _stickX = JoystickAxis((uint)(g.LeftX + 32768), _scaleXYZ, _deadZoneXYZ);
-            _stickY = JoystickAxis((uint)(g.LeftY + 32768), _invertVertical ? _scaleXYZ : -_scaleXYZ, _deadZoneXYZ);
-            if (_stickY > 0f) joy |= 1u << (JoyStickUp - 1);
-            if (_stickY < 0f) joy |= 1u << (JoyStickDown - 1);
-            if (_stickX < 0f) joy |= 1u << (JoyStickLeft - 1);
-            if (_stickX > 0f) joy |= 1u << (JoyStickRight - 1);
+            float stickX = JoystickAxis((uint)(g.LeftX + 32768), _scaleXYZ, _deadZoneXYZ);
+            float stickY = JoystickAxis((uint)(g.LeftY + 32768), _invertVertical ? _scaleXYZ : -_scaleXYZ, _deadZoneXYZ);
+            if (stickY > 0f) joy |= 1u << (JoyStickUp - 1);
+            if (stickY < 0f) joy |= 1u << (JoyStickDown - 1);
+            if (stickX < 0f) joy |= 1u << (JoyStickLeft - 1);
+            if (stickX > 0f) joy |= 1u << (JoyStickRight - 1);
             j.Buttons = joy;
             j.X = j.Y = j.Z = j.R = j.U = j.V = 32768;
             j.Pov = Has(PadDPadUp) ? 0u : Has(PadDPadRight) ? 9000u : Has(PadDPadDown) ? 18000u : Has(PadDPadLeft) ? 27000u : 0xFFFFu;
@@ -386,7 +372,7 @@ namespace HP1.UEScript
         // Menu cursor speed follows the Options "Sensitivity" slider (author decision 2026-11-13, NOT ORIGINAL: the original
         // has no pad cursor). In game PlayerInput scales aMouseX/aMouseY by MouseSensitivity; WindowConsole moves the cursor
         // by MouseScale*Delta without it, so the stick's menu step is scaled here by MouseSensitivity relative to its shipped
-        // default (the class defaultproperties; DefUser.ini sets none): at the shipped setting the step is GamepadLookSpeed.
+        // default (the class defaultproperties; DefUser.ini sets none): at the shipped setting the step is 8 x GamepadLookSpeed / its default.
         // No player (no setting to follow): unscaled.
         static float MenuCursorSensitivity(UEObject pawn)
         {

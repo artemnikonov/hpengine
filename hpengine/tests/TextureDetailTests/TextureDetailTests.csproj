@@ -12,6 +12,7 @@
     <Compile Include="*.cs" />
     <Compile Include="../../TextureDetail.cs" Link="TextureDetail.cs" />
     <Compile Include="../../Sprites/*.cs" Link="Sprites/%(Filename)%(Extension)" />
+    <Compile Include="../../FramePacing.cs" Link="FramePacing.cs" />
     <Compile Include="../../RenderUnhandled.cs" Link="RenderUnhandled.cs" />
   </ItemGroup>
   <ItemGroup>

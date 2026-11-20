@@ -258,10 +258,31 @@ namespace HP1.UEScript
                     package = mounted;
                 }
             }
+            // No object at that exact path: StaticLoadObject [HP1 Core 0x1015ed20..0x1015ed4b] takes the top package's
+            // linker (ResolveName's outer walked up to its root) and asks ULinkerLoad::Create ->
+            // FindExportIndex, which matches an export by its NAME and CLASS only, not by its outer (export hash of
+            // class name, class package and object name; [HP1 Core FUN_1014a120]
+            // [HP2 Core FUN_1014b9b0, caller FUN_1014bb80]): HP2's "AllDialog.<id>" finds AllDialog.usa.<id>. The first
+            // export of the hash chain wins; more than one candidate is not modelled (loud). Known ceiling: the original asks
+            // the linker by name even for a path that exists exactly; only HP2 HPSounds has a leaf twice (har_foot_wood3,
+            // spiral_up_elevator), where its hash-chain order could pick the other group's export — not modelled.
+            bool byLinker = false;
+            if (found is null && _packageFiles.ContainsKey(packageName))
+            {
+                string leaf = objectPath.Substring(objectPath.LastIndexOf('.') + 1);
+                var byName = OpenPackage(packageName).Exports
+                    .Where(e => string.Equals(e.ObjectName?.ToString(), leaf, StringComparison.OrdinalIgnoreCase)
+                        && string.Equals(e.Class?.ObjectName?.ToString(), "Sound", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                if (byName.Count > 1)
+                    throw new NotSupportedException($"Sound'{objectPath}': {byName.Count} exports named {leaf} in {packageName} — "
+                        + "ULinkerLoad's export hash-chain order is not modelled");
+                if (byName.Count == 1) { found = byName[0].Object; package = OpenPackage(packageName); byLinker = true; }
+            }
             if (found is null)
                 return Missing<USound>(objectPath, mayFail,
                     "Sound export not found" + DescribeExactLeafCandidates(objectPath));
-            if (!string.Equals(found.GetPath(), objectPath, StringComparison.OrdinalIgnoreCase))
+            if (!byLinker && !string.Equals(found.GetPath(), objectPath, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException($"Sound path mismatch: requested {objectPath}, found {found.GetPath()}");
             USound sound = found as USound
                 ?? throw new InvalidDataException($"{objectPath} is {found.GetType().Name}, not USound");

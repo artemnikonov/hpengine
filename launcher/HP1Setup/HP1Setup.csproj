@@ -14,6 +14,8 @@
     <EmbeddedResource Include="../us153.sha1" LogicalName="us153.sha1" />
     <EmbeddedResource Include="../uk11.sha1" LogicalName="uk11.sha1" />
     <EmbeddedResource Include="../ru_ea.sha1" LogicalName="ru_ea.sha1" />
+    <EmbeddedResource Include="../hp2_en.sha1" LogicalName="hp2_en.sha1" />
+    <EmbeddedResource Include="../hp2_ru_ea.sha1" LogicalName="hp2_ru_ea.sha1" />
     <Compile Include="../../HP1.Core/Runtime/World/UEEdition.cs" Link="Core/UEEdition.cs" />
     <Compile Include="../../HP1.Core/Runtime/World/UEInstallPath.cs" Link="Core/UEInstallPath.cs" />
   </ItemGroup>

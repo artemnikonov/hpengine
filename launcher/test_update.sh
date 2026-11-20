@@ -181,18 +181,21 @@ check one_file "1 file of Off is not in a game folder (System, Maps, ...): unpac
 inis Alpha > "$G/HPEngineData/Mods.ini"; check nothing ""
 
 # The engine's own error line in the banner (--engine-error <code> <output file>). Same cases as launcher/Desktop.Tests.
+# Author 2026-11-17: what happened in plain words, the cause on its own line, no file path ("Open log" opens the right log).
+NL='
+'
 banner() { got=$("$L" --engine-error "$2" "$T/said.txt"); [ "$got" = "$3" ] && ok "engine_error_$1" || bad "engine_error_$1: want '$3', got '$got'"; }
 M='[Mods] mod "Ghost" is enabled in /g/HPEngineData/Mods.ini but there is no folder /g/Mods/Ghost'
 printf '%s\n' '[Mods] none' "$M" > "$T/said.txt"
-banner mods 5 "The game stopped with an error (code 5): $M See the log: L."
-banner no_line 4 "The game stopped with an error (code 4). See the log: L."
+banner mods 5 "The game stopped with an error (code 5).$NL$M"
+banner no_line 4 "The game stopped with an error (code 4)."
 printf '%s\n' '--root /g: this is not a game install (/g: no directory Maps/).' 'Hint: unpack HPEngine into the game install directory.' > "$T/said.txt"
-banner root_not_hint 4 "The game stopped with an error (code 4): --root /g: this is not a game install (/g: no directory Maps/). See the log: L."
+banner root_not_hint 4 "The game stopped with an error (code 4).$NL--root /g: this is not a game install (/g: no directory Maps/)."
 printf '%s\n' '[Mods] none' '[Crash] unhandled exception: System.InvalidDataException: bad package' '   at X()' 'Unhandled exception. System.InvalidDataException: bad package' '   at X()' > "$T/said.txt"
-banner crash 134 "The game stopped with an error (code 134): [Crash] unhandled exception: System.InvalidDataException: bad package See the log: L."
+banner crash 134 "The game stopped with an error (code 134).$NL[Crash] unhandled exception: System.InvalidDataException: bad package"
 
 printf '%s\n' '[Mods] active: Xmas' '[Map] there is no map "nosuch": no Maps/nosuch.unr in the game or in an enabled mod' > "$T/said.txt"
-banner no_map 6 'The game stopped with an error (code 6): [Map] there is no map "nosuch": no Maps/nosuch.unr in the game or in an enabled mod See the log: L.'
+banner no_map 6 "The game stopped with an error (code 6).$NL"'[Map] there is no map "nosuch": no Maps/nosuch.unr in the game or in an enabled mod'
 
 # "Start map" (--start-maps <game dir> [chosen map]): the maps the enabled mods add, and Play's engine arguments. Same
 # cases as launcher/Desktop.Tests (StartMaps), where the rule's owner (ModOverlay.AddedMaps) is checked.
@@ -356,6 +359,10 @@ h2menu load_unused load 4 1
 h2menu load_used load 2 1
 case "$scan_out" in *"slots=1:0:-;2:1:Slot2\\Save0.bmp;3:0:-;4:0:-;5:0:-;6:0:-"*"files=Slot2/Entry_pa.usa,Slot2/Save0.bmp,Slot2/cache/c.bin,Slot2/save0.hp1sav,Slot4/save0.hp1sav,Slot4/zero.txt"*) ok "hp2_menu_scan_branches" ;;
     *) bad "hp2_menu_scan_branches: $scan_out" ;; esac
+# The pages are in the launcher's own English whatever the game's language (author 2026-11-20): the root above is
+# Language=det with its own Startup.det / Startup.int words ("Optionen", "Leer", "Load"), none of which may show.
+case "$scan_out" in *"main=Main Menu|To Play Harry Potter"*"|New Game|Load Game|Options"*"LoadGame=Loading Game|1 - Empty|2 - Used|"*) ok "hp2_menu_own_english" ;;
+    *) bad "hp2_menu_own_english: $scan_out" ;; esac
 case "$new_out" in *"go=1 --root|$T/h2/root|--launched-by-launcher|--hp2-savedir|$T/h2/data/HP2Data/Save|--hp2-cmdline|PrivetDr.unr  -SAVESLOT=2"*"files=Slot4/save0.hp1sav,Slot4/zero.txt") ok "hp2_menu_new_game_branch" ;;
     *) bad "hp2_menu_new_game_branch: $new_out" ;; esac
 
@@ -368,9 +375,18 @@ n=$(grep -c '^button' "$T/padswift")
 cmp -s "$T/padswift" "$T/padowner" && [ "$n" = 64 ] && ok "pad_map_as_owner ($n button rows)" || { bad "pad_map_as_owner"; diff "$T/padswift" "$T/padowner" | head -5; }
 grep -qx 'button 3 popup=0 hp2=1 None' "$T/padswift" && grep -qx 'button 10 popup=0 hp2=0 Hp2' "$T/padswift" && grep -qx 'stick 16001 0 16384' "$T/padswift" \
     && ok pad_map_y_rb_stick || bad pad_map_y_rb_stick
-got=$("$L" --pad-check | grep -v '^gamecontroller' | sed 's/ ring=[01]//' | paste -sd/ -)
-want="hp2_off: tab2_target=0 hp2Tab=0/start: focus=play mods=0 popup=0 page=Main/up: focus=menu mods=0 popup=0 page=Main/down: focus=play mods=0 popup=0 page=Main/down: focus=mods mods=0 popup=0 page=Main/a_on_mods: focus=back mods=1 popup=0 page=Main/right: focus=mod:Alpha mods=1 popup=0 page=Main/b: focus=play mods=0 popup=0 page=Main/start: focus=pop1 mods=0 popup=1 page=Main/down: focus=pop2 mods=0 popup=1 page=Main/b: focus=play mods=0 popup=0 page=Main/hp2: focus=loadgame mods=0 popup=0 page=Main/y_on_hp2: focus=loadgame mods=0 popup=0 page=Main/a_on_load: focus=slot1-true mods=0 popup=0 page=LoadGame/right: focus=slot2-true mods=0 popup=0 page=LoadGame/b: focus=loadgame mods=0 popup=0 page=Main"
+got=$("$L" --pad-check | grep -v '^gamecontroller' | grep -v '^banner_b' | grep -v '^installing_tab' | sed 's/ ring=[01]//' | paste -sd/ -)
+want="hp2_off: tab2_target=0 hp2Tab=0/start: focus=play mods=0 popup=0 page=Main/up: focus=menu mods=0 popup=0 page=Main/down: focus=play mods=0 popup=0 page=Main/down: focus=mods mods=0 popup=0 page=Main/a_on_mods: focus=back mods=1 popup=0 page=Main/right: focus=mod:Alpha mods=1 popup=0 page=Main/b: focus=play mods=0 popup=0 page=Main/start: focus=pop1 mods=0 popup=1 page=Main/down: focus=pop2 mods=0 popup=1 page=Main/b: focus=play mods=0 popup=0 page=Main/hp2: focus=loadgame mods=0 popup=0 page=Main/y_on_hp2: focus=loadgame mods=0 popup=0 page=Main/a_on_load: focus=slot1-true mods=0 popup=0 page=LoadGame/right: focus=slot2-true mods=0 popup=0 page=LoadGame/b: focus=loadgame mods=0 popup=0 page=Main/hp2_setup: focus=choose mods=0 popup=0 page=Main/hp2_files: focus=install mods=0 popup=0 page=Main/lb_while_installing: focus=tab1 mods=0 popup=0 page=Main"
 [ "$got" = "$want" ] && ok "pad_window_offscreen" || bad "pad_window_offscreen: got '$got'"
+# The HP2 tab without an HP2 (HP1's setup view installing HP2): focus on Choose, then Install; LB does not switch the game
+# while the setup runs; HP1Setup gets --game hp2 and HP2's install root <HP2Data>/game (as launcher/Desktop Hp2Game).
+"$L" --pad-check | grep -qx 'installing_tab: hp2Tab=1' && ok hp2_tabs_held_while_installing || bad hp2_tabs_held_while_installing
+HS=$(cd ~ && pwd)   # the user's home, as the Launcher resolves it
+[ "$("$L" --setup-args 1 /a | paste -sd'|' -)" = "--game|hp2|--dest|$HS/Library/Application Support/HPEngine/HP2Data/game|/a" ] \
+    && [ "$("$L" --setup-args 0 /a | paste -sd'|' -)" = "--dest|$HS/Library/Application Support/HPEngine/game|/a" ] \
+    && ok hp2_setup_arguments || bad "hp2_setup_arguments: $("$L" --setup-args 1 /a | paste -sd'|' -)"
+# The game-error banner's × (author 2026-11-17): a pad target; B on it clears the HP1 tab's error only (HP2's stays).
+"$L" --pad-check | grep -qx 'banner_b: dismiss_target=1 hp1=- hp2=e2 dismiss_after=0' && ok pad_b_dismisses_banner || bad pad_b_dismisses_banner
 "$L" --pad-check | grep -q '^start: focus=play ring=0' && "$L" --pad-check | grep -q '^up: focus=menu ring=1' && ok pad_ring_after_first_press || bad pad_ring_after_first_press
 # A long in-window list (author 2026-11-16, both launchers): 30 start maps open at the choice and scroll; End reaches the
 # last map and scrolls it into view, Home / Page Down / type-ahead / the d-pad move through it, its indicator drags it (middle, end, top; and a real mouse drag on its track; the indicator stands where the list is after every step), A picks (--popup-check).
@@ -385,11 +401,16 @@ grep -q '^end: focus=Map30 popup=1 scroll=[1-9][0-9]*+[0-9]* last_in_view=1 ' "$
     && ok popup_long_list_scrolls || { bad popup_long_list_scrolls; cat "$T/popup"; }
 
 # Per game (author 2026-11-16): the Launcher's GameScope mirrors Logic.cs GameScope (--game-scope): the error banner of each
-# tab (HP2's never on HP1, HP1's never on HP2, the launcher's own on both), each game's data and logs folder, the console capture.
+# tab (HP2's never on HP1, HP1's never on HP2, the launcher's own on both), each game's data and logs folder, the console capture;
+# (2026-11-17) the banner's × (dismiss: that tab's error only) and "Open log" (the run's journal / console capture / logs folder).
 mkdir -p "$T/scope/game"; "$L" --game-scope "$T/scope/game" > "$T/scopeswift"; DT --game-scope "$T/scope/game" > "$T/scopeowner"
 cmp -s "$T/scopeswift" "$T/scopeowner" && [ "$(grep -c '^error' "$T/scopeswift")" = 16 ] && ok game_scope_as_owner || { bad game_scope_as_owner; diff "$T/scopeswift" "$T/scopeowner" | head -5; }
 grep -qx 'error hp2Tab=0 hp1=- hp2=e2 launcher=- -> -' "$T/scopeswift" && grep -q "^game hp2=1 data=$T/scope/HP2Data/HPEngineData logs=$T/scope/HP2Data/HPEngineData/logs console=/d/HPEngine-HP2.log$" "$T/scopeswift" \
     && ok game_scope_hp2_apart || bad game_scope_hp2_apart
+[ "$(grep -c '^dismiss' "$T/scopeswift")" = 16 ] && grep -qx 'dismiss hp2Tab=1 hp1=e1 hp2=e2 launcher=- -> hp1=e1 hp2=- launcher=-' "$T/scopeswift" \
+    && grep -qx 'openlog run -> openlog/run/logs/run_20261117_100000.log' "$T/scopeswift" && grep -qx 'openlog console -> openlog/console/HPEngine.log' "$T/scopeswift" \
+    && grep -qx 'openlog none -> openlog/none/logs' "$T/scopeswift" && grep -qx 'runlog now=run_20261117_090000.log before=run_20261117_090000.log -> -' "$T/scopeswift" \
+    && ok banner_dismiss_and_open_log || bad banner_dismiss_and_open_log
 # Architecture lock (source text, CLAUDE.md §5: not proof of activation; macOS activation cannot be checked without a
 # window): every start of the game process hands it the focus (Launcher.handFocus, activate(from:) on macOS 14+).
 # Without it the first launch kept the game inactive: "capture on ... focus False", OS cursor visible.
@@ -397,8 +418,8 @@ python3 - "$HERE/Launcher.swift" <<'PY' && ok "game_launch_hands_focus" || bad "
 import re, sys
 s = open(sys.argv[1], encoding='utf-8').read()
 starts = s.count('runtimeURL.appendingPathComponent("HPEngine")')
-hands = len(re.findall(r'try p\.run\(\); playing = true;[^\n]*\n    Launcher\.handFocus\(to: p\.processIdentifier\)', s))
-sys.exit(0 if starts >= 2 and hands == starts and 'app.activate(from: .current)' in s else 1)
+hands = len(re.findall(r'try p\.run\(\); playing = true;[^\n]*\n    Launcher\.handFocus\(to: p\.processIdentifier, log: [^)]+\)', s))
+sys.exit(0 if starts >= 2 and hands == starts and 'app.activate(from: .current)' in s and 'range(of: "core warm")' in s and 'contains("[Focus] gained")' in s and 'timeIntervalSince(activeSince!) >= settle' in s else 1)
 PY
 
 [ $fails -eq 0 ] || exit 1

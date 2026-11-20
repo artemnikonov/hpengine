@@ -126,23 +126,29 @@ namespace HP1.UEScript
                 byExport.Add(exportIndex, entry);
             }
 
-            // LoadPackage -> ULinkerLoad::LoadAllObjects [HP2 Core 0x1014b910] constructs every export in TABLE order
-            // (CreateExport); a ParticleFX constructor makes its particle list there unless its default bDeleteMe, before
-            // any instance tag is read (UELevelRuntime.CreateParticleList; named at the world's LoadMap,
-            // UELevelRuntime.AttachLoadedParticleLists).
+            // UGameEngine::LoadMap loads the map by StaticLoadObject(ULevel, "MyLevel") [HP2 Engine 0x103a5430, the call after
+            // the package-map linkers], not LoadPackage/LoadAllObjects: MyLevel's ULevel::Actors serialisation CreateExport's
+            // the placed actors in ULevel::Actors order, and a ParticleFX constructor makes its particle list there unless its
+            // default bDeleteMe, before any instance tag is read (UELevelRuntime.CreateParticleList; named at the world's
+            // LoadMap, UELevelRuntime.AttachLoadedParticleLists). Live HP2 Ch2Skurge (SwARc level host): the DeathTorch lists
+            // are numbered in Actors order, the export table's order differs. An emitter export outside Actors: kept after the
+            // placed ones in table order, as before (no live case measured; on this load path it is constructed only if
+            // EndLoad's preloads reach a reference to it).
+            var listed = new HashSet<int>();
+            foreach (int exportIndex in actorOrder)
+            {
+                if (!listed.Add(exportIndex) || !byExport.TryGetValue(exportIndex, out ActorEntry placed)) continue;
+                if (!UEInterpreter.ClassIsA(placed.Runtime.Class, "ParticleFX")) continue;
+                UELevelRuntime.CheckParticleListCtor(placed.Runtime);
+                if (UELevelRuntime.CreatesParticleList(placed.Runtime.GetProp("bDeleteMe")))
+                    owner.PendingLoadedParticleLists.Add(placed.Runtime);
+            }
             var fxClass = new Dictionary<UObjectTableItem, UClass>();
             for (int i = 0; i < package.Exports.Count; i++)
             {
                 var export = package.Exports[i];
-                if ((export.ObjectFlags & GameLoadContext) == 0) continue;
-                if (byExport.TryGetValue(i + 1, out ActorEntry placed))
-                {
-                    if (!UEInterpreter.ClassIsA(placed.Runtime.Class, "ParticleFX")) continue;
-                    UELevelRuntime.CheckParticleListCtor(placed.Runtime);
-                    if (UELevelRuntime.CreatesParticleList(placed.Runtime.GetProp("bDeleteMe")))
-                        owner.PendingLoadedParticleLists.Add(placed.Runtime);
-                }
-                else if (export.Class is { } ci)
+                if ((export.ObjectFlags & GameLoadContext) == 0 || byExport.ContainsKey(i + 1)) continue;
+                if (export.Class is { } ci)
                 {
                     if (!fxClass.TryGetValue(ci, out UClass fx))
                         fxClass[ci] = fx = ExportClassOrNull(package, export) is { } c && UEInterpreter.ClassIsA(c, "ParticleFX") ? c : null;
@@ -656,6 +662,10 @@ namespace HP1.UEScript
             if (index > 0 && index - 1 < package.Exports.Count)
             {
                 var exportRef = package.Exports[index - 1];
+                // CreateExport makes an export only when its flags meet the linker's load context ([HP2 Core 0x1014bf70]:
+                // `Export.ObjectFlags & Linker+0xa0`), else returns its (null) object: an editor-only Model
+                // (RF_LoadForEdit|RF_NotForClient|RF_NotForServer) is None. Live HP2 Duel01: Brush153.Brush None.
+                if ((exportRef.ObjectFlags & GameLoadContext) == 0) return null;
                 if (string.Equals(exportRef.Class?.ObjectName?.ToString(), "Model", StringComparison.OrdinalIgnoreCase))
                     return new UEModelRef(exportRef.ObjectName.ToString(), index);
                 // ClassIndex 0 is UClass (CreateExport 0x1014a767..0x1014a76b): a class literal naming a class the map
@@ -792,13 +802,11 @@ namespace HP1.UEScript
                     }
                 default:
                     {
-                        // Other structs — by DECLARATION, with the same UStruct::SerializeBin walk
-                        // (Core.dll.c:45567-45628) used for class defaults. A struct with an object
-                        // reference (or a nested struct) is not taken by that walk: an instance reference is a
-                        // map actor (byExport), while the shared walk returns package resource markers. Such a
-                        // struct takes the instance walk ReadStruct (D-85b; no shipped instance tag has one).
-                        object generic = UEObject.DecodeInstanceStruct(ownerClass, structName, raw);
-                        if (generic is not null) return generic;
+                        // Other structs — by DECLARATION, the UStruct::SerializeBin walk (Core.dll.c:45567-45628) of
+                        // the instance (ReadStruct): an object reference is a map actor (byExport) and a name indexes THE
+                        // MAP's name table. (The class-default walk UEObject.DecodeInstanceStruct read the names from the
+                        // class package's table: live HP2 Quidditch QuidditchDirector1.MatchEvents {Won:WIN, ...} came
+                        // out {Won:AnimEnd, ...}, InterpolationPoint Switches_Forward PathName Trans1 as ClientTravel.)
                         UStruct def = null;
                         for (UClass c = ownerClass; c is not null && def is null; c = UEInterpreter.CanonicalSuper(c))
                             foreach (var p in c.EnumerateFields<UStructProperty>())

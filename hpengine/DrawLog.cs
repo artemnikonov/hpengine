@@ -34,6 +34,7 @@ namespace HPEngine
         public static void End() { _w?.Dispose(); _w = null; }
         public static void Line(string s) => _w?.WriteLine(s);
         static string F(float v) => v.ToString("0.#####", CultureInfo.InvariantCulture);
+        static string R(float v) => v.ToString("R", CultureInfo.InvariantCulture);   // rz: round-trip (the judge's 1/16 px depth bound)
 
         // Actor stillness at snapshot time: position and rotation as on the first warm-up tick, animation sequence and
         // frame as StillTicks ticks ago, and Base and Owner (effects and shadows follow it) are still too. Original logs
@@ -108,7 +109,7 @@ namespace HPEngine
         }
 
         // Screen bounds, RZ range and first-vertex colour of a batch through the view camera rows (clip: x, y, z, w = depth).
-        // Only triangles the rasterizer keeps are counted: pipeline face culling (cull: 0 none, 1 back, 2 front;
+        // The box counts only triangles the rasterizer keeps (the RZ range: every vertex in front of the eye): pipeline face culling (cull: 0 none, 1 back, 2 front;
         // front face is clockwise in NDC, SdlRenderer.FrontFace) and intersection with the screen.
         // None left: box=none, a call without pixels (the original mesh renderer never sends such triangles to the device).
         public static string Geom(float[] rows, IReadOnlyList<(float X, float Y, float Z, float R, float G, float B)> verts, int cull)
@@ -121,19 +122,27 @@ namespace HPEngine
                 bool front = true;
                 for (int k = 0; k < 3; k++)
                 {
-                    var v = verts[t + k];
-                    float cx = rows[0] * v.X + rows[1] * v.Y + rows[2] * v.Z + rows[3], cy = rows[4] * v.X + rows[5] * v.Y + rows[6] * v.Z + rows[7];
-                    cw[k] = rows[12] * v.X + rows[13] * v.Y + rows[14] * v.Z + rows[15];
-                    if (rows[8] * v.X + rows[9] * v.Y + rows[10] * v.Z + rows[11] < 0f) front = false;   // before the GPU near plane
-                    else { nx[k] = cx / cw[k]; ny[k] = cy / cw[k]; }
+                    var q = Clip(rows, verts[t + k]);
+                    cw[k] = q.W;
+                    if (q.Z < 0f) front = false;   // before the GPU near plane
+                    else { nx[k] = q.X / cw[k]; ny[k] = q.Y / cw[k]; }
                 }
                 if (!front)
                 {
                     // Triangle in front of the GPU near plane (crossing the eye plane): clip against the volume the GPU keeps
                     // (clip z ≥ 0 is the near plane, |x|, |y| ≤ w the sides); empty means no pixels. The rest gives bounds and RZ.
+                    for (int k = 0; k < 3; k++)   // its vertices in front of the near plane are in the original's buffer too
+                    {
+                        if (Clip(rows, verts[t + k]).Z < 0f) continue;
+                        float rz = _projZ / cw[k]; r0 = MathF.Min(r0, rz); r1 = MathF.Max(r1, rz);
+                    }
                     ClipEye(rows, verts, t, cull, ref x0, ref y0, ref x1, ref y1, ref r0, ref r1);
                     continue;
                 }
+                // RZ over every vertex of the batch in front of the eye, culled or off screen too: the original's TRI rz is
+                // the range of the whole vertex buffer it hands the device (npts: the section's vertices, back faces' and
+                // off-screen ones included; only the index list is culled), so the range must not depend on culling.
+                for (int k = 0; k < 3; k++) { float rz = _projZ / cw[k]; r0 = MathF.Min(r0, rz); r1 = MathF.Max(r1, rz); }
                 float area = (nx[1] - nx[0]) * (ny[2] - ny[0]) - (nx[2] - nx[0]) * (ny[1] - ny[0]);
                 if (cull == 1 && area >= 0f || cull == 2 && area <= 0f) continue;
                 float tx0 = MathF.Min(nx[0], MathF.Min(nx[1], nx[2])), tx1 = MathF.Max(nx[0], MathF.Max(nx[1], nx[2]));
@@ -141,11 +150,18 @@ namespace HPEngine
                 if (tx1 < -1f || tx0 > 1f || ty1 < -1f || ty0 > 1f) continue;
                 x0 = MathF.Min(x0, (tx0 + 1f) * 0.5f * _w0); x1 = MathF.Max(x1, (tx1 + 1f) * 0.5f * _w0);
                 y0 = MathF.Min(y0, (1f - ty1) * 0.5f * _h0); y1 = MathF.Max(y1, (1f - ty0) * 0.5f * _h0);
-                for (int k = 0; k < 3; k++) { float rz = _projZ / cw[k]; r0 = MathF.Min(r0, rz); r1 = MathF.Max(r1, rz); }
             }
             if (x0 > x1) return "\tbox=none";
             var c = verts[0];
-            return $"\tbox={F(x0)},{F(y0)},{F(x1)},{F(y1)}\trz={F(r0)},{F(r1)}\tcol={F(c.R)},{F(c.G)},{F(c.B)}";
+            return $"\tbox={F(x0)},{F(y0)},{F(x1)},{F(y1)}\trz={R(r0)},{R(r1)}\tcol={F(c.R)},{F(c.G)},{F(c.B)}";
+        }
+
+        // Clip coordinates of a vertex: Camera.Rows rows act on the camera-relative point (eye at rows[16..18]).
+        static System.Numerics.Vector4 Clip(float[] rows, (float X, float Y, float Z, float R, float G, float B) v)
+        {
+            float x = v.X - rows[16], y = v.Y - rows[17], z = v.Z - rows[18];
+            return new System.Numerics.Vector4(rows[0] * x + rows[1] * y + rows[2] * z + rows[3], rows[4] * x + rows[5] * y + rows[6] * z + rows[7],
+                rows[8] * x + rows[9] * y + rows[10] * z + rows[11], rows[12] * x + rows[13] * y + rows[14] * z + rows[15]);
         }
 
         // Sutherland-Hodgman in homogeneous clip space against the volume the rasterizer keeps (no far plane:
@@ -155,13 +171,7 @@ namespace HPEngine
             ref float x0, ref float y0, ref float x1, ref float y1, ref float r0, ref float r1)
         {
             var poly = new List<System.Numerics.Vector4>(9);
-            for (int k = 0; k < 3; k++)
-            {
-                var v = verts[t + k];
-                poly.Add(new System.Numerics.Vector4(
-                    rows[0] * v.X + rows[1] * v.Y + rows[2] * v.Z + rows[3], rows[4] * v.X + rows[5] * v.Y + rows[6] * v.Z + rows[7],
-                    rows[8] * v.X + rows[9] * v.Y + rows[10] * v.Z + rows[11], rows[12] * v.X + rows[13] * v.Y + rows[14] * v.Z + rows[15]));
-            }
+            for (int k = 0; k < 3; k++) poly.Add(Clip(rows, verts[t + k]));
             for (int p = 0; p < 5 && poly.Count > 0; p++)
             {
                 float D(System.Numerics.Vector4 q) => p switch { 0 => q.Z, 1 => q.W + q.X, 2 => q.W - q.X, 3 => q.W + q.Y, _ => q.W - q.Y };

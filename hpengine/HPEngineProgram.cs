@@ -26,7 +26,7 @@ namespace HPEngine
             string root = null, map = null, shot = null, video = null, selftest = null, visual = null, hp2CmdLine = null, hp2SaveDir = null;
             int videoFrames = 300;
             string lookAt = null;
-            int warm = 50, bench = 300, w = 1280, h = 720, post = 0, probeSettle = 0, kill = -1; bool sizeFromArgs = false;
+            int warm = 50, bench = 300, w = 1280, h = 720, post = 0, probeSettle = 0, kill = -1; bool sizeFromArgs = false, warmFromArgs = false;
             var causeEvents = new List<string>();
             var consoleAt = new List<(int Tick, string Cmd)>();
             var probeExecAt = new List<(int Tick, string Cmd)>();
@@ -50,7 +50,7 @@ namespace HPEngine
                     case "--look-dist": LookDist = float.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture); break;   // snapshot: camera 300 units from the actor, along the actor's yaw
 
                     case "--debug-cam": DebugCam = true; break;
-                    case "--warm": warm = int.Parse(args[++i]); break;
+                    case "--warm": warm = int.Parse(args[++i]); warmFromArgs = true; break;
                     case "--fps": TargetFps = double.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture); FpsFromArgs = true; break;   // window pacing (Core ticks per second); otherwise 60
                     case "--dt": WarmDt = float.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture); break;   // snapshot warm-up step (s)
                     case "--bench": bench = int.Parse(args[++i]); break;
@@ -72,6 +72,7 @@ namespace HPEngine
                     case "--window-script": Script = new WindowScript(args[++i]); break;   // window: fixed-step scripted session (judge)
                     case "--window-stress": WindowStress = true; break;   // window script: key/mouse through the SDL queue, slow Core ticks, forced tick-end interleaving (CoreThread.cs WindowScript)
                     case "--digest": DigestOut = new StreamWriter(args[++i]); break;   // window: per-tick state digest (judge)
+                    case "--frame-trace": FrameTrace = new StreamWriter(args[++i]); break;   // window: wall time of every tick and presented frame, menu region (audit/product_budget.sh)
                     case "--world-digest": WorldDigest.Path = args[++i]; break;   // window: per-20-tick whole-world digest (judge, CoreThread.cs)
                     case "--world-ref": WorldDigest.RefPath = args[++i]; break;   // window: dump the world bytes at the first tick differing from this digest
                     case "--world-dump": WorldDigest.DumpAt = int.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture); break;   // window: dump the world bytes at this tick
@@ -200,6 +201,14 @@ namespace HPEngine
             // <install>/HPEngineData (Default.ini/DefUser.ini with the original sections); shipped files are untouched.
             // Only the windowed game owns the player's settings: snapshots and probes (--shot, --video, probe modes) get
             // the in-memory store (null), so a `--console "set ini:..."` in a check never rewrites the player's overlay.
+            // Galaxy measures its own Update step by the wall clock (UEGalaxyAudio.WallClock): the player's window only;
+            // judge, scripted and hidden windows keep the frame's dt so their runs stay deterministic.
+            if (windowedGame && !judgeWindow)
+                UEGalaxyAudio.WallClock = () =>
+                {
+                    long t = Stopwatch.GetTimestamp(), f = Stopwatch.Frequency;
+                    return ((t / f) << 32) + ((t % f) << 32) / f;   // FTime: seconds, 32.32 fixed point
+                };
             UEGameEngine host = UEGameEngine.Boot(root, map, selectHardwareRenderDevice: true,
                 configStore: windowedGame ? new UEConfig.FileStore(DataDir(install))
                     : visual is null ? null : UEConfig.SeededMemory((UEConfig.ScopeSystem, UEConfig.HPEngineSection, UEConfig.VisualModeKey, visual)),
@@ -349,6 +358,10 @@ namespace HPEngine
             SDL_SetHint(SDL_HINT_KEYCODE_OPTIONS, "french_numbers,latin_letters");
             // An offscreen capture (--shot) must not keep the display awake; the game window still disables the screensaver.
             if (shot is not null) SDL_SetHint("SDL_VIDEO_ALLOW_SCREENSAVER", "1");
+            // Text input is on for the whole session (UWindow edit fields, the console); without this hint SDL shows the
+            // on-screen keyboard on a device without a physical one (Steam Deck: the keyboard popped up at every start, author
+            // 2026-11-18). A physical keyboard still types; on the Deck Steam+X opens the keyboard when it is wanted.
+            SDL_SetHint("SDL_ENABLE_SCREEN_KEYBOARD", "0");
             if (!SDL_Init(SDL_InitFlags.SDL_INIT_VIDEO)) { Console.Error.WriteLine(SDL_GetError()); return 2; }
             var r = new Renderer { Anisotropy = host.Runtime.Config?.Anisotropy ?? 16 };
             if (!r.Create(shot is null, w, h, OffscreenWindow)) { Console.Error.WriteLine("GPU: " + SDL_GetError()); return 2; }
@@ -363,8 +376,17 @@ namespace HPEngine
                 WindowViewport = vp;
                 SdlViewportDevice.OpenStartup(vp, host.Runtime.Config, Environment.CommandLine, sizeFromArgs || OffscreenWindow ? (w, h) : null);
                 Console.WriteLine($"[Viewport] {vp.SizeX}x{vp.SizeY}{(vp.Fullscreen ? " fullscreen" : " window")}");
+                // Warm-up ticks step Core at the window's real pixel size, not the 1280x720 default: the shipped viewport
+                // has its final size before the first frame, and HP2 HPConsole creates the UWindow root once, at the first
+                // PostRender, with Root.SetScale(RealWidth / 640) and never rescales it (only RealWidth/WinWidth follow the
+                // canvas). A first frame at 1280x720 left GUIScale 2 on a 5K screen: the loading screen (baseConsole.ScaleAndDraw
+                // -> Root.DrawStretchedTexture) drew its 768x512 picture twice too big, Harry off screen (author 2026-11-18).
+                (w, h) = r.PixelSize();
             }
             Src = new UETextureSource(root);
+            // Render cache only: the font index (it opens every System/Textures package) is built here, under the splash,
+            // not by the first frame that draws text — the first pause page froze one window frame for 90-185 ms.
+            Src.GetFont("");
             Hud = new HPEngine.Hud.HudBatcher(
                 // Runtime textures (CreateTextureFromBMP, SavePics package: save-slot pictures): Core registry.
                 path => UERuntimeTextures.TryGet(path, out var rt) ? (rt.USize, rt.VSize)
@@ -378,6 +400,10 @@ namespace HPEngine
             host.RunOwedLoadFrame();
             AfterTick(r);
             Splash.Close();   // ExitSplash after InitEngine (HP.exe 0x1090b0eb; HP2 Game.exe the same place, 0x1090d460)
+            // The launcher hands focus to this process until it owns an on-screen window and is active, which the splash
+            // already satisfies; with the splash gone the game window must take key focus itself (macOS: otherwise
+            // "focus False" until the player clicks or switches apps; author 2026-11-18).
+            if (shot is null && !OffscreenWindow) SDL_RaiseWindow(r.Window);
             // Windowless travel probe: --travel-png <dir>, the same Core carriers as the window (fade frames and the
             // loading screen), but the frame goes to PNG. Together with --travel-at <tick> <map>.
             int tpIdx = Array.IndexOf(args, "--travel-png");
@@ -429,19 +455,29 @@ namespace HPEngine
             (UEVector, UERotator)? probe = shot is not null && CamOverride is { Length: 5 } pc
                 ? (new UEVector(pc[0], pc[1], pc[2]), new UERotator((int)MathF.Round(pc[3] * 65536f / 360f), (int)MathF.Round(pc[4] * 65536f / 360f), 0))
                 : null;
-            for (int i = 0; i < warm; i++)
+            // The windowed game has no hidden warm-up: the original draws from its first tick (HP.exe MainLoop: Tick, then
+            // Draw), while 50 undrawn ticks here played the first 1.24 s of the start map (3 x 0.1 s load stutter + 47 x
+            // 0.02 s) behind a blank window for ~2.5 s after the splash closed (run logs: "core warm 50 ticks 2519 ms").
+            // Only the ticks before the first world frame with a scene run here (HP2 publishes none before its first tick:
+            // UGameEngine::Draw is idle while GIsRunning is 0); their frame is the first the window draws.
+            bool untilScene = windowedGame && !warmFromArgs;
+            int warmed = 0;
+            for (int i = 0; untilScene ? Cur is null && i < warm : i < warm; i = ++warmed)
             {
                 if (probe is not null && i == Math.Max(0, warm - (probeSettle > 0 ? probeSettle : warm)) && host.Runtime.FrameProducer is { } fp)
                     fp.ProbeCamera = probe;
                 if (DrawLog.Path != null && i == 1) DrawLog.MarkFirst(host.Runtime.LatestFrame);
                 if (DrawLog.Path != null && i == Math.Max(0, warm - DrawLog.StillTicks)) DrawLog.MarkState(host.Runtime.LatestFrame);
                 foreach (var (pt, cmd) in probeExecAt)
-                    if (pt == i) Console.WriteLine($"probe-exec@{i} '{cmd}' -> '{host.ConsoleProbe(cmd)}'");
+                    if (pt == i) Console.WriteLine($"probe-exec@{i} '{cmd}' -> '{ProbeExec(host, cmd)}'");
                 PrepareStep(w, h); var scene = Cur; host.Tick(1, WarmDt); AfterTick(r);
                 audio?.Update(!ReferenceEquals(scene, Cur));
             }
             if (probe is not null && host.Runtime.FrameProducer is { ProbeCamera: null } fp0) fp0.ProbeCamera = probe;   // --warm 0
-            Console.WriteLine($"core warm {warm} ticks {sw.ElapsedMilliseconds} ms");
+            Console.WriteLine($"core warm {warmed} ticks {sw.ElapsedMilliseconds} ms");
+            // The macOS launcher hands focus to the game until it reads "[Focus] gained" after "core warm" (launcher/Launcher.swift
+            // handFocus): the window either has input focus now or gets it later (SDL_EVENT_WINDOW_FOCUS_GAINED in the loop).
+            if (r.Window != null && (SDL_GetWindowFlags(r.Window) & SDL_WindowFlags.SDL_WINDOW_INPUT_FOCUS) != 0) Console.WriteLine("[Focus] gained");
             foreach (string cmd in consoleCmds)
                 Console.WriteLine($"console '{cmd}' -> '{UEConsoleCommand.Execute(host.Runtime.Config, cmd)}'");
             foreach (string ev in causeEvents)
@@ -460,7 +496,10 @@ namespace HPEngine
                     if (bt == i) Console.WriteLine($"open-book@{i} '{page}' -> {host.OpenBookProbe(page)}");
                 foreach (var (kt, key) in keys)
                     if (kt == i || kt + 1 == i) keySink.CauseInput(key, kt == i ? UEInput.InputAction.Press : UEInput.InputAction.Release, 0f);
-                PrepareStep(w, h); host.Tick(1, WarmDt); AfterTick(r);
+                // The window's 4:3 menu region (MenuRegionFor) while the console's UWindow is up, so a snapshot of a
+                // menu is placed as the player sees it.
+                bool uwin = host.Runtime.ViewportConsole is UEObject con && UEInterpreter.ToBool(con.GetProp("bUWindowActive"));
+                PrepareStep(w, h, HPEngine.Input.InputStage.MenuRegion(uwin, w, h)); host.Tick(1, WarmDt); AfterTick(r);
                 foreach (var (kt, key) in keys)
                     if (kt == i) Console.WriteLine($"key {key}@{i} -> uwindow={keySink.UWindowActive}");
             }
@@ -547,7 +586,7 @@ namespace HPEngine
             Console.WriteLine($"scene #{SceneLoads} {Path.GetFileNameWithoutExtension(rt.LoadedMapPath)}: nodes {mesh.Nodes}, batches {mesh.Batches.Count}, "
                 + $"atlas {LightmapAtlas.Width}x{atlas.Height} (tiles {tiles}), mirror polygons {mesh.SkippedMirror} (planes {mesh.MirrorPlanes.Count}), portals as surfaces {mesh.PortalsAsSurface}, "
                 + $"without metrics {mesh.SkippedNoMetrics}; fog: zones {fogZones.Count}, surfaces {Fog.Surfaces.Count}, atlas {FogScene.W}x{Fog.H}; movers {Movers.Geo.Movers.Count} (tiles {moverTiles}, refusals {Movers.Geo.Problems.Count}, mirror planes {Movers.Mesh.MirrorPlanes.Count}); "
-                + $"textures {r.TextureCount} (no pixels {r.MissingTextures.Count}); {sw.ElapsedMilliseconds} ms");
+                + $"textures {r.TextureCount} (no pixels {r.MissingTextures.Count}, scripted {r.ScriptedTextures}); {sw.ElapsedMilliseconds} ms");
             foreach (string pr in Movers.Geo.Problems) Console.WriteLine("  mover: " + pr);
             foreach (var (mp, mn) in mesh.MirrorPlanes) Console.WriteLine($"  mirror: point {mp} normal {mn}");
             foreach (WarpPortal wp in mesh.WarpPortals) Console.WriteLine($"  warp portal: surf {wp.Surf} zones {wp.Zone0}/{wp.Zone1} plane {wp.Normal}·p={wp.Dist} (level warp zones {warpZones.Count})");
@@ -558,6 +597,23 @@ namespace HPEngine
 
         // Before the Core step: the screen size to Core (it picks the interface scale and the canvas, D-44), 4:3 menu
         // region, Hor+ (both NOT ORIGINAL).
+        // 4:3 menu region (NOT ORIGINAL, DECISIONS 2026-09-29: menus, pause and loading) — not for the HP2 vendor bar
+        // (author 2026-11-18, option (b)): VendorManager.SetConsoleVendorBarFlags sets HPConsole.bVendorBar together with
+        // bUWindowActive over the playing world, and the region pillarboxed the world with it. The pause page draws its
+        // own world-covering background, so the frame's DrawWorld cannot tell the two apart; bVendorBar does. Read only.
+        // Both flags are read from Core as the last tick left them: the vendor's Yes/No (VendorTransaction.PlayerInput,
+        // a script event inside the tick) clears them together, and a menu flag sampled before that tick (the input
+        // stage's) pillarboxed the next frame of the world.
+        static int MenuRegionFor(int pxw, int pxh)
+        {
+            var con = Host.Runtime.ViewportConsole as UEObject;
+            bool menu = con is not null && UEInterpreter.ToBool(con.GetProp("bUWindowActive")) && !UEInterpreter.ToBool(con.GetProp("bVendorBar"));
+            int region = HPEngine.Input.InputStage.MenuRegion(menu, pxw, pxh);
+            if (region != lastMenuRegion) Console.WriteLine($"[region] menu region {lastMenuRegion} -> {region} (frame {Host.Runtime.LatestFrame?.Tick})");
+            return lastMenuRegion = region;
+        }
+        static int lastMenuRegion;
+
         static void PrepareStep(int screenW, int screenH, int consoleRegion = 0)
         {
             var fp = Host.Runtime.FrameProducer;
@@ -654,9 +710,11 @@ namespace HPEngine
         // NOT ORIGINAL: windowed game log: all console output is duplicated into
         // <install>/HPEngineData/logs/run_<date>_<time>.log; survives rebuilds, independent of the launch method.
         // The last 20 logs are kept.
+        static string RunLogDir;   // SpotReport screenshots go next to the run log
         static void StartRunLog(string dir)
         {
             Directory.CreateDirectory(dir);
+            RunLogDir = dir;
             foreach (var old in new DirectoryInfo(dir).GetFiles("run_*.log").OrderByDescending(f => f.Name).Skip(19)) old.Delete();
             var file = new StreamWriter(Path.Combine(dir, $"run_{DateTime.Now:yyyyMMdd_HHmmss}.log")) { AutoFlush = true };
             Console.SetOut(TextWriter.Synchronized(new Tee(Console.Out, file)));
@@ -672,7 +730,7 @@ namespace HPEngine
             SDL_ShowSimpleMessageBox(SDL_MessageBoxFlags.SDL_MESSAGEBOX_ERROR, "HPEngine", message, null);
 
         // The package reader library (UELib) prints its own read diagnostics for every package and object: headers,
-        // "Trailing data", "PropertyTag value size error", the ThaiFontMed font it cannot read. Known and harmless
+        // "Trailing data", "PropertyTag value size error". Known and harmless
         // (~80% of a playthrough log); they stay on the console and are left out of the log file.
         static readonly string[] LibraryNoise =
         {
@@ -690,10 +748,19 @@ namespace HPEngine
             public override void Flush() { a.Flush(); b.Flush(); }
         }
 
+        // Cached until a display event (DisplayEvent): the query was made every frame and on macOS took ~2 ms on average,
+        // once 354 ms (a frozen world frame in the HP2 product-budget route). Draw pacing only.
         static double DisplayHz(Renderer r)
         {
+            if (_displayHz >= 0) return _displayHz;
             SDL_DisplayMode* m = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(r.Window));
-            return m != null && m->refresh_rate > 0 ? m->refresh_rate : 0;
+            return _displayHz = m != null && m->refresh_rate > 0 ? m->refresh_rate : 0;
+        }
+        static double _displayHz = -1;
+        static void DisplayEvent(SDL_EventType t)
+        {
+            if (t == SDL_EventType.SDL_EVENT_WINDOW_DISPLAY_CHANGED || (t >= SDL_EventType.SDL_EVENT_DISPLAY_FIRST && t <= SDL_EventType.SDL_EVENT_DISPLAY_LAST))
+                _displayHz = -1;
         }
         static bool FpsFromArgs;
         const double MinLoadScreenSeconds = 2.0;
@@ -756,7 +823,7 @@ namespace HPEngine
 
         // Frame dynamic batches: actors + mover surfaces (their lightmap tiles go into the mover atlas).
         // alpha/levelTime: frame between logic ticks (FramePacing.cs); by default the current tick.
-        // full = false — a frame between logic ticks: visibility, light and decals stay the tick's; sprite tiles follow the frame camera.
+        // full = false — a frame between logic ticks: visibility and light stay the tick's; sprite tiles follow the frame camera.
         // takeTick (default: full) — the frame takes the tick's Core reads itself (TakeTick); false — they were taken while Core
         // was idle and this first frame of the tick re-emits the prepared actors at its alpha.
         static void FrameDraws(Renderer r, WorldFrame f, float alpha = 1f, float? levelTime = null, bool full = true, bool? takeTick = null)
@@ -769,6 +836,7 @@ namespace HPEngine
             actors.Alpha = alpha;
             r.UploadFog(Fog);
             r.SetDrawn(f.Drawn, f.DrawnTextures);   // Core's world polygons per view and the textures DrawFrame updated
+            r.TakeScriptedTexels(f.ScriptedTexels);   // ScriptedTexture texels Core's Tick/RenderTexture wrote this tick
             r.AnimateWorld(lt, f.TextureFrames);
             if (take) actors.EmitPrepared();
             else actors.Reemit(alpha);
@@ -792,15 +860,18 @@ namespace HPEngine
             }
             HPEngine.Hud.ScreenEffects.Overlay(_hud2, _coronaQuads, HPEngine.Hud.ScreenEffects.FlashQuad(f.ViewFlash, pw, ph), quads);
             r.SetHud(_hud2);
+            r.SetCanvasActors(f.Hud, f.CanvasFovAngle, f.CanvasFrameSize.X * f.CanvasScale, f.CanvasFrameSize.Y * f.CanvasScale);
             // Menu brightness (UClient.Brightness, FEOptionsPage.BrightnessChanged): D3DDrv gamma ramp over the whole frame.
             r.GammaExponent = HPEngine.Hud.ScreenEffects.GammaExponent(TickBrightness);
             _built.Clear(); foreach (var d in actors.Draws) if (d.Indices.Count > 0) _built.Add(d);
             _built.AddRange(Movers.Draws);
             // Sprites, particles, shadows use the actor path (texel × vertex colour).
             // Sprite tiles face the camera of the frame being drawn (DrawActorSprite uses Frame->Coords every frame); the
-            // set of sprites stays the tick's (WorldFrame.SpriteActors). Decal pieces are world-space: built per tick.
+            // set of sprites stays the tick's (WorldFrame.SpriteActors). Decal pieces move with their decal between ticks
+            // (Interp.Decals): built per frame.
+            Cur.Sprites.Alpha = alpha;
             Cur.Sprites.Build(f);
-            if (full) Cur.Decals.Build(f);
+            Cur.Decals.Build(f);
             Cur.Particles.Build(f);
             int sd = 0;
             foreach (var list in new[] { Cur.Sprites.Draws, Cur.Particles.Draws, Cur.Decals.Draws })
@@ -814,6 +885,18 @@ namespace HPEngine
             _procReported = Proc.Problems.Count;
         }
         static int _procReported;
+
+        // A live-probe command (--probe-exec-at, window script `exec`): the probe's `causeevent <Tag>` (a cheat exec, not
+        // UEConsoleCommand), its pcall `<actor> Trigger player player` (`trigger <actor>`), `kill` (death -> slot reload, as
+        // --kill), else the console through UEGameEngine.ConsoleProbe (live actors).
+        static string ProbeExec(UEGameEngine host, string cmd)
+            => cmd.StartsWith("causeevent ", StringComparison.OrdinalIgnoreCase) ? $"{host.CauseEventProbe(cmd[11..].Trim())} actor(s)"
+            : cmd.StartsWith("trigger ", StringComparison.OrdinalIgnoreCase) ? host.TriggerProbe(cmd[8..].Trim())
+            : cmd.Equals("kill", StringComparison.OrdinalIgnoreCase) ? $"kill {host.KillPlayerProbe()}"
+            : cmd.StartsWith("reach ", StringComparison.OrdinalIgnoreCase) ? $"reach {host.ReachProbe(cmd[6..].Trim())}"
+            : cmd.StartsWith("peek ", StringComparison.OrdinalIgnoreCase) && cmd.Split(' ', StringSplitOptions.RemoveEmptyEntries) is { Length: 3 } pk ? host.PeekProbe(pk[1], pk[2])
+            : cmd.StartsWith("bump ", StringComparison.OrdinalIgnoreCase) ? $"bump {host.ReachProbe(cmd[5..].Trim(), "Bump")}"
+            : host.ConsoleProbe(cmd);
 
         static int Shot(UEGameEngine host, Renderer r, string path, int bench)
         {
@@ -839,7 +922,7 @@ namespace HPEngine
             Console.WriteLine("actors: " + Cur.Actors.Stats);
             Console.WriteLine($"fatness: actors displaced per frame {Cur.Actors.FatActors}, in the frame with Fatness != 128: {string.Join(", ", f.Actors.Where(x => !x.Destroyed && x.Fatness != 128 && x.DrawType == 2).Select(x => x.Name + "=" + x.Fatness).Take(10))}");
             foreach (string pr in Cur.Actors.Stats.Problems.Take(8)) Console.WriteLine("  " + pr);
-            Console.WriteLine($"  textures total {r.TextureCount}, without pixels {r.MissingTextures.Count}");
+            Console.WriteLine($"  textures total {r.TextureCount}, without pixels {r.MissingTextures.Count}, scripted texel uploads {r.ScriptedUploads}");
             foreach (string m in r.MissingTextures) Console.WriteLine("  no pixels: " + m);
             var cam = Camera.From(f.Camera);
             if (CamOverride is { Length: 5 } co)
@@ -1042,6 +1125,23 @@ namespace HPEngine
         static WindowScript Script;
         static bool WindowStress;
         static StreamWriter DigestOut;
+        // --frame-trace (audit/product_budget.sh, audit/hp2_menu_region_check.sh): one line per Core tick (its wall time, the
+        // synchronous presentations inside it, HP2 SAVEPACTORS calls/ms in it, the menu region it got and Core's console flags when the region was taken)
+        // and per presented frame (the wall gap since the previous presentation and its kind: w window, p save progress,
+        // f LoadMap fade, l loading screen, g the travel gate). Written from both threads: the writer is the lock.
+        static StreamWriter FrameTrace;
+        static long traceLast;
+        static void TracePresent(char kind, long drawStart = 0)
+        {
+            if (FrameTrace is null) return;
+            long now = Stopwatch.GetTimestamp();
+            lock (FrameTrace)
+            {
+                if (traceLast != 0) FrameTrace.WriteLine(FormattableString.Invariant($"frame gap={(now - traceLast) * 1000.0 / Stopwatch.Frequency:F2} kind={kind}")
+                    + (drawStart != 0 ? FormattableString.Invariant($" draw={(now - drawStart) * 1000.0 / Stopwatch.Frequency:F2}") : ""));
+                traceLast = now;
+            }
+        }
         static bool OffscreenWindow, ModsInJudgeWindow, HiddenGame;
 
         static int Window(UEGameEngine host, Renderer r, GameAudio audio)
@@ -1126,14 +1226,42 @@ namespace HPEngine
             host.Runtime.PresentAudioNow = (channels, resumeSerial) => audioOwner?.ApplyChannels(channels, resumeSerial);
             // A synchronous presentation from inside the tick takes the window until the tick is taken: the window thread
             // draws no frame of its own meanwhile (the single-thread loop draws none during a tick either).
-            bool presentedDuringJob = false; int fadeFrames = 0, loadScreens = 0;
+            bool presentedDuringJob = false; int fadeFrames = 0, loadScreens = 0, progressFrames = 0;
+            string loadShot = null;   // window script `loadshot`: the tick's synchronously presented frames, offscreen to PNG
+            // UGameEngine::SaveGame -> PaintProgress (UELevelRuntime.PaintProgress): the saving frame (FlashFog (0, 0.1, 0.25,
+            // 0.2), baseConsole.DrawLevelAction's caption) is on screen BEFORE SavePackage and stays there while the package
+            // is written, as shipped. The window never took it (no carrier since the Unity frontend), so a save showed no
+            // frame at all (author 2026-11-18).
+            host.Runtime.PresentProgressNow = pf =>
+            {
+                MainThread.Invoke(() =>
+                {
+                    if (pf.Camera.Valid) presentCam = Camera.From(pf.Camera);
+                    FrameDraws(r, pf);
+                    r.RenderToWindow(presentCam);
+                    if (loadShot is not null)
+                    {
+                        r.RenderOffscreen(presentCam, out byte[] spx);
+                        Png.WriteOpaque(loadShot, r.Width, r.Height, spx);
+                        Console.WriteLine($"[Script] loadshot -> {loadShot} save frame, hud {pf.Hud.Count}");
+                    }
+                    presentedDuringJob = true; progressFrames++; TracePresent('p');
+                });
+                return true;
+            };
             host.Runtime.PresentFadeFrameNow = ff => MainThread.Invoke(() =>
             {
                 host.Runtime.LoadProgress();
                 if (ff.Camera.Valid) presentCam = Camera.From(ff.Camera);
                 FrameDraws(r, ff);
                 r.RenderToWindow(presentCam);
-                presentedDuringJob = true; fadeFrames++;
+                if (loadShot is not null)
+                {
+                    r.RenderOffscreen(presentCam, out byte[] lpx);
+                    Png.WriteOpaque(loadShot, r.Width, r.Height, lpx);
+                    Console.WriteLine($"[Script] loadshot -> {loadShot} hud {ff.Hud.Count}");
+                }
+                presentedDuringJob = true; fadeFrames++; TracePresent('f');
             });
             // The loading screen is held at least MinLoadScreenSeconds (NOT ORIGINAL): a level loads in a fraction of a
             // second and the screen merely flickered. The hold is after loading; the world does not tick meanwhile.
@@ -1152,8 +1280,16 @@ namespace HPEngine
                 r.SetHud(loadHud);
                 r.HideWorld = true;
                 r.RenderToWindow(presentCam);
+                if (loadShot is not null)
+                {
+                    r.RenderOffscreen(presentCam, out byte[] lpx);
+                    Png.WriteOpaque(loadShot, r.Width, r.Height, lpx);
+                    Console.WriteLine($"[Script] loadshot -> {loadShot} loading screen, hud {screen.Hud.Count}");
+                    loadShot = null;   // the screen is the last frame of a load; the hold re-presents the same one
+                }
                 r.HideWorld = false;
-                presentedDuringJob = true; loadScreens++;
+                presentedDuringJob = true; loadScreens++; TracePresent('l');
+                if (FrameTrace is not null) lock (FrameTrace) FrameTrace.WriteLine($"loadscreen offx={host.Runtime.FrameProducer?.LevelInfoOffsetX ?? 0} w={r.PixelSize().Item1}");
             });
             // EXIT/QUIT console command (menu Exit button): Core calls the handler from the world step, the window closes
             // after the frame (flag, checked when the tick is taken).
@@ -1161,6 +1297,8 @@ namespace HPEngine
             UEConsoleCommand.ExitHandler = () => exitRequested = true;
             var sw = Stopwatch.StartNew();
             double last = 0, lastRender = 0, acc = 0, core = 0, rend = 0; int frames = 0, ticks = 0; bool tickedSinceDraw = false;
+            string pendingShot = null; int shotScan = 0;   // window script `shot`
+            string spotRequest = null; int spotScan = 0;                     // F12 / window script `report <png>`: SpotReport at the next drawn frame
             long allFrames = 0, allTicks = 0; double allCore = 0, allRend = 0;
             FramePacer pacer = null; double pacerDrawHz = -1;
             // The tick's frame the window draws from: the frame before the tick (prev) and after it (cur), level times, the
@@ -1173,14 +1311,21 @@ namespace HPEngine
             WorldFrame jobBefore = null; float jobBeforeLevelTime = 0f, jobDt = 0f; int tickIndex = 0; long jobStart = 0, jobEnd = 0;
             void TickJob(float dt, int pxw, int pxh, int menuRegion, int k)
             {
+                long traceT0 = Stopwatch.GetTimestamp(), tracePa = host.Runtime.SavePersistentActorsTicks; int traceL = loadScreens, traceF = fadeFrames, traceP = progressFrames, tracePaN = host.Runtime.SavePersistentActorsCalls;
+                string traceFlags = null;
+                if (FrameTrace is not null && host.Runtime.ViewportConsole is UEObject tc)
+                    traceFlags = $"uw={UEInterpreter.ToBool(tc.GetProp("bUWindowActive"))} vb={UEInterpreter.ToBool(tc.GetProp("bVendorBar"))}";
                 if (stress && threaded) Thread.Sleep(20 * (k % 3));
                 if (Script is not null)
                     foreach (string cmd in Script.ConsoleAt(k))
                         Console.WriteLine($"[Script] tick {k} console '{cmd}' -> '{UEConsoleCommand.Execute(host.Runtime.Config, cmd, null, device)}'");
                 if (Script is not null && Script.KillAt(k)) Console.WriteLine($"[Script] tick {k} kill {host.KillPlayerProbe()}");
                 if (Script is not null)
+                    foreach (string cmd in Script.ExecAt(k)) Console.WriteLine($"[Script] tick {k} exec '{cmd}' -> '{ProbeExec(host, cmd)}'");
+                if (Script is not null)
                     foreach (string text in Script.ClicksAt(k))
                         Console.WriteLine($"[Script] tick {k} click '{text}' -> {host.MenuClickProbe(text)}");
+                loadShot = Script?.LoadShotAt(k);
                 PrepareStep(pxw, pxh, menuRegion);
                 input.RunFrame(sink, dt);
                 jobBefore = host.Runtime.LatestFrame; jobBeforeLevelTime = host.Runtime.PresentedLevelTime; jobDt = dt;
@@ -1189,6 +1334,9 @@ namespace HPEngine
                 if (WorldDigest.Path is not null) WorldDigest.Write(host, k);
                 if (Script is not null && Script.ProbeAt(k)) Console.WriteLine($"[Script] tick {k} menu: {WindowScript.MenuProbe(host)}");
                 jobEnd = Stopwatch.GetTimestamp();
+                if (FrameTrace is not null)
+                    lock (FrameTrace)
+                        FrameTrace.WriteLine(FormattableString.Invariant($"tick {k} ms={(jobEnd - traceT0) * 1000.0 / Stopwatch.Frequency:F2} load={loadScreens - traceL} fade={fadeFrames - traceF} progress={progressFrames - traceP} pa={host.Runtime.SavePersistentActorsCalls - tracePaN}/{(host.Runtime.SavePersistentActorsTicks - tracePa) * 1000.0 / Stopwatch.Frequency:F2} region={menuRegion} w={pxw} {traceFlags} gc={GC.CollectionCount(0)}/{GC.CollectionCount(1)}/{GC.CollectionCount(2)} map={Path.GetFileNameWithoutExtension(host.Runtime.LoadedMapPath ?? "")}"));
             }
             // After the tick, Core idle (window thread): the single-thread loop's post-tick steps in their order, then the
             // tick's frame for drawing. true: the loading screen was held (now/last moved past the hold).
@@ -1201,8 +1349,8 @@ namespace HPEngine
                 if (sceneChanged) hold.SceneChanged(jobBefore);   // activeSceneChanged
                 hold.Update(host.Runtime.LatestFrame, payloadPending: false);
                 audio.Update(sceneChanged);
-                // Device-queue gaps the player hears as crackle (AudioSystem.Fill zero-fills an underrun, drops past
-                // half a second of backlog): logged when they change, with the Core tick, so a playthrough log shows them.
+                // Device-queue gaps the player hears as crackle (AudioSystem.Fill zero-fills an underrun, the queue drops
+                // audio past MaxLeadSeconds of lead): logged when they change, with the Core tick, so a playthrough log shows them.
                 int ur = audio.System.QueueUnderruns, qd = audio.System.QueueDropped;
                 if (ur != lastUnderruns || qd != lastDropped)
                 {
@@ -1216,7 +1364,10 @@ namespace HPEngine
                     {
                         SDL_Event ev;
                         while (SDL_PollEvent(&ev))
+                        {
+                            DisplayEvent((SDL_EventType)ev.type);
                             if (!isolated && !input.PumpLoadHold(ev, sink, audio.Focus)) running = false;
+                        }
                         host.Runtime.PresentLoadMapScreenNow(loadScreen);
                         SDL_Delay(16);
                     }
@@ -1303,9 +1454,18 @@ namespace HPEngine
                     while (SDL_PollEvent(&e))
                     {
                         if (stress && e.common.timestamp == WindowScript.OsStamp) { stressFed++; input.Feed(e); continue; }
+                        DisplayEvent((SDL_EventType)e.type);
                         if (isolated) continue;   // judge/bench window: scripted input only
                         var type = (SDL_EventType)e.type;
+                        if (type == SDL_EventType.SDL_EVENT_WINDOW_FOCUS_GAINED) Console.WriteLine("[Focus] gained");
                         if (!input.OnWindowEvent(e, sink, audio.Focus)) { running = false; break; }
+                        // NOT ORIGINAL: F12 (unbound in HP1's and HP2's DefUser.ini) = report this spot (SpotReport); not passed to the game.
+                        if (type == SDL_EventType.SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_Scancode.SDL_SCANCODE_F12)
+                        {
+                            if (!e.key.repeat) spotRequest ??= Path.Combine(RunLogDir ?? Path.GetTempPath(), $"spot_{DateTime.Now:yyyyMMdd_HHmmss}.png");
+                            continue;
+                        }
+                        if (type == SDL_EventType.SDL_EVENT_KEY_UP && e.key.scancode == SDL_Scancode.SDL_SCANCODE_F12) continue;
                         if (debugCam && type == SDL_EventType.SDL_EVENT_KEY_DOWN && e.key.key == SDL_Keycode.SDLK_F)
                         {
                             follow = !follow;
@@ -1323,6 +1483,7 @@ namespace HPEngine
                         input.Feed(e);
                     }
                 }
+                if (!isolated && !OffscreenWindow) HPEngine.Input.SdlMouseCapture.MacKeyWindowWhenActive(r.Window);
                 // Stress: every second tick ends between the poll and the dispatch decision (its requests served meanwhile).
                 if (stress && !coreIdle && (tickIndex & 1) == 0)
                 {
@@ -1342,7 +1503,7 @@ namespace HPEngine
                         float dt = Script is not null ? WindowScript.Dt : (float)(now - last); last = now;
                         long t0 = Stopwatch.GetTimestamp();
                         var (pxw, pxh) = r.PixelSize();
-                        int menuRegion = input.MenuRegionWidth(pxw, pxh);
+                        int menuRegion = MenuRegionFor(pxw, pxh);
                         Script?.Inject(input, tickIndex);
                         TickJob(dt, pxw, pxh, menuRegion, tickIndex++);
                         TakeTickResult(ref now);
@@ -1368,7 +1529,7 @@ namespace HPEngine
                         float dt = Script is not null ? WindowScript.Dt : (float)(now - last); last = now;
                         pacer.LogicDone(now);
                         var (pxw, pxh) = r.PixelSize();
-                        int menuRegion = input.MenuRegionWidth(pxw, pxh);
+                        int menuRegion = MenuRegionFor(pxw, pxh);
                         if (!isolated) cursorRaw = RawCursor(r);
                         Script?.Inject(input, tickIndex);
                         if (padActive) padOk = padRead(out padState);   // after the tick's input (the scripted pad is part of it)
@@ -1405,6 +1566,34 @@ namespace HPEngine
                 if (hold.View is HPEngine.Travel.TravelView.LoadingScreen or HPEngine.Travel.TravelView.HeldFrame)
                     Console.Error.WriteLine($"[Travel] view {hold.View} not supported by the window (screen — synchronous, no frame copy)");
                 r.RenderToWindow(fly);
+                TracePresent(r.HideWorld ? 'g' : 'w', t1);   // g: the travel gate (black, no world); draw: this frame's build + render
+                if (Script is not null && pendingShot is null) for (int st = shotScan; st < tickIndex; st++) { shotScan = st + 1; if (Script.ShotAt(st) is string sp) { pendingShot = sp; break; } }
+                if (Script is not null && spotRequest is null) for (int st = spotScan; st < tickIndex; st++) { spotScan = st + 1; if (Script.ReportAt(st) is string rp) { spotRequest = rp; break; } }
+                if (spotRequest is not null && !(threaded && coreThread.Busy))
+                {
+                    // Core idle: the live movers are only read (tracker pose); everything else is the published frame. The text
+                    // block goes to the log FIRST; the image is optional (TryCapture: no target -> no image) and never throws.
+                    try
+                    {
+                        WorldFrame sf = cur;
+                        var (spw, sph) = r.PixelSize();
+                        string block = SpotReport.Build(sf, fly, $"{sf.Camera.Location} rot {sf.Camera.Rotation.Pitch},{sf.Camera.Rotation.Yaw},{sf.Camera.Rotation.Roll} fov {sf.Camera.FovAngle}", sf.Camera.ViewActorId, spw, sph, r.EnhancedVisuals,
+                            Path.GetFileNameWithoutExtension(host.Runtime.LoadedMapPath ?? "?"), tickIndex, levelTime, Movers, Cur?.Actors?.Draws ?? new List<ActorDraw>(),
+                            id => host.Runtime.Actors.FirstOrDefault(a => a is not null && a.ObjectId == id));
+                        Console.WriteLine(block);
+                        Console.Out.Flush();
+                        if (r.TryCapture(fly, out byte[] spotPx, out int cw, out int ch)) { Png.WriteOpaque(spotRequest, cw, ch, spotPx); Console.WriteLine($"[Spot] screenshot {spotRequest} ({cw}x{ch})"); }
+                        else Console.WriteLine("[Spot] screenshot skipped: no capture target (window minimised / zero size / creation failed)");
+                    }
+                    catch (Exception ex) { Console.WriteLine($"[Spot] report failed: {ex.GetType().Name}: {ex.Message}"); }
+                    spotRequest = null;
+                }
+                if (pendingShot is not null && !(threaded && coreThread.Busy))
+                {
+                    if (r.TryCapture(fly, out byte[] spx, out int sw2, out int sh2)) Png.WriteOpaque(pendingShot, sw2, sh2, spx);
+                    Console.WriteLine($"[Script] shot -> {pendingShot} tick {tickIndex}");
+                    pendingShot = null;
+                }
                 r.HideWorld = false;
                 pacer.RenderDone(now);
                 double rms = (Stopwatch.GetTimestamp() - t1) * 1000.0 / Stopwatch.Frequency;
@@ -1427,9 +1616,14 @@ namespace HPEngine
             }
             host.PreExit();   // Core idle: appPreExit's game part
             DigestOut?.Flush();
+            FrameTrace?.Flush();
             double secs = sw.Elapsed.TotalSeconds;
             if (PerfTitle || QuitAfter > 0 || Script is not null)
                 Console.WriteLine(FormattableString.Invariant($"[Perf] {(threaded ? "core thread" : "single thread")}: {allFrames} frames, {allTicks} ticks in {secs:F1} s — {allFrames / secs:F1} fps, {allTicks / secs:F1} ticks/s, Core tick {allCore / Math.Max(1, allTicks):F2} ms, frame {allRend / Math.Max(1, allFrames):F2} ms; Core presented {fadeFrames} fade frames, {loadScreens} loading screens; {MainThread.Served} Core-thread requests served"));
+            if (audio is not null && (PerfTitle || QuitAfter > 0 || Script is not null))
+                lock (audio.System.Gate)
+                    Console.WriteLine($"[Audio] device {(audio.Open ? "open" : "none")}; mixed {audio.System.MixedFrames} frames, sounding {audio.System.SoundingFrames}; "
+                        + $"Galaxy voices started {audio.System.Channels.Created}; AL calls {audio.System.AL?.Executed ?? 0}, plays {audio.System.AL?.Plays ?? 0}");
             // Judge counters: iterations of the window loop begun while Core ran a tick (a loop that does not sleep makes
             // millions), late-tick waits taken, and the stress session's own branches.
             if (threaded && Script is not null)
@@ -1488,6 +1682,13 @@ namespace HPEngine
 
     static class Png
     {
+        // A screenshot as the screen shows it: the swapchain ignores alpha, so a texel of alpha 0 drawn opaque (palette
+        // index 0 of an unmasked HUD tile) is black on screen; a viewer would show it as transparent/white.
+        public static void WriteOpaque(string path, int w, int h, byte[] rgba)
+        {
+            for (int i = 3; i < rgba.Length; i += 4) rgba[i] = 255;
+            Write(path, w, h, rgba);
+        }
         public static void Write(string path, int w, int h, byte[] rgba)
         {
             using var fs = File.Create(path);

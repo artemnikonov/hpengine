@@ -75,7 +75,7 @@ namespace HPEngine
                         UploadLevels((SDL_GPUTexture*)kv.Key, new[] { (kv.Value.ice.USize, kv.Value.ice.VSize, kv.Value.rgba) });
                     }
             }
-            if (Proc == null || _proc.Count == 0) return;
+            if (Proc == null || _proc.Count == 0 && _hudProc.Count == 0) return;   // canvas tiles: SdlHudPass.HudProc
             for (int i = 0; i < _draws.Count; i++) if (_drawnTex.Contains(_draws[i].b.Material)) MarkProc(_animTex.Length > i && _animTex[i] != 0 ? _animTex[i] : _draws[i].tex);
             foreach (var d in _actorDraws) MarkProc(d.tex);
             Proc.TickAll(frame, nowSeconds);

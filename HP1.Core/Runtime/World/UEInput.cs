@@ -165,7 +165,7 @@ namespace HP1.UEScript
             {
                 // Hold in key-index order 0..254 (Engine.dll.c:52583-52587), through Process (the binding table).
                 foreach (string key in KeyNamesByIndex())
-                    if (_down.Contains(key) && !IsAnalogKey(key) && TryGetDispatchBinding(key, out string command))
+                    if (_down.Contains(key) && TryGetDispatchBinding(key, out string command))
                         ExecInputCommands(interp, pawn, command, InputAction.Hold, delta);
             }
             float scale = delta != -1f ? 20f / delta : 0f;
@@ -329,7 +329,6 @@ namespace HP1.UEScript
             float vScale = _invertVertical ? _scaleRUV : -_scaleRUV;
             InputEvent(interp, console, pawn, names[0xe0], InputAction.Axis, JoystickAxis(j.X, _scaleXYZ, _deadZoneXYZ));
             InputEvent(interp, console, pawn, names[0xe1], InputAction.Axis, JoystickAxis(j.Y, yScale, _deadZoneXYZ));
-            if (_gamepad is not null) PollStickAnalog(interp, pawn);   // improvement D-75: the left stick's analog keys
             if ((_joyCaps.Caps & 1) != 0) InputEvent(interp, console, pawn, names[0xe2], InputAction.Axis, JoystickAxis(j.Z, _scaleXYZ, _deadZoneXYZ));
             if ((_joyCaps.Caps & 2) != 0) InputEvent(interp, console, pawn, names[0xe3], InputAction.Axis, JoystickAxis(j.R, _scaleRUV, _deadZoneRUV));
             if ((_joyCaps.Caps & 4) != 0) InputEvent(interp, console, pawn, names[0xe8], InputAction.Axis, JoystickAxis(j.U, _scaleRUV, _deadZoneRUV));
@@ -368,7 +367,7 @@ namespace HP1.UEScript
         // UViewport::ReadInput (Engine.dll.c:108203, body 0x10385d20): dt != -1 -> UpdateInput(0), then UInput::ReadInput.
         public void ViewportReadInput(UEInterpreter interp, UEObject console, UEObject pawn, float delta)
         {
-            if (delta != -1f) { _pollDelta = delta; UpdateInput(interp, console, pawn, false); }   // _pollDelta: D-75 menu nav repeat
+            if (delta != -1f) { _pollDelta = delta; UpdateInput(interp, console, pawn, false); }   // _pollDelta: D-75 menu nav repeat, right stick rate
             ReadInput(interp, pawn, delta);
         }
 
@@ -621,7 +620,6 @@ namespace HP1.UEScript
                 string prop = FirstToken(rest);
                 if (prop is null || !IsAxisProp(pawn.Class, prop)) { Log($"input_bad command=\"{command}\" reason=Bad_Axis_command"); return; }
                 float speed = ParseFloatOption(rest, "SPEED=", 1.0f);
-                if (_analog) speed /= AnalogSpeedDivisor;   // improvement D-75: a left stick direction (PollStickAnalog)
                 float speedBase = ParseFloatOption(rest, "SPEEDBASE=", 0.0f);
                 float current = UEInterpreter.AsFloat(pawn.GetProp(prop));
                 // Chains in an x87 register, one fstp store (disasm 0x103a547b..0x103a54bd).

@@ -119,8 +119,12 @@ static partial class T
             Put(".hp1-installed", "edition=UK 1.1: modified\n");
             window = new MainWindow(game, tmp, "0.3.0-beta", false); window.Show(); Dispatcher.UIThread.RunJobs();
             Eq("window shows Nordic data label", "Nordic multilingual data", Find<TextBlock>(window, "EditionText").Text);
-            Eq("window uses neutral manifest-difference chip", "different data", Find<TextBlock>(window, "EditionChip").Text);
+            Check("window shows no chip for the genuine disc's manifest difference", !Find<TextBlock>(window, "EditionChip").IsEffectivelyVisible && !Find<TextBlock>(window, "EditionText").IsEffectivelyVisible);
             Check("window exposes engine family separately", Find<TextBlock>(window, "EditionDetail").IsVisible && Find<TextBlock>(window, "EditionDetail").Text.Contains("UK 1.1"));
+            window.Close();
+            Put(".hp1-installed", "edition=Modded re-release: modified\n");
+            window = new MainWindow(game, tmp, "0.3.0-beta", false); window.Show(); Dispatcher.UIThread.RunJobs();
+            Check("a modified copy keeps the warning chip", Find<TextBlock>(window, "EditionChip") is { IsEffectivelyVisible: true, Text: "modified" });
             window.Close(); fired.Add("language:edition");
         }
         finally

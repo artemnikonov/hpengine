@@ -1687,9 +1687,14 @@ namespace HP1.UEScript
                 return null;
             });
             // ScriptedTexture.TextSize(string Text, out float XL, out float YL, Font Font): no texture state is read.
-            // 472-475 (DrawText/DrawTile/DrawColoredText/ReplaceTexture) stay unregistered: their bodies are
-            // ScriptedTexture.cs, the Core owner of a ScriptedTexture's texels (PostLoad/Tick/RenderTexture, frame upload)
-            // is not ported — a call is the loud unknown-native report.
+            // DrawText (472) / DrawColoredText (474): into the receiver's texels, which Core owns
+            // (UEWorldFrameProducer.ScriptedTextures: load, PostLoad, Tick and RenderTexture, WorldFrame.ScriptedTexels).
+            // 473 DrawTile and 475 ReplaceTexture have no shipped caller and stay unregistered (their bodies are in
+            // ScriptedTexture.cs): a call is the loud unknown-native report.
+            Pair(472, "ScriptedTexture.DrawText", (interp, frame, args) =>
+            { FrameProducer.ScriptedDrawText(frame.Context ?? frame.Object, args, colored: false); return null; });
+            Pair(474, "ScriptedTexture.DrawColoredText", (interp, frame, args) =>
+            { FrameProducer.ScriptedDrawText(frame.Context ?? frame.Object, args, colored: true); return null; });
             Pair(476, "ScriptedTexture.TextSize", (interp, frame, args) =>   // qualified: "TextSize" by name is Canvas 470
             {
                 string text = args is { Length: > 0 } ? args[0]?.ToString() ?? "" : "";
@@ -1744,7 +1749,7 @@ namespace HP1.UEScript
             // WinDrv UWindowsViewport::CreateNativeFont): an OS font (CreateFont(-Height, …, 400, …)) that GDI DrawText
             // measures and draws (WinDrv UWindowsViewport::DrawString). Called only by HPConsole.SetupLanguage for
             // languages without bitmap fonts (RU edition: 'MS Sans Serif' 24/16/10/12 from System/SAPFont.rus).
-            // NOT ORIGINAL: served by the bundled Liberation Sans (UENativeFonts); other
+            // NOT ORIGINAL: served by the bundled Philosopher (UENativeFonts); other
             // faces (Asian SAPFont tables) refuse loudly.
             Pair(0, "CreateNativeFont", (interp, frame, args) =>
             {

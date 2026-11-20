@@ -63,6 +63,7 @@ namespace HPEngine
         // UEOcclusion.MirrorWithoutShine gives a PF_Mirrored|PF_Translucent surface; ReflagFlags[n] = those flags, 0 = none.
         public int[] ReflagFlags = System.Array.Empty<int>();
         public int UnknownReflag;   // reflagged nodes without a run for Core's flags (see Select), cumulative
+        public int LumosUnported;   // HP2 Lumos carriers left in their static run (fog pass or unlit batch, see Select), cumulative
         public int SlotCount => NodeCount * 4;
         public readonly List<int> PointOfVertex = new(), NodeOfVertex = new();
         public readonly List<FogSurf> FogSurfaces = new();
@@ -236,9 +237,19 @@ namespace HPEngine
         // mask: scratch of SlotCount, left clear. surfs (DrawLog, optional): the drawn surfaces per batch. Returns the
         // drawn nodes the mesh has no slot for (a model mismatch, refused loudly by the caller).
         public static int Select(IReadOnlyList<Batch> batches, uint[] idx, DrawnWorld drawn, bool[] mask, List<uint> dst,
-            (uint First, uint Count)[] range, int at, List<int>[] surfs = null, WorldMesh mesh = null)
+            (uint First, uint Count)[] range, int at, List<int>[] surfs = null, WorldMesh mesh = null,
+            List<(int Batch, uint First, uint Count, int Flags, int Alpha, int Surf)> lumos = null)
         {
             int unknown = 0;
+            // HP2 Lumos carriers (DrawnWorld.Lumos, level nodes): DrawFrame draws each with its own DrawComplexSurface PolyFlags
+            // and alpha byte (UELumosSurfaces), or skips it (Drawn false). Their runs leave the batch's range for ranges of their
+            // own after it (the renderer draws them with SetBlending's Lumos case, SdlRenderer.DrawLumos). D3DDrv reads the byte
+            // only in its multitexture pass (LightMap set, FogMap NULL [HP2 D3DDrv 0x10003b94..0x10003bbc]): a carrier in a
+            // fog-pass or unlit batch stays in its static run and is counted (LumosUnported, a loud refusal).
+            Dictionary<int, (bool Drawn, int Flags, int Alpha)> lum = null;
+            if (mesh is not null && lumos is not null)
+                foreach (var (n, _, d, pf, al) in drawn.Lumos)
+                    if ((uint)n < (uint)mesh.NodeCount) (lum ??= new())[n] = (d, pf, al);
             int bound = mesh?.NodeCount ?? mask.Length;
             foreach (int n in drawn.Nodes) if ((uint)n < (uint)bound) mask[n] = true; else unknown++;
             // Drawn from behind: the back-side run instead of the front one. A node without one whose sides are different
@@ -268,13 +279,27 @@ namespace HPEngine
                 int start = dst.Count;
                 List<int> ls = null;
                 if (surfs != null) { ls = surfs[at + b] ??= new List<int>(); ls.Clear(); }
+                _lumosRuns.Clear();
                 foreach (var run in batch.Runs)
                 {
                     if ((uint)run.Node >= (uint)mask.Length || !mask[run.Node]) continue;   // a back/reflag slot needs SlotCount
+                    int node = lum is null ? -1 : run.Node < mesh.NodeCount ? run.Node : run.Node < 2 * mesh.NodeCount ? run.Node - mesh.NodeCount : -1;
+                    if (node >= 0 && lum.TryGetValue(node, out var la))
+                    {
+                        if (!la.Drawn) continue;   // DrawFrame skips the record, whatever D3DDrv's pass would be
+                        if (!batch.FogPass && !batch.Unlit) { _lumosRuns.Add((run.First, run.Count, la.Flags, la.Alpha, run.Surf)); continue; }
+                        mesh.LumosUnported++;
+                    }
                     for (int k = 0; k < run.Count; k++) dst.Add(idx[(int)batch.First + run.First + k]);
                     if (ls != null && (ls.Count == 0 || ls[^1] != run.Surf)) ls.Add(run.Surf);
                 }
                 range[at + b] = ((uint)start, (uint)(dst.Count - start));
+                foreach (var (first, count, pf, al, surf) in _lumosRuns)
+                {
+                    int s0 = dst.Count;
+                    for (int k = 0; k < count; k++) dst.Add(idx[(int)batch.First + first + k]);
+                    lumos.Add((b, (uint)s0, (uint)count, pf, al, surf));
+                }
             }
             foreach (int n in drawn.Nodes) if ((uint)n < (uint)bound) mask[n] = false;
             foreach (int n in drawn.SkyWindows) if ((uint)n < (uint)mask.Length) mask[n] = false;
@@ -284,6 +309,8 @@ namespace HPEngine
                     if ((uint)n < (uint)mesh.NodeCount) { mask[2 * mesh.NodeCount + n] = false; mask[3 * mesh.NodeCount + n] = false; }
             return unknown;
         }
+
+        static readonly List<(int First, int Count, int Flags, int Alpha, int Surf)> _lumosRuns = new();   // Select's scratch
 
         // Portal per surface (CreateChildFrame merges children with the same iSurf/zone/NearClip, FUN_10b20790): one batch
         // per surface, opaque (a portal node is processed from both sides, Render.dll.c:5878),

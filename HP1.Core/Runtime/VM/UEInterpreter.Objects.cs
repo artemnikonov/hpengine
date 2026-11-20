@@ -214,9 +214,16 @@ namespace HP1.UEScript
                 throw new NotSupportedException(
                     $"texture '{RefSpelling(refVal) ?? name}' unresolvable headless: no USize/VSize tags among registered package exports");
             _texProxies[identity] = proxy;
+            _proxyPaths.AddOrUpdate(proxy, HP1.UEScript.UETextureSource.FullPathOf(
+                System.IO.Path.GetFileNameWithoutExtension(exp.Package.FullPackageName), exp.ExportTable));
             RememberProxy(refVal, proxy);
             return proxy;
         }
+
+        // The full object path of the texture a proxy stands for (null: not a texture proxy).
+        static readonly System.Runtime.CompilerServices.ConditionalWeakTable<UEObject, string> _proxyPaths = new();
+        public static string TexturePathOfProxy(UEObject proxy)
+            => proxy is not null && _proxyPaths.TryGetValue(proxy, out string p) ? p : null;
         internal UEObject ClassDefaultsBag(UClass cls)
         {
             if (!_classDefaults.TryGetValue(cls, out var d))
@@ -227,6 +234,7 @@ namespace HP1.UEScript
             }
             return d;
         }
+        internal UEObject BuiltClassDefaults(UClass cls) => cls is not null && _classDefaults.TryGetValue(cls, out var d) ? d : null;
         // A level package's classes were released (UEClassRegistry.ReleaseLevelPackage): their default bags and
         // ClassUnique counters go with them (a reload makes a new UClass), and the lookups that walked the catalogue
         // (event/global function, stub declaration) are recomputed.

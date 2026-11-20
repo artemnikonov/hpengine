@@ -3,7 +3,8 @@
 // factors), 32-byte vertex (pos px, uv, color), no depth and no culling; vertex uniform (W, H), fragment uniform
 // (ShaderMode, AlphaClip, 0, 0). Textures: a regular package texture (A = 255, index 0 has A = 0, under bMasked
 // entry 0 = (0,0,0,0), point filtering); a font page is RGB 255, A = max(r,g,b); no texture means white 1×1.
-// Point sampling, REPEAT.
+// Point sampling, or bilinear for a quad without PF_NoSmooth (HudQuad.Smooth); REPEAT, except CLAMP for a smooth tile
+// whose window lies inside its texture (not original, see _hudLinearClamp).
 // Gamma ramp (Brightness, D3DDrv Flush 0x10002f42): DrawGamma, branch 3 of the same shader over a frame copy.
 // Not wired: the loading screen during travel, coronas.
 using System.Runtime.InteropServices;
@@ -17,18 +18,20 @@ namespace HPEngine
     sealed unsafe partial class Renderer
     {
         SDL_GPUGraphicsPipeline*[] _hudPipe;
-        SDL_GPUSampler* _hudSampler, _hudLinear;
+        SDL_GPUSampler* _hudSampler, _hudLinear, _hudLinearClamp;
         SDL_GPUTexture* _hudWhite;
         SDL_GPUBuffer* _hvb; uint _hvbCap;
         readonly Dictionary<string, nint> _hudTex = new(StringComparer.OrdinalIgnoreCase);
-        readonly List<(int first, int count, HudBlend blend, bool clip, nint tex, bool smooth)> _hudRuns = new();
+        readonly List<(int first, int count, HudBlend blend, bool clip, nint tex, nint sampler, int actor)> _hudRuns = new();   // actor ≥ 0: a canvas mesh draw
         float[] _hudVerts = Array.Empty<float>();
         int _hudVertCount;
         public int HudQuads, HudMissing;
 
         public (int W, int H) PixelSize()
         {
-            if (Window == null || Offscreen) return (Width, Height);
+            if (Window == null) return (Width, Height);   // windowless (--shot, --video): the target made at Create
+            // An offscreen window (--offscreen-window, --hidden-game) follows its hidden window like the swapchain does, so
+            // SetRes / Alt+Enter in a judge window reach Core and the frame (RenderOffscreen resizes the target).
             int w, h; SDL_GetWindowSizeInPixels(Window, &w, &h);
             return (w, h);
         }
@@ -78,6 +81,11 @@ namespace HPEngine
             // D3DDrv DrawTile: MAG/MINFILTER LINEAR, MIPFILTER POINT (corona tiles, HudQuad.Smooth).
             si.min_filter = si.mag_filter = SDL_GPUFilter.SDL_GPU_FILTER_LINEAR;
             _hudLinear = SDL_CreateGPUSampler(_dev, &si);
+            // NOT ORIGINAL (DECISIONS 2026-11-19, HP1 loading seams): a smooth canvas tile whose window lies inside its texture
+            // samples clamped to the edge. D3DDrv keeps D3DTSS_ADDRESS = WRAP for every tile (HP1 0x10004bfe), so the bilinear
+            // edge pixel of a stretched tile blends the opposite texture edge in: the HP1 loading parchment (six 256²
+            // pieces drawn 320 px wide at 800x600) gets a dark seam at each piece edge, weight 0.5 − 0.5·texels/px.
+            si.address_mode_u = si.address_mode_v = si.address_mode_w = SDL_GPUSamplerAddressMode.SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE; _hudLinearClamp = SDL_CreateGPUSampler(_dev, &si);
             _hudWhite = Tex(SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, 1, 1, 1, SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER);
             UploadLevels(_hudWhite, new[] { (1, 1, new byte[] { 255, 255, 255, 255 }) });
             return true;
@@ -167,7 +175,8 @@ namespace HPEngine
                 // Non-P8 tile: the same D3DDrv 0x100022c0 texels as in the world (Core UETextureSource.ReadDirect).
                 return _hudTex[key] = (nint)UploadExportedRgba(d);
             }
-            if (d is null || d.State != "EXPORTED" || d.Levels is null || d.Levels.Length == 0) { HudMissing++; _hudTex[key] = (nint)_hudWhite; return (nint)_hudWhite; }
+            if (d is not null && d.State == "PROCEDURAL_NO_PIXELS" && source != HudQuadSource.Glyph && HudProc(path, d.Masked) is nint pt) return pt;
+            if (d is null || d.State != "EXPORTED" || d.Levels is null || d.Levels.Length == 0) { HudMissing++; Console.WriteLine($"hud: missing texture {path} ({d?.State ?? "not found"}) drawn white"); _hudTex[key] = (nint)_hudWhite; return (nint)_hudWhite; }
             var (u, v, p8) = d.Levels[0];
             var rgba = new byte[u * v * 4];
             for (int i = 0; i < u * v; i++)
@@ -191,6 +200,34 @@ namespace HPEngine
             return (nint)tex;
         }
 
+        // A fire/water texture on the canvas (HP2 menus: HP2_Menu.Icons.WandSpark, a FireTexture): the package has no texels,
+        // the tile shows the live procedural mip — UCanvas::DrawTile locks the texture as a surface draw does, so it is
+        // ticked while drawn (Proc.Fire/Wet mark it used; TickProc ticks it). Texels by the canvas rule of HudTexture.
+        readonly Dictionary<string, (ProcTex.ProcTextures.Entry e, nint tex, int version, bool masked)> _hudProc = new(StringComparer.OrdinalIgnoreCase);
+        nint? HudProc(string path, bool masked)
+        {
+            if (Proc is null) return null;
+            ProcTex.ProcTextures.Entry e = Proc.IsFire(path) ? Proc.Fire(path, _procFrame, _procNow)
+                : Proc.IsWetCarrier(path) ? Proc.Wet(path, _procFrame, _procNow) : null;
+            if (e is null) return null;
+            if (!_hudProc.TryGetValue(path, out var p))
+                p = (e, (nint)Tex(SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, e.Width, e.Height, 1, SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER), -1, masked);
+            if (p.version != e.Version)
+            {
+                byte[] m = e.Mip, pal = e.PaletteRgba, px = new byte[m.Length * 4];
+                for (int i = 0; i < m.Length; i++)
+                {
+                    bool zero = m[i] == 0; int c = m[i] * 4;
+                    px[i * 4] = zero && masked ? (byte)0 : pal[c]; px[i * 4 + 1] = zero && masked ? (byte)0 : pal[c + 1];
+                    px[i * 4 + 2] = zero && masked ? (byte)0 : pal[c + 2]; px[i * 4 + 3] = zero ? (byte)0 : (byte)255;
+                }
+                UploadLevels((SDL_GPUTexture*)p.tex, new[] { (e.Width, e.Height, px) });
+                p.version = e.Version;
+            }
+            _hudProc[path] = p;
+            return p.tex;
+        }
+
         // Frame quads (list order) -> vertices and runs of one state.
         public void SetHud(IReadOnlyList<HudQuad> quads)
         {
@@ -202,16 +239,19 @@ namespace HPEngine
             for (int i = 0; i < n; i++)
             {
                 HudQuad q = quads[i];
+                if (q.Source == HudQuadSource.Actor) { _hudRuns.Add((_hudVertCount, 0, q.Blend, false, 0, 0, q.ActorId)); continue; }
                 nint tex = HudTexture(q.Texture, q.Source, (q.X1 - q.X0) / (q.U1 - q.U0));
+                bool inside = MathF.Min(q.U0, q.U1) >= 0f && MathF.Max(q.U0, q.U1) <= 1f && MathF.Min(q.V0, q.V1) >= 0f && MathF.Max(q.V0, q.V1) <= 1f;
+                nint sampler = (nint)(!q.Smooth ? _hudSampler : q.Source == HudQuadSource.Tile && inside ? _hudLinearClamp : _hudLinear);
                 int first = _hudVertCount;
                 Put(q.X0, q.Y0, q.U0, q.V0, q); Put(q.X1, q.Y0, q.U1, q.V0, q); Put(q.X1, q.Y1, q.U1, q.V1, q);
                 Put(q.X0, q.Y0, q.U0, q.V0, q); Put(q.X1, q.Y1, q.U1, q.V1, q); Put(q.X0, q.Y1, q.U0, q.V1, q);
                 if (_hudRuns.Count > 0)
                 {
                     var last = _hudRuns[^1];
-                    if (last.blend == q.Blend && last.clip == q.AlphaClip && last.tex == tex && last.smooth == q.Smooth) { _hudRuns[^1] = (last.first, last.count + 6, last.blend, last.clip, last.tex, last.smooth); continue; }
+                    if (last.actor < 0 && last.blend == q.Blend && last.clip == q.AlphaClip && last.tex == tex && last.sampler == sampler) { _hudRuns[^1] = (last.first, last.count + 6, last.blend, last.clip, last.tex, last.sampler, -1); continue; }
                 }
-                _hudRuns.Add((first, 6, q.Blend, q.AlphaClip, tex, q.Smooth));
+                _hudRuns.Add((first, 6, q.Blend, q.AlphaClip, tex, sampler, -1));
             }
         }
 
@@ -285,25 +325,36 @@ namespace HPEngine
 
         void DrawHud(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, int w, int h)
         {
-            if (_hudVertCount == 0) return;
+            if (_hudRuns.Count == 0) return;
             var color = new SDL_GPUColorTargetInfo { texture = target, load_op = SDL_GPULoadOp.SDL_GPU_LOADOP_LOAD, store_op = SDL_GPUStoreOp.SDL_GPU_STOREOP_STORE };
             var vu = stackalloc float[4]; vu[0] = w; vu[1] = h;
-            SDL_PushGPUVertexUniformData(cmd, 0, (nint)vu, 16);
-            var pass = SDL_BeginGPURenderPass(cmd, &color, 1, null);
             var vb = new SDL_GPUBufferBinding { buffer = _hvb };
-            SDL_BindGPUVertexBuffers(pass, 0, &vb, 1);
+            SDL_GPURenderPass* pass = null;
             var fu = stackalloc float[4];
             var sb = stackalloc SDL_GPUTextureSamplerBinding[1];
             foreach (var run in _hudRuns)
             {
+                if (run.actor >= 0)
+                {
+                    // UCanvas::execDrawActor: RenDev->ClearZ, then the actor's mesh with the master frame (Core's draw).
+                    if (pass != null) { SDL_EndGPURenderPass(pass); pass = null; }
+                    DrawCanvasActor(cmd, target, run.actor);
+                    continue;
+                }
+                if (pass == null)
+                {
+                    SDL_PushGPUVertexUniformData(cmd, 0, (nint)vu, 16);
+                    pass = SDL_BeginGPURenderPass(cmd, &color, 1, null);
+                    SDL_BindGPUVertexBuffers(pass, 0, &vb, 1);
+                }
                 SDL_BindGPUGraphicsPipeline(pass, _hudPipe[(int)run.blend]);
                 fu[0] = HudBlendStates.ShaderMode(run.blend); fu[1] = run.clip ? 1 : 0; fu[2] = fu[3] = 0;
                 SDL_PushGPUFragmentUniformData(cmd, 0, (nint)fu, 16);
-                sb[0] = new SDL_GPUTextureSamplerBinding { texture = (SDL_GPUTexture*)run.tex, sampler = run.smooth ? _hudLinear : _hudSampler };
+                sb[0] = new SDL_GPUTextureSamplerBinding { texture = (SDL_GPUTexture*)run.tex, sampler = (SDL_GPUSampler*)run.sampler };
                 SDL_BindGPUFragmentSamplers(pass, 0, sb, 1);
                 SDL_DrawGPUPrimitives(pass, (uint)run.count, 1, (uint)run.first, 0);
             }
-            SDL_EndGPURenderPass(pass);
+            if (pass != null) SDL_EndGPURenderPass(pass);
         }
     }
 }

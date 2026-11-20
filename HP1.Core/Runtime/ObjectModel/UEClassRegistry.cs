@@ -503,6 +503,20 @@ namespace HP1.Core
             return (ResourcePackageFile(parts[0]), found);
         }
 
+        // A save's package object no catalogued package exports (UELevelRuntime.SaveGame, V.PackageObject): a bytecode
+        // literal of a package the script registry does not load (hgame SpellCursor.GetGestureTexture's
+        // WetTexture'SpellShapes.SpellFX.FlipendoWet1', a .utx). The original's save is a level package importing it, and
+        // the load's linker opens the import's package from the search paths (GetPackageLinker) and takes the export by its
+        // outer chain and name (VerifyImport) — no matter whether the running game had loaded it. Same here: that package's
+        // table from disk, the exact path, one match; the reference form a path-bearing resource takes everywhere else
+        // (defaults, DynamicLoadObject). null: no such package or no single export at that path.
+        public UEResourceRef ResourceObjectRef(string objectPath)
+        {
+            if (ResolveResourceExport(objectPath, null) is not { } at) return null;
+            var e = ResourceExportTable(objectPath.Substring(0, objectPath.IndexOf('.'))).Exports[at.ExportIndex - 1];
+            return new UEResourceRef(e.Class?.ObjectName.ToString() ?? "Class", e.ObjectName.ToString(), objectPath);
+        }
+
         string ResourcePackageFile(string packageName)
         {
             string systemDir = System.IO.Path.GetDirectoryName(_packages[0].FullPackageName);

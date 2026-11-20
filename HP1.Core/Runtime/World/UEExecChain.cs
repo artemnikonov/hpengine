@@ -114,7 +114,7 @@ namespace HP1.UEScript
                ?? WordOf(command, EngineWords) ?? WordOf(command, SubExecutorWords) ?? WordOf(command, WinDrvWords);
 
         // ── UObject::ScriptConsoleExec (Core.dll.c:16255-16398) ────────────────
-        // Token (ParseToken, 0x40, escape) -> function by name (FindObjectField:
+        // Token (ParseToken, 0x40 / HP2 0x80, escape) -> function by name (FindObjectField:
         // VfHash of the state node, then of the class) -> FUNC_Exec (0x200) only ->
         // parameters in order while (flags & 0x480) == 0x80: the first object
         // parameter receives Executor if it IsA the property's class; the rest —
@@ -122,11 +122,14 @@ namespace HP1.UEScript
         // parameter -> BadProperty, the function is NOT called, but the command counts as "taken" (1);
         // failure of an optional one -> call with whatever was parsed. The parameter buffer
         // is zeroed: an unparsed parameter is the zero of its type.
+        // HP2's token buffer is 0x80 characters (ParseToken's MaxLen [HP2 0x1015d76c]; the rest of the body is HP1's,
+        // tools/hp2/native_match.py: frame size and that constant only).
+        // Original: Core.dll ?ScriptConsoleExec@UObject@@UAEHPBGAAVFOutputDevice@@PAV1@@Z [HP1 0x1015a360] [HP2 0x1015d710]
         public static bool ScriptConsoleExec(UEInterpreter interp, UEObject obj, string command, UEObject executor,
             Action<string> log)
         {
             int pos = 0;
-            string token = ParseToken(command, ref pos, 0x40, useEscape: true);
+            string token = ParseToken(command, ref pos, ScriptConsoleExecTokenMax, useEscape: true);
             if (token.Length == 0) return false;
             UFunction fn = interp.FindEventFunction(obj, token);
             if (fn is null || !fn.FunctionFlags.HasFlag(FunctionFlag.Exec)) return false;
@@ -164,6 +167,8 @@ namespace HP1.UEScript
             interp.Invoke(obj, fn, args);
             return true;
         }
+
+        internal static int ScriptConsoleExecTokenMax => UEGameProfile.Current.Game == UEEdition.Game.HP2 ? 0x80 : 0x40;
 
         static object ZeroOf(UProperty p, UFunction fn) => p switch
         {

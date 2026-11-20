@@ -63,10 +63,12 @@ namespace HPEngine.Audio
         public void Update(WorldFrame frame, IAudioWorld world)
         {
             if (frame == null) return;
-            if (frame.ALCommands is { } al)
-                lock (Gate) (AL ??= new ALExecutor(UEALAudio.MaxSources, Mixer.Rate, _sounds, _music)).Execute(al);
+            // HP2: the span the device clock advanced (AudioMixDt) is mixed with the sources as they were, then the calls
+            // made at the frame's end apply (Core's model: a play started in the tick advances from the next span).
+            if (frame.ALCommands is not null) lock (Gate) AL ??= new ALExecutor(UEALAudio.MaxSources, Mixer.Rate, _sounds, _music);
             ApplyFrame(frame.Tick, frame.AudioCallStops, frame.AudioMixDt, frame.AudioChannels, frame.AudioResumeSerial,
                        frame.Reverb, world);
+            if (frame.ALCommands is { } al) lock (Gate) AL.Execute(al);
         }
 
         public void ApplyFrame(int tick, IReadOnlyList<int> callStops, float mixDt, IReadOnlyList<UEGalaxyAudio.Playback> channels,
@@ -85,9 +87,18 @@ namespace HPEngine.Audio
                     if (_frame.Length < 2 * n) _frame = new float[2 * n];
                     Mixer.Mix(_frame, n);
                     AL?.MixAdd(_frame, n);
-                    for (int k = 0; k < 2 * n; k++) _queue.Enqueue(_frame[k]);
-                    // ponytail: a device that stalls lets the queue grow; past a quarter second the oldest audio is dropped
-                    while (_queue.Count > Mixer.Rate / 2) { _queue.Dequeue(); _queue.Dequeue(); QueueDropped++; }
+                    MixedFrames += n;
+                    for (int k = 0; k < 2 * n; k += 2)
+                    {
+                        if (_frame[k] != 0f || _frame[k + 1] != 0f) SoundingFrames++;
+                        _queue.Enqueue(_frame[k]); _queue.Enqueue(_frame[k + 1]);
+                    }
+                    // The queue holds a fixed lead, never a backlog (Galaxy mixes Latency ahead of the play cursor; OpenAL
+                    // its device buffer): audio the frames deliver beyond MaxLeadSeconds while the device keeps playing (a
+                    // frame clock running ahead of the device after a load, clock drift) is dropped from the head at once,
+                    // so it cannot sit there delaying every later sound (sound audit S1, 2026-11-20).
+                    int max = 2 * (int)(Mixer.Rate * MaxLeadSeconds);
+                    while (_queue.Count > max) { _queue.Dequeue(); _queue.Dequeue(); QueueDropped++; }
                 }
                 NoteFrameTick(tick: tick);
                 Sync(channels, resumeSerial, world);
@@ -98,12 +109,17 @@ namespace HPEngine.Audio
         // ponytail: fixed 60 ms device lead over the frame clock (Galaxy mixes Latency = 40 ms ahead); tune if hitches
         // longer than it are common
         public const float PrebufferSeconds = 0.06f;
+        // ponytail: the steady-state ceiling = the prebuffer + 50 ms of engine-frame jitter (a 66.7 ms late frame after a
+        // drained prebuffer stays under it); raise it if frame jitter on slow machines drops audio
+        public const float MaxLeadSeconds = PrebufferSeconds + 0.05f;
         double _clock; long _clocked;
         float[] _frame = new float[0];
         readonly Queue<float> _queue = new();
         public int QueueDropped, QueueUnderruns;
         // What the frames delivered so far carried (AudioTests [loadmap]: equals the sum over Core's Galaxy Updates).
         public double MixedSeconds; public int CallStopsApplied;
+        // What the frame clock mixed into the queue: stereo frames, and those not silent (audit/hp2_audio_check.sh).
+        public long MixedFrames, SoundingFrames;
 
         public void Apply(int tick, IReadOnlyList<UEGalaxyAudio.Playback> channels, int resumeSerial, ReverbState reverb, IAudioWorld world)
         {
@@ -169,8 +185,18 @@ namespace HPEngine.Audio
             {
                 if (!_frameClocked) { Mixer.Mix(dst, frames); return; }
                 // the device starts (and restarts after running dry) only with PrebufferSeconds queued: a late engine frame
-                // (hitch) then drains the queue instead of cutting the sound
-                if (!_primed && _queue.Count >= 2 * (int)(Mixer.Rate * PrebufferSeconds)) _primed = true;
+                // (hitch) then drains the queue instead of cutting the sound. A hitch that ran it dry delivers the whole gap's
+                // audio in one frame; kept, everything after it played that much late (up to MaxLeadSeconds) for the rest of
+                // the session (bug "music starts late", 2026-11-20). Galaxy and OpenAL mix a fixed lead ahead of the play
+                // position, never a backlog, and the gap's audio is not heard either way: such a backlog is cut to the lead.
+                // A normal start overshoots the lead by under a frame and keeps it (ponytail: over two 60 Hz frames = a gap's).
+                int lead = 2 * (int)(Mixer.Rate * PrebufferSeconds);
+                if (!_primed && _queue.Count >= lead)
+                {
+                    _primed = true;
+                    if (_queue.Count > lead + 2 * (Mixer.Rate / 30))
+                        while (_queue.Count > lead) { _queue.Dequeue(); _queue.Dequeue(); QueueDropped++; }
+                }
                 int k = 0;
                 if (_primed) for (; k < 2 * frames && _queue.Count > 0; k++) dst[k] = _queue.Dequeue();
                 if (k < 2 * frames)

@@ -38,9 +38,8 @@ namespace HPEngine.Input
         public int FlippedWheelEvents;
 
         // 4:3 menu centred on a wide screen (Core SetConsoleRegion) while the console's UWindow is active.
-        bool _uwindow;
-        public int MenuRegionWidth(int screenW, int screenH)
-            => _uwindow && screenW * 3 > screenH * 4 ? screenH * 4 / 3 : 0;
+        public static int MenuRegion(bool uwindow, int screenW, int screenH)
+            => uwindow && screenW * 3 > screenH * 4 ? screenH * 4 / 3 : 0;
 
         // ── Device state (GetKeyState) and the frame's queue ─────────────────
         readonly Dictionary<SdlControl, bool> _ctlDown = new();
@@ -317,7 +316,6 @@ namespace HPEngine.Input
             }
             _evq.Clear();
             _mouseX = _mouseY = 0f;
-            _uwindow = sink.UWindowActive;
         }
     }
 }

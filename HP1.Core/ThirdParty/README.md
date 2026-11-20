@@ -34,7 +34,13 @@ HP2 FPoly (2026-11-15, stage 2): fork commit 17ce36f keeps PanU/PanV for BuildNa
 operator<<(FArchive&, FPoly&) has no version gate and is HP1's body). Judged by the census's second reader: all 20616
 HP2 EN UPolys equal the port's own FPoly reader (19314 differed before).
 
-REPRODUCIBLE from fork commit 17ce36f (branch hp2; 850326e / 76ac149 / 15466dc for the previous images) with exactly
+UFont (2026-11-16): fork commit ce21fba reads CharRemap/IsRemapped (v>=69) before the system font's name and height for
+v<122, the order of UFont::Serialize in both games (HP1 body 0x10394610, HP2 body 0x1039d030); upstream's order threw
+EndOfStream on every empty-page font (HP1 Jap/Asian/System*, HP2 Thai/System*). Not build-gated: HP1 packages detect as
+Build Default. Fonts with pages read the same bytes. Judged by --hp2-asset-census kind font (GetFont refuses a font whose
+UELib read threw): US 42/0, HP2 EN 36/0 (US 4/38, HP2 19/17 with the previous image).
+
+REPRODUCIBLE from fork commit ce21fba (branch hp2; 17ce36f / 850326e / 76ac149 / 15466dc for the previous images) with exactly
 
     dotnet build -c Release -f netstandard2.1 src/Eliot.UELib.csproj -p:SourceRevisionId=ab85a6ecff497abd98d28261ec656b985e463448
 
@@ -42,6 +48,6 @@ REPRODUCIBLE from fork commit 17ce36f (branch hp2; 850326e / 76ac149 / 15466dc f
 ab85a6e with the later patches in the working tree, so the id is pinned, not taken from git)
 
 which yields this byte image
-(sha256 023cdcd5f90613c98f161f1e6b41fbe1cd82ffd40373535c1067037c2fa87ff2);
+(sha256 38aac8e6e41502e3cf9ab9e01cde980dd716787e61a0731eafd19a7eaf4914aa);
 other TFMs (e.g. net8.0/net9.0) produce different bytes — always build and
 compare THIS TFM, and re-run the full gate after any refresh.

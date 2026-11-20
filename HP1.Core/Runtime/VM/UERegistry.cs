@@ -141,7 +141,7 @@ namespace HP1.UEScript
             var names = new List<string>();
             if (dir is not null && Directory.Exists(dir))
                 foreach (string f in Directory.EnumerateFiles(dir))
-                    if (match(Path.GetFileName(f))) names.Add(Path.GetFileName(f));
+                    if (!UEInstallPath.IsMacMetadata(Path.GetFileName(f)) && match(Path.GetFileName(f))) names.Add(Path.GetFileName(f));
             names.Sort(StringComparer.OrdinalIgnoreCase);
             return names;
         }

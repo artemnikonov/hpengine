@@ -2,7 +2,7 @@
 // Pipelines per UE1 blend mode (factors from RenderRules.Blend): 0 opaque, 1 masked (alpha cutout), 2 world translucent
 // and 4 actor translucent (both ONE,1-SRC_COLOR), 3 modulated (DST_COLOR,SRC_COLOR), 5 depth only (sky window),
 // 6 actor alpha blending for Opacity < 1 (SRC_ALPHA,1-SRC_ALPHA, no Z write), 7 a surface's fog map pass (ONE,1-SRC_ALPHA,
-// no Z write); each in three culling variants.
+// no Z write), 8/9 an HP2 Lumos carrier (1-SRC_ALPHA,SRC_ALPHA; 9 with Z write); each in three culling variants.
 using System.Runtime.InteropServices;
 using HP1.UEScript;
 using SDL;
@@ -22,7 +22,7 @@ namespace HPEngine
         // for Mirror = 1; the reflected pass (Mirror = −1) culls front faces. Selftest scene cull (cull-ccw, cull-none red).
         public bool HideWorld;
         const SDL_GPUFrontFace FrontFace = SDL_GPUFrontFace.SDL_GPU_FRONTFACE_CLOCKWISE;
-        const int Modes = 8;   // pipeline modes (see header): 4 actor translucent, 5 depth only, 6 AlphaBlend, 7 fog map pass
+        const int Modes = 10;   // pipeline modes (see header): 4 actor translucent, 5 depth only, 6 AlphaBlend, 7 fog map pass, 8/9 Lumos
         SDL_GPUGraphicsPipeline*[] _pipe = new SDL_GPUGraphicsPipeline*[3 * Modes];   // [cull·Modes + mode]: 0 none, 1 back, 2 front (reflected pass)
         SDL_GPUBuffer* _vb;
         uint[] _idx = Array.Empty<uint>();   // world indices (Batch.First/Runs), copied per view into _wib by Core's drawn set
@@ -103,8 +103,13 @@ namespace HPEngine
         {
             var ci = new SDL_GPUTextureCreateInfo
             {
-                type = SDL_GPUTextureType.SDL_GPU_TEXTURETYPE_2D, format = f, usage = usage,
-                width = (uint)w, height = (uint)h, layer_count_or_depth = 1, num_levels = (uint)levels,
+                type = SDL_GPUTextureType.SDL_GPU_TEXTURETYPE_2D,
+                format = f,
+                usage = usage,
+                width = (uint)w,
+                height = (uint)h,
+                layer_count_or_depth = 1,
+                num_levels = (uint)levels,
                 sample_count = SDL_GPUSampleCount.SDL_GPU_SAMPLECOUNT_1,
             };
             return SDL_CreateGPUTexture(_dev, &ci);
@@ -135,8 +140,16 @@ namespace HPEngine
         {
             var ci = new SDL_GPUSamplerCreateInfo
             {
-                min_filter = f, mag_filter = f, mipmap_mode = mm, address_mode_u = am, address_mode_v = am, address_mode_w = am,
-                min_lod = 0, max_lod = 1000, enable_anisotropy = anisotropy > 1, max_anisotropy = anisotropy,
+                min_filter = f,
+                mag_filter = f,
+                mipmap_mode = mm,
+                address_mode_u = am,
+                address_mode_v = am,
+                address_mode_w = am,
+                min_lod = 0,
+                max_lod = 1000,
+                enable_anisotropy = anisotropy > 1,
+                max_anisotropy = anisotropy,
             };
             var s = SDL_CreateGPUSampler(_dev, &ci);
             if (s != null) _lastSampler = ci;
@@ -158,15 +171,33 @@ namespace HPEngine
             {
                 var ci = new SDL_GPUShaderCreateInfo
                 {
-                    code_size = (nuint)code.Length, code = c, entrypoint = e,
-                    format = _shaderFmt, stage = stage,
-                    num_samplers = samplers, num_uniform_buffers = uniforms,
+                    code_size = (nuint)code.Length,
+                    code = c,
+                    entrypoint = e,
+                    format = _shaderFmt,
+                    stage = stage,
+                    num_samplers = samplers,
+                    num_uniform_buffers = uniforms,
                 };
                 var s = SDL_CreateGPUShader(_dev, &ci);
                 if (s == null) Console.Error.WriteLine($"shader {entry}: {SDL_GetError()}");
                 return s;
             }
         }
+
+        // Depth state of D3DDrv (HP1 and HP2 identical; inventory: HP1_archive/night_2026-11-18/depth_reversed_z.md):
+        // SetRes ZENABLE TRUE, ZFUNC LESSEQUAL, ZBIAS 0 (HP1 0x1000d5f8/0x1000d71b/0x1000d711, HP2 0x1000d5d9/0x1000d6fc/
+        // 0x1000d6f2); ClearZ and Lock clear Z to 1.0 (Clear D3DCLEAR_ZBUFFER, 0x3f800000); Z write = PF_Occlude, which
+        // SetBlending forces on unless Translucent|Modulated|Highlighted (pipelines below). Stored reversed (classic.hlsl
+        // vs_main: d = 1 − sz), so LESSEQUAL against 1.0 is GREATER_OR_EQUAL against 0 — the same test. The other states have
+        // no carrier here: ZFUNC EQUAL for a PF_Masked surface's later passes in DrawComplexSurface (the port folds lightmap
+        // and fog into the alpha-tested pass), ALWAYS for EndFlash's quad (the HUD pass has no depth target), ZBIAS 15 only for
+        // the detail-texture pass (DetailTextures=False in both games' Default.ini, and the port draws no detail textures).
+        // Original: D3DDrv.dll ?SetRes@UD3DRenderDevice@@UAEHHHHH@Z [HP1 0x1000B360] [HP2 0x1000B350]
+        // Original: D3DDrv.dll ?ClearZ@UD3DRenderDevice@@UAEXPAUFSceneNode@@@Z [HP1 0x10008450] [HP2 0x100083F0]
+        // Original: D3DDrv.dll ?DrawComplexSurface@UD3DRenderDevice@@UAEXPAUFSceneNode@@AAUFSurfaceInfo@@AAUFSurfaceFacet@@@Z [HP1 0x10003AC0] [HP2 0x10003AC0]
+        const SDL_GPUCompareOp DepthCompare = SDL_GPUCompareOp.SDL_GPU_COMPAREOP_GREATER_OR_EQUAL;
+        const float ClearDepth = 0f;
 
         void CreatePipelines()
         {
@@ -200,20 +231,28 @@ namespace HPEngine
                 var ctd = new SDL_GPUColorTargetDescription { format = _colorFmt, blend_state = blend };
                 var ci = new SDL_GPUGraphicsPipelineCreateInfo
                 {
-                    vertex_shader = vs, fragment_shader = fs,
+                    vertex_shader = vs,
+                    fragment_shader = fs,
                     vertex_input_state = new SDL_GPUVertexInputState { vertex_buffer_descriptions = &vbd, num_vertex_buffers = 1, vertex_attributes = attrs, num_vertex_attributes = 7 },
                     primitive_type = SDL_GPUPrimitiveType.SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
-                    rasterizer_state = new SDL_GPURasterizerState { fill_mode = SDL_GPUFillMode.SDL_GPU_FILLMODE_FILL, front_face = FrontFace,
-                        cull_mode = cull == 0 ? SDL_GPUCullMode.SDL_GPU_CULLMODE_NONE : cull == 1 ? SDL_GPUCullMode.SDL_GPU_CULLMODE_BACK : SDL_GPUCullMode.SDL_GPU_CULLMODE_FRONT },
+                    rasterizer_state = new SDL_GPURasterizerState
+                    {
+                        fill_mode = SDL_GPUFillMode.SDL_GPU_FILLMODE_FILL,
+                        front_face = FrontFace,
+                        cull_mode = cull == 0 ? SDL_GPUCullMode.SDL_GPU_CULLMODE_NONE : cull == 1 ? SDL_GPUCullMode.SDL_GPU_CULLMODE_BACK : SDL_GPUCullMode.SDL_GPU_CULLMODE_FRONT
+                    },
                     depth_stencil_state = new SDL_GPUDepthStencilState
                     {
-                        enable_depth_test = true, enable_depth_write = mode < 2 || mode == 5,
-                        compare_op = SDL_GPUCompareOp.SDL_GPU_COMPAREOP_LESS_OR_EQUAL,
+                        enable_depth_test = true,
+                        enable_depth_write = mode < 2 || mode == 5 || mode == 9,
+                        compare_op = DepthCompare,
                     },
                     target_info = new SDL_GPUGraphicsPipelineTargetInfo
                     {
-                        color_target_descriptions = &ctd, num_color_targets = 1,
-                        depth_stencil_format = SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_D32_FLOAT, has_depth_stencil_target = true,
+                        color_target_descriptions = &ctd,
+                        num_color_targets = 1,
+                        depth_stencil_format = SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
+                        has_depth_stencil_target = true,
                     },
                 };
                 _pipe[pi] = SDL_CreateGPUGraphicsPipeline(_dev, &ci);
@@ -284,7 +323,10 @@ namespace HPEngine
         public IEnumerable<string> TextureKeys => _textures.Keys;
         internal static string TexKey(string path, TexDraw v) => v switch
         {
-            TexDraw.Masked => path + "|masked", TexDraw.Opacity => path + "|opacity", TexDraw.OpacityMasked => path + "|opacity-masked", _ => path,
+            TexDraw.Masked => path + "|masked",
+            TexDraw.Opacity => path + "|opacity",
+            TexDraw.OpacityMasked => path + "|opacity-masked",
+            _ => path,
         };
         // ── TEXTURE DETAIL (options menu; formula and addresses in HP1.Core UETextureLod) ──
         // The draw path decides which LOD UTexture::Lock requests: Client (-1) for BSP and mover surfaces, sky, decals,
@@ -342,6 +384,16 @@ namespace HPEngine
             }
             if (d?.State is "DXT1_FATAL" or "NON_P8_UNDEFINED" && UndefinedFormats.Add(path))
                 Console.Error.WriteLine($"[Texture] STOP: {path}: {d.State} — the original D3DDrv has no defined picture for it (UETextureSource.ReadDirect)");
+            if (d is not null && d.State == "PARAMETRIC")
+            {
+                // bParametric: Core's load state, mips zeroed (UTexture::Serialize, UETextureSource). A ScriptedTexture's
+                // mip 0 is then only what Core's frame gives (TakeScriptedTexels) — never the package's mip.
+                var plevels = ExpandP8(d, variant, firstMip);
+                var ptex = Tex(SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, plevels[0].Item1, plevels[0].Item2, plevels.Length, SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER);
+                UploadLevels(ptex, plevels);
+                if (d.Scripted && firstMip == 0) _scriptedGpu.Add((d, variant, (nint)ptex));
+                return ptex;
+            }
             if (d is null || d.State != "EXPORTED" || d.Levels is null || d.Levels.Length == 0) { MissingTextures.Add($"{path} ({d?.State ?? "not found"})"); return _white; }
             if (d.DrawsUndefinedMip(firstMip))
             {
@@ -354,6 +406,34 @@ namespace HPEngine
             var tex = Tex(SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, levels[0].Item1, levels[0].Item2, levels.Length, SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER);
             UploadLevels(tex, levels);
             return tex;
+        }
+
+        // ScriptedTexture texels: Core's WorldFrame.ScriptedTexels of a tick (its Tick and RenderTexture output) replace mip 0
+        // of every uploaded variant of that texture, expanded with the frame's palette like any P8 mip. A frame repeated
+        // between ticks carries the same list: uploaded once.
+        readonly List<(UETextureSource.TextureData d, TexDraw variant, nint tex)> _scriptedGpu = new();
+        IReadOnlyList<HP1.UEScript.ScriptedTexels> _lastScripted;
+        public int ScriptedUploads;
+        public int ScriptedTextures => _scriptedGpu.Count;   // uploaded ScriptedTexture variants (their mip 0 Core's)
+        internal void TakeScriptedTexels(IReadOnlyList<HP1.UEScript.ScriptedTexels> frame)
+        {
+            if (frame is null || ReferenceEquals(frame, _lastScripted)) return;
+            _lastScripted = frame;
+            foreach (HP1.UEScript.ScriptedTexels t in frame)
+                foreach (var (d, variant, tex) in _scriptedGpu)
+                {
+                    if (!string.Equals(d.Path, t.Path, StringComparison.OrdinalIgnoreCase)) continue;
+                    var one = new UETextureSource.TextureData
+                    {
+                        Path = t.Path,
+                        State = d.State,
+                        Masked = d.Masked,
+                        Palette = t.Palette,
+                        Levels = new[] { (t.USize, t.VSize, t.Mip0) }
+                    };
+                    UploadLevels((SDL_GPUTexture*)tex, ExpandP8(one, variant));
+                    ScriptedUploads++;
+                }
         }
 
         // P8 -> RGBA per draw variant (whole mips): palette entry 0 decided per use — D-78, NOT ORIGINAL.
@@ -516,14 +596,18 @@ namespace HPEngine
         SDL_GPUBuffer* _dvb, _dib;
         uint _dvbCap, _dibCap;
         // frag: fragment mode (classic.hlsl mode.x); fog: vertex fog admission (uvoff.z).
-        readonly List<(uint first, uint count, nint tex, int mode, int frag, bool mover, float ou, float ov, bool cull, bool fog, int group, bool noSmooth, bool alphaTest, int mirror, int polyFlags, int frameView)> _actorDraws = new();
+        readonly List<(uint first, uint count, nint tex, int mode, int frag, bool mover, float ou, float ov, bool cull, bool fog, int group, bool noSmooth, bool alphaTest, int mirror, int polyFlags, int frameView, int actorId)> _actorDraws = new();
         Vertex[] _dynV = Array.Empty<Vertex>();
         uint[] _dynI = Array.Empty<uint>();
         UETextureSource _src;
 
         static int ModeOf(ActorBlend b) => b switch
         {
-            ActorBlend.Masked => 1, ActorBlend.Modulated => 3, ActorBlend.Translucent => 4, ActorBlend.AlphaBlend => 6, _ => 0,
+            ActorBlend.Masked => 1,
+            ActorBlend.Modulated => 3,
+            ActorBlend.Translucent => 4,
+            ActorBlend.AlphaBlend => 6,
+            _ => 0,
         };
 
         // Mesh slot PF_RenderFog after D3DDrv normalization (AdjustPolyFlags/SetBlending 0x10009280/0x100092d0):
@@ -566,7 +650,7 @@ namespace HPEngine
                 bool fog = d.WorldMode < 0 && FogAllowed(d.Blend);
                 if (DrawLog.Path != null) _logSrc[(uint)oi] = d;
                 _actorDraws.Add(((uint)oi, (uint)d.Indices.Count, t, mode, frag, d.MoverAtlas, d.UvOffU, d.UvOffV, !d.TwoSided && d.WorldMode < 0, fog, d.Group, d.NoSmooth, d.AlphaTest,
-                    d.MirrorPlane >= 0 ? _levelMirrors + d.MirrorPlane : -1, d.PolyFlags, d.FrameView));
+                    d.MirrorPlane >= 0 ? _levelMirrors + d.MirrorPlane : -1, d.PolyFlags, d.FrameView, d.WorldMode < 0 ? d.ActorId : -1));
                 ov += d.Vertices.Count; oi += d.Indices.Count;
             }
             _dynVCount = ov; _dynICount = oi;
@@ -587,7 +671,7 @@ namespace HPEngine
             SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_DST_COLOR => "DESTCOLOR",
             _ => f.ToString(),
         };
-        readonly List<(uint first, uint count, nint tex, int mode, int frag, bool mover, float ou, float ov, bool cull, bool fog, int group, bool noSmooth, bool alphaTest, int mirror, int polyFlags, int frameView)> _actorScratch = new();
+        readonly List<(uint first, uint count, nint tex, int mode, int frag, bool mover, float ou, float ov, bool cull, bool fog, int group, bool noSmooth, bool alphaTest, int mirror, int polyFlags, int frameView, int actorId)> _actorScratch = new();
         int _dynVCount, _dynICount;
         readonly Dictionary<uint, ActorDraw> _logSrc = new();   // DrawLog: batch by index offset
         List<(float, float, float, float, float, float)> DynVerts(uint first, uint count)
@@ -658,7 +742,7 @@ namespace HPEngine
         // ---- frame ----
 
         static readonly string Dbg = Environment.GetEnvironmentVariable("HP1_DBG");
-        readonly float[] _rows = new float[16];
+        readonly float[] _rows = new float[20];
 
         float[] _clip = new float[4];
         public int MirrorPasses, WarpPasses, SkyPasses;
@@ -683,7 +767,7 @@ namespace HPEngine
         SDL_GPUTexture*[] _viewRt = new SDL_GPUTexture*[0];
         int _viewW, _viewH, _curView;
         readonly HashSet<string> _viewRefusals = new();
-        readonly float[] _viewRows = new float[16];
+        readonly float[] _viewRows = new float[20];
 
         // Display frame: child frames and mirror plane index per surface (level or mover polygon).
         public void SetViews(IReadOnlyList<ViewFrame> views, Func<ViewSource, int> mirrorKey)
@@ -716,6 +800,8 @@ namespace HPEngine
         (uint first, uint count)[] _range = Array.Empty<(uint, uint)>();
         bool[] _mask = Array.Empty<bool>();
         List<int>[] _logSurfs = Array.Empty<List<int>>();   // DrawLog: drawn surfaces per (view, batch)
+        // Per view the HP2 Lumos carrier ranges in _wib (WorldMesh.Select): batch, range, the PolyFlags argument and alpha byte.
+        List<(int Batch, uint First, uint Count, int Flags, int Alpha, int Surf)>[] _lumos = Array.Empty<List<(int, uint, uint, int, int, int)>>();
 
         void BuildWorldIndices()
         {
@@ -727,17 +813,21 @@ namespace HPEngine
             for (int vi = 0; vi < nv; vi++)
             {
                 int unportedBefore = _mesh?.UnportedBackZone ?? 0, reflagBefore = _mesh?.UnknownReflag ?? 0;
-                if (WorldMesh.Select(_batches, _idx, DrawnOfView(vi), _mask, _wIdx, _range, vi * nd, DrawLog.On ? _logSurfs : null, _mesh) > 0)
+                int lumosRefusedBefore = _mesh?.LumosUnported ?? 0;
+                if (_lumos.Length < nv) Array.Resize(ref _lumos, nv);
+                (_lumos[vi] ??= new()).Clear();
+                if (WorldMesh.Select(_batches, _idx, DrawnOfView(vi), _mask, _wIdx, _range, vi * nd, DrawLog.On ? _logSurfs : null, _mesh, _lumos[vi]) > 0)
                     Refuse($"view {vi}: Core drew level nodes outside the mesh's {_nodeCount} nodes (model mismatch) — not drawn");
                 if ((_mesh?.UnknownReflag ?? 0) > reflagBefore)
                     Refuse("Core reflagged a level node with flags the mesh has no run for — drawn with its surface flags");
                 if ((_mesh?.UnportedBackZone ?? 0) > unportedBefore)
                     Refuse("a node on a zone boundary drawn from behind has no back run (back side fully covered in the coplanar cut) — lit with its front zone");
-                // HP2 Lumos carriers (DrawnWorld.Lumos, Core's DrawComplexSurface PolyFlags/alpha of HP2's DrawFrame): D3DDrv's
-                // SetBlending 0x800040 case (INVSRCALPHA/SRCALPHA), the z-write bit and the carrier word in place of the static
-                // flags are not drawn here — the polygons keep their static surface | texture flags.
-                if (DrawnOfView(vi).Lumos.Length > 0)
-                    Refuse("HP2 Lumos carrier surfaces: their DrawComplexSurface flags and alpha (DrawnWorld.Lumos) are not drawn — drawn with the static surface flags");
+                // HP2 Lumos carriers (DrawnWorld.Lumos): level nodes are drawn by their own ranges (WorldMesh.Select, DrawLumos);
+                // a mover polygon, or a carrier whose surface pass is not the multitexture one, is not ported.
+                if (DrawnOfView(vi).Lumos.Any(l => l.Node < 0))
+                    Refuse("HP2 Lumos carrier on a mover polygon: its DrawComplexSurface flags and alpha (DrawnWorld.Lumos) are not drawn — drawn with the static surface flags");
+                if ((_mesh?.LumosUnported ?? 0) > lumosRefusedBefore)
+                    Refuse("HP2 Lumos carrier without D3DDrv's multitexture pass (fog map or no lightmap: the alpha byte is not the blend factor there) — drawn with the static surface flags");
             }
         }
 
@@ -761,17 +851,28 @@ namespace HPEngine
 
         int ChildOf(int kind, int key) => _tree.ChildOf(_curView, kind, key);
 
-        // rows · M (M is the affine map from view world to root world).
+        // rows · M (M is the affine map from view world to root world). Camera-relative rows (Camera.Rows): the root clips
+        // R·(q − e) + t with q = M·p, i.e. (R·L)·(p − o) + t with L = M's linear part and o = L⁻¹·(e − M.t), the view's eye
+        // in view world (double: L⁻¹ by cofactors; reflections and warp rotations are invertible).
         static void RowsOf(float[] root, in Affine m, float[] o)
         {
             for (int r = 0; r < 4; r++)
             {
-                float a = root[r * 4], b = root[r * 4 + 1], c = root[r * 4 + 2], d = root[r * 4 + 3];
+                float a = root[r * 4], b = root[r * 4 + 1], c = root[r * 4 + 2];
                 o[r * 4] = a * m.M00 + b * m.M10 + c * m.M20;
                 o[r * 4 + 1] = a * m.M01 + b * m.M11 + c * m.M21;
                 o[r * 4 + 2] = a * m.M02 + b * m.M12 + c * m.M22;
-                o[r * 4 + 3] = a * m.M03 + b * m.M13 + c * m.M23 + d;
+                o[r * 4 + 3] = root[r * 4 + 3];
             }
+            double m00 = m.M00, m01 = m.M01, m02 = m.M02, m10 = m.M10, m11 = m.M11, m12 = m.M12, m20 = m.M20, m21 = m.M21, m22 = m.M22;
+            double ex = (double)root[16] - m.M03, ey = (double)root[17] - m.M13, ez = (double)root[18] - m.M23;
+            double c00 = m11 * m22 - m12 * m21, c01 = m02 * m21 - m01 * m22, c02 = m01 * m12 - m02 * m11;
+            double det = m00 * c00 + m10 * c01 + m20 * c02;
+            if (det == 0) throw new System.InvalidOperationException("view mapping M has a singular linear part");
+            o[16] = (float)((c00 * ex + c01 * ey + c02 * ez) / det);
+            o[17] = (float)(((m12 * m20 - m10 * m22) * ex + (m00 * m22 - m02 * m20) * ey + (m02 * m10 - m00 * m12) * ez) / det);
+            o[18] = (float)(((m10 * m21 - m11 * m20) * ex + (m01 * m20 - m00 * m21) * ey + (m00 * m11 - m01 * m10) * ez) / det);
+            o[19] = 0f;
         }
 
         void Refuse(string why) { if (_viewRefusals.Add(why)) Console.Error.WriteLine($"[Views] STOP: {why}"); }
@@ -822,6 +923,7 @@ namespace HPEngine
             var fu = stackalloc float[16];
             var samplers = stackalloc SDL_GPUTextureSamplerBinding[3];
             cam.Rows(w, h, _rows);
+            _cam = cam;
             // Child views (mirrors, warp portals, sky) before the parent, each into its own target: view camera (rows · M),
             // view NearClip clipping. The sky view is the sky-zone geometry (Render.dll.c:6047-6094); it reaches the parent
             // frame only through PF_FakeBackdrop windows (DrawWorld: the window takes the sky target colour in screen
@@ -838,7 +940,7 @@ namespace HPEngine
             {
                 ViewTree.View v = _views[vi];
                 RowsOf(_rows, v.M, _viewRows);
-                fixed (float* rr = _viewRows) SDL_PushGPUVertexUniformData(cmd, 0, (nint)rr, 64);
+                fixed (float* rr = _viewRows) SDL_PushGPUVertexUniformData(cmd, 0, (nint)rr, 80);
                 _clip[0] = v.ClipN.x; _clip[1] = v.ClipN.y; _clip[2] = v.ClipN.z; _clip[3] = v.ClipD;
                 _curView = vi;
                 DrawLog.Pass = ViewName(vi);
@@ -854,7 +956,7 @@ namespace HPEngine
             _curView = 0;
             _clip[0] = _clip[1] = _clip[2] = _clip[3] = 0;
             // Level: sky windows, mirrors, portals from their child views.
-            fixed (float* rows = _rows) SDL_PushGPUVertexUniformData(cmd, 0, (nint)rows, 64);
+            fixed (float* rows = _rows) SDL_PushGPUVertexUniformData(cmd, 0, (nint)rows, 80);
             DrawLog.Pass = "main";
             var main = BeginPass(cmd, target, clearColor: _tree.FullScreenChild(0) < 0);
             _screenW = w; _screenH = h;
@@ -913,6 +1015,8 @@ namespace HPEngine
             {
                 if (d.group != group) continue;
                 if (d.frameView != HPEngine.Sprites.SpriteDraw.AnyView && d.frameView != frameOfView) continue;   // batch of another frame
+                // A canvas-drawn actor (HudKind.Actor) only in its HUD pass, and that pass draws only it.
+                if (_canvasActor >= 0 ? d.actorId != _canvasActor : d.actorId >= 0 && _canvasActors.Contains(d.actorId)) continue;
                 int child = d.mirror >= 0 ? ChildOf(KindMirror, d.mirror) : -1;
                 if (child >= 0)
                 {
@@ -950,18 +1054,57 @@ namespace HPEngine
             }
         }
 
+        // CANVAS MESH DRAW (Core HudKind.Actor: UCanvas::execDrawActor -> URender::DrawActor on the master frame after
+        // RenDev->ClearZ): a pass over the frame's colour with depth cleared to the far value, the master camera (at Core's
+        // canvas frame when Hor+ widened the world's: WorldFrame.CanvasFovAngle / CanvasFrameSize), the actor's own
+        // master-frame batches in group order. The world passes skip that actor (DrawActors).
+        int _canvasActor = -1;
+        readonly HashSet<int> _canvasActors = new();
+        float _canvasFov;
+        int _canvasW, _canvasH;
+        Camera _cam;
+        readonly float[] _canvasRows = new float[20];
+        public void SetCanvasActors(IReadOnlyList<HP1.UEScript.HudCommand> hud, float canvasFov = 0f, int canvasW = 0, int canvasH = 0)
+        {
+            _canvasActors.Clear();
+            _canvasFov = canvasFov; _canvasW = canvasW; _canvasH = canvasH;
+            if (hud is null) return;
+            foreach (var c in hud) if (c.Kind == HP1.UEScript.HudKind.Actor) _canvasActors.Add(c.ActorId);
+        }
+        void DrawCanvasActor(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, int actorId)
+        {
+            var fu = stackalloc float[16];
+            var samplers = stackalloc SDL_GPUTextureSamplerBinding[3];
+            float[] cr = _rows;
+            if (_canvasFov > 0f) { _cam.AtCanvasFov(_canvasFov).Rows(_screenW, _screenH, _canvasRows, _canvasW, _canvasH); cr = _canvasRows; }
+            fixed (float* rows = cr) SDL_PushGPUVertexUniformData(cmd, 0, (nint)rows, 80);
+            _curView = 0;
+            _clip[0] = _clip[1] = _clip[2] = _clip[3] = 0;
+            DrawLog.Pass = "canvas";
+            var pass = BeginPass(cmd, target, clearColor: false);   // depth load_op CLEAR (ClearDepth): ClearZ
+            _canvasActor = actorId;
+            for (int g = 0; g < RenderRules.Groups; g++) DrawActors(cmd, pass, fu, samplers, g);
+            _canvasActor = -1;
+            SDL_EndGPURenderPass(pass);
+        }
+
         SDL_GPURenderPass* BeginPass(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, bool clearColor)
         {
             var color = new SDL_GPUColorTargetInfo
             {
-                texture = target, clear_color = new SDL_FColor { r = 0, g = 0, b = 0, a = 1 },
+                texture = target,
+                clear_color = new SDL_FColor { r = 0, g = 0, b = 0, a = 1 },
                 load_op = clearColor ? SDL_GPULoadOp.SDL_GPU_LOADOP_CLEAR : SDL_GPULoadOp.SDL_GPU_LOADOP_LOAD,
                 store_op = SDL_GPUStoreOp.SDL_GPU_STOREOP_STORE,
             };
             var depth = new SDL_GPUDepthStencilTargetInfo
             {
-                texture = _depth, clear_depth = 1, load_op = SDL_GPULoadOp.SDL_GPU_LOADOP_CLEAR, store_op = SDL_GPUStoreOp.SDL_GPU_STOREOP_DONT_CARE,
-                stencil_load_op = SDL_GPULoadOp.SDL_GPU_LOADOP_DONT_CARE, stencil_store_op = SDL_GPUStoreOp.SDL_GPU_STOREOP_DONT_CARE,
+                texture = _depth,
+                clear_depth = ClearDepth,
+                load_op = SDL_GPULoadOp.SDL_GPU_LOADOP_CLEAR,
+                store_op = SDL_GPUStoreOp.SDL_GPU_STOREOP_DONT_CARE,
+                stencil_load_op = SDL_GPULoadOp.SDL_GPU_LOADOP_DONT_CARE,
+                stencil_store_op = SDL_GPUStoreOp.SDL_GPU_STOREOP_DONT_CARE,
             };
             return SDL_BeginGPURenderPass(cmd, &color, 1, &depth);
         }
@@ -981,7 +1124,7 @@ namespace HPEngine
                 nint tex = _animTex[di] != 0 ? _animTex[di] : tex0;
                 if (b.Group != group) continue;
                 var (first, count) = _range[_curView * _draws.Count + di];
-                if (count == 0) continue;
+                if (count == 0) { DrawLumos(cmd, pass, fu, samplers, di, b, tex, ref bound); continue; }
                 // Warp portal: only with a child view, its target colour with Z write (PF_Invisible|PF_Occlude in D3DDrv is
                 // depth only over the child's colour); without a child the invisible surface is not drawn.
                 // Sky window: the sky view's colour; without one (no sky, Recursion limit) depth only (mode 5).
@@ -1025,12 +1168,57 @@ namespace HPEngine
                     if (DrawLog.On) DrawLog.Draw("WORLDFOG", b.Group, 7, false, 0x10000000, b.Material, $"{b.At.x:F0},{b.At.y:F0},{b.At.z:F0}", _logSurfs[_curView * _draws.Count + di], count);
                     SDL_DrawGPUIndexedPrimitives(pass, count, 1, first, 0, 0);
                 }
+                DrawLumos(cmd, pass, fu, samplers, di, b, tex, ref bound);
+            }
+        }
+
+        // HP2 Lumos carriers of batch di in this view (WorldMesh.Select), right after the batch (DrawFrame's pass-2 records;
+        // live: the carrier is the last surface of its frame, audit/captures_hp2_2026-11-16/lumos): D3DDrv DrawComplexSurface
+        // with Core's PolyFlags argument and alpha byte — its multitexture pass: stage 0 MODULATE(texture, diffuse) for colour
+        // and alpha with diffuse RGB 255 and the byte as alpha [HP2 D3DDrv 0x10003dca..0x10003dd6], stage 1 MODULATE2X with
+        // the lightmap and alpha SELECTARG2(CURRENT), stages 2-3 off (live DP lines); SetBlending's Lumos case: pipeline 8/9
+        // (INVSRCALPHA/SRCALPHA, Z write = bit 31 of the argument) only for (argument & 0x800040) == 0x800040, else HP1's chain
+        // on the argument (RenderRules.LumosPipe); alpha test by the argument's PF_Masked. Shader (Lumos case): the
+        // lightmap branch's alpha = byte / 255 (uvoff.w = 2, screen.w; the uploaded texel alpha of every shipped carrier
+        // texture is 255, classic.hlsl). A masked carrier (entry 0's alpha would matter) is not ported: no shipped one.
+        void DrawLumos(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, float* fu, SDL_GPUTextureSamplerBinding* samplers, int di, Batch b, nint tex, ref int bound)
+        {
+            if (_curView >= _lumos.Length || _lumos[_curView] is not { Count: > 0 } list) return;
+            foreach (var (bi, first, count, pf, alpha, surf) in list)
+            {
+                if (bi != di || count == 0) continue;
+                if (((pf | b.PolyFlags) & WorldMesh.PF_Masked) != 0)
+                    Refuse($"HP2 Lumos carrier surf {surf}: masked (texel alpha of palette entry 0 as D3DDrv uploads it not established) — not ported");
+                int pidx = RenderRules.LumosPipe(pf);
+                bool lumosCase = RenderRules.LumosCase(pf);
+                if (pidx != bound) { SDL_BindGPUGraphicsPipeline(pass, _pipe[pidx]); bound = pidx; }
+                bool at = RenderRules.AlphaTest(pf);
+                fu[0] = 0; fu[1] = at ? 1 : 0; fu[2] = Dbg == "red" ? 1 : Dbg == "tex" ? -1 : 0; fu[3] = Dbg == "lm" ? 1 : 0;
+                fu[4] = _uvOff[di * 2]; fu[5] = _uvOff[di * 2 + 1]; fu[6] = b.SpecialLit ? 1 : 0; fu[7] = lumosCase ? 2 : 0;
+                SetClip(fu);
+                fu[15] = lumosCase ? alpha / 255f : 0;
+                SDL_PushGPUFragmentUniformData(cmd, 0, (nint)fu, 64);
+                samplers[0] = new SDL_GPUTextureSamplerBinding { texture = (SDL_GPUTexture*)tex, sampler = b.NoSmooth ? _point : World };
+                samplers[1] = new SDL_GPUTextureSamplerBinding { texture = _atlas, sampler = _lmSampler };
+                samplers[2] = new SDL_GPUTextureSamplerBinding { texture = _fog, sampler = _lmSampler };
+                SDL_BindGPUFragmentSamplers(pass, 0, samplers, 3);
+                if (DrawLog.On) DrawLog.Draw("WORLD", b.Group, pidx, at, pf, b.Material, $"{b.At.x:F0},{b.At.y:F0},{b.At.z:F0}", new[] { surf }, count, $"\tlumos={alpha}");
+                SDL_DrawGPUIndexedPrimitives(pass, count, 1, first, 0, 0);
+                fu[7] = 0; fu[15] = 0;
             }
         }
 
         public void RenderOffscreen(Camera cam, out byte[] rgba, bool download = true)
         {
             rgba = null;
+            if (Window != null && PixelSize() is var (pw, ph) && pw > 0 && ph > 0 && (pw, ph) != (Width, Height))
+            {
+                SDL_ReleaseGPUTexture(_dev, _color); SDL_ReleaseGPUTransferBuffer(_dev, _download);
+                Width = pw; Height = ph;
+                _color = Tex(_colorFmt, pw, ph, 1, SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER);
+                var rtb = new SDL_GPUTransferBufferCreateInfo { usage = SDL_GPUTransferBufferUsage.SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD, size = (uint)(pw * ph * 4) };
+                _download = SDL_CreateGPUTransferBuffer(_dev, &rtb);
+            }
             var cmd = SDL_AcquireGPUCommandBuffer(_dev);
             Draw(cmd, _color, Width, Height, cam);
             if (download)
@@ -1048,6 +1236,48 @@ namespace HPEngine
             rgba = new byte[Width * Height * 4];
             new ReadOnlySpan<byte>((void*)SDL_MapGPUTransferBuffer(_dev, _download, false), rgba.Length).CopyTo(rgba);
             SDL_UnmapGPUTransferBuffer(_dev, _download);
+        }
+
+        // SpotReport screenshot, in the window and in an offscreen renderer alike: one frame drawn into a capture target of the
+        // window's pixel size (the window has no _color/_download: those exist only offscreen — drawing into them crashed the
+        // F12 report, Metal EXC_BAD_ACCESS in BeginRenderPass). Every resource is created and checked here and released after;
+        // false (no image) when the size is zero or any creation fails. rgba is RGBA8 rows, top to bottom.
+        public bool TryCapture(Camera cam, out byte[] rgba, out int w, out int h)
+        {
+            rgba = null;
+            (w, h) = PixelSize();
+            if (w <= 0 || h <= 0) return false;
+            SDL_GPUTexture* tex = Tex(_colorFmt, w, h, 1, SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER);
+            if (tex == null) { Console.Error.WriteLine($"[Spot] capture: no {w}x{h} target ({SDL_GetError()})"); return false; }
+            var tb = new SDL_GPUTransferBufferCreateInfo { usage = SDL_GPUTransferBufferUsage.SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD, size = (uint)(w * h * 4) };
+            SDL_GPUTransferBuffer* dl = SDL_CreateGPUTransferBuffer(_dev, &tb);
+            if (dl == null) { SDL_ReleaseGPUTexture(_dev, tex); Console.Error.WriteLine($"[Spot] capture: no download buffer ({SDL_GetError()})"); return false; }
+            try
+            {
+                var cmd = SDL_AcquireGPUCommandBuffer(_dev);
+                if (cmd == null) return false;
+                Draw(cmd, tex, w, h, cam);
+                var cp = SDL_BeginGPUCopyPass(cmd);
+                var reg = new SDL_GPUTextureRegion { texture = tex, w = (uint)w, h = (uint)h, d = 1 };
+                var info = new SDL_GPUTextureTransferInfo { transfer_buffer = dl };
+                SDL_DownloadFromGPUTexture(cp, &reg, &info);
+                SDL_EndGPUCopyPass(cp);
+                var fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+                if (fence == null) return false;
+                SDL_WaitForGPUFences(_dev, true, &fence, 1);
+                SDL_ReleaseGPUFence(_dev, fence);
+                rgba = new byte[w * h * 4];
+                new ReadOnlySpan<byte>((void*)SDL_MapGPUTransferBuffer(_dev, dl, false), rgba.Length).CopyTo(rgba);
+                SDL_UnmapGPUTransferBuffer(_dev, dl);
+                if (_colorFmt is SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM or SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB)
+                    for (int i = 0; i < rgba.Length; i += 4) (rgba[i], rgba[i + 2]) = (rgba[i + 2], rgba[i]);
+                return true;
+            }
+            finally
+            {
+                SDL_ReleaseGPUTransferBuffer(_dev, dl);
+                SDL_ReleaseGPUTexture(_dev, tex);
+            }
         }
 
         public void RenderToWindow(Camera cam)

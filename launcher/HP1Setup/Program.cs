@@ -1,6 +1,6 @@
 // HP1Setup — installs the game data for HPEngine from the player's own copy of Harry Potter (2001, PC).
 //
-//   HP1Setup [--dest <dir>] <source> [<source> ...]
+//   HP1Setup [--game hp2] [--dest <dir>] <source> [<source> ...]
 //   HP1Setup                        (in a terminal: asks for the source)
 //   HP1Setup --unpack-cab <data1.hdr> <dir>   (test: only unpacks an InstallShield cabinet)
 //   HP1Setup --check-manifests               (test: the manifests agree with UEEdition)
@@ -36,6 +36,13 @@
 // the <Dir>.old backups are removed. An interrupted run is resumed by the next one (a lone <Dir>.old is moved back).
 // Save/ is merged: files already there are kept.
 //
+// --game hp2: Harry Potter and the Chamber of Secrets (2002) instead (the launcher's HP2 tab): recognised by its
+// System/Engine.dll + System/hgame.u (UEEdition.Identify: Game HP2, data set by hgame.u); manifests hp2_en.sha1 /
+// hp2_ru_ea.sha1 (the RU EA release is EN's tier, author 2026-11-17), the modified re-release with WARNING modified.
+// Each game refuses the other's copy (other_game). The EN retail CD has no unpacked game: its InstallShield cabinet
+// (setup/data1.hdr + data2.cab) is unpacked in the install layout (InstallShield.cs: the groups that go into the game
+// folder, in the language setup/Setup.ini [Languages] Default names) and setup/hgame.u is put into System, as the CD's
+// setup script copies it there (the file is not in the cabinet).
 // Output, one per line (read by launcher/Launcher.swift): STEP <find|unpack|check|copy>, PROGRESS <0..100>,
 // EDITION <UEEdition id> <edition: support tier>, WARNING <key> <text for the player>, REPORT <https new-issue link> (an unrecognised release), ERROR <key> <text for the player>, DONE <dest>. Exit code: 0 done, 2 the source was rejected, 1 other failure.
 using System.Diagnostics;
@@ -63,9 +70,12 @@ static class Program
         [UEEdition.DataSet.US153] = ("us153.sha1", "US 1.53"),
         [UEEdition.DataSet.UK11] = ("uk11.sha1", "UK 1.1"),
         [UEEdition.DataSet.RU_EA] = ("ru_ea.sha1", "RU EA"),
+        [UEEdition.DataSet.HP2_EN] = ("hp2_en.sha1", "EN"),
+        [UEEdition.DataSet.HP2_RU_EA] = ("hp2_ru_ea.sha1", "RU EA"),
     };
 
-    const string NothingFound = "No Harry Potter game files found here. Add the installed game folder, the game CD or its image "
+    static bool _hp2;   // --game hp2: Chamber of Secrets
+    static string NothingFound => $"No {(_hp2 ? "Harry Potter and the Chamber of Secrets" : "Harry Potter")} game files found here. Add the installed game folder, the game CD or its image "
         + "(.iso, .bin/.cue, .mdf), its installer (Setup.exe with its .bin files, or the setup folder with data1.cab), "
         + "or a copy of the CD (a folder or .zip with System and Maps inside).";
 
@@ -82,10 +92,17 @@ static class Program
             return 0;
         }
         if (args.Length == 1 && args[0] == "--check-manifests") return CheckManifests();   // launcher/test_setup.sh
+        if (args.Length >= 2 && args[0] == "--game")
+        {
+            if (args[1] is not ("hp1" or "hp2")) { Console.WriteLine($"ERROR usage --game is hp1 or hp2, not {args[1]}"); return 1; }
+            _hp2 = args[1] == "hp2";
+            args = args[2..];
+        }
         if (args.Length == 1 && args[0] is "--help" or "-h" or "/?")
         {
-            Console.WriteLine("HP1Setup installs the game data for HPEngine from your own copy of Harry Potter and the Philosopher's Stone (PC, 2001).");
-            Console.WriteLine("Usage: HP1Setup [--dest <dir>] <source> [<source> ...]");
+            Console.WriteLine("HP1Setup installs the game data for HPEngine from your own copy of Harry Potter and the Philosopher's Stone (PC, 2001)"
+                + " or, with --game hp2, of Harry Potter and the Chamber of Secrets (PC, 2002).");
+            Console.WriteLine("Usage: HP1Setup [--game hp2] [--dest <dir>] <source> [<source> ...]");
             Console.WriteLine("  <source>  the installed game folder, the game CD, a copy of the CD, the game's installer, or a .zip of those");
             Console.WriteLine("  --dest    where to install (default: game/ next to HP1Setup, where HPEngine finds it)");
             Console.WriteLine("Without arguments, in a terminal, it asks for the source. Your game files are only read, never changed.");
@@ -106,8 +123,9 @@ static class Program
         bool interactive = sources.Count == 0 && !Console.IsInputRedirected;
         if (interactive)
         {
-            Console.WriteLine("HP1Setup installs the game data for HPEngine from your own copy of Harry Potter and the "
-                + "Philosopher's Stone (PC, 2001: US 1.53, UK 1.1 or the Russian EA release).\nDrag the installed game folder or the game CD "
+            Console.WriteLine("HP1Setup installs the game data for HPEngine from your own copy of " + (_hp2
+                ? "Harry Potter and the Chamber of Secrets (PC, 2002: the English CD or the Russian EA release)."
+                : "Harry Potter and the Philosopher's Stone (PC, 2001: US 1.53, UK 1.1 or the Russian EA release).") + "\nDrag the installed game folder or the game CD "
                 + "(or a copy of it, or a .zip of it) into this window and press Enter:");
             Console.Write("> ");
             string line = Console.ReadLine();
@@ -176,15 +194,15 @@ static class Program
     {
         int bad = 0;
         foreach (var d in Enum.GetValues<UEEdition.DataSet>())
-            // HP2 sets: HP1Setup never installs HP2 (the launcher's HP2 tab plays an existing HP2 folder), so no manifest.
-            if (UEEdition.TierOf(d) is UEEdition.Support.Exact or UEEdition.Support.Supported && !Editions.ContainsKey(d)
-                && d is not (UEEdition.DataSet.HP2_EN or UEEdition.DataSet.HP2_RU_EA or UEEdition.DataSet.HP2_MODIFIED))
+            if (UEEdition.TierOf(d) is UEEdition.Support.Exact or UEEdition.Support.Supported && !Editions.ContainsKey(d))
             { Console.WriteLine($"{d}: {UEEdition.TierOf(d)} without a manifest"); bad++; }
         foreach (var (data, ed) in Editions)
         {
             var m = LoadManifest(ed.manifest).ToDictionary(e => e.Path, e => e.Sha1, StringComparer.OrdinalIgnoreCase);
-            var got = UEEdition.DataOf(m.GetValueOrDefault("System/Engine.dll"), m.GetValueOrDefault("System/Render.dll"),
-                m.GetValueOrDefault("System/HPBase.u"));
+            var got = m.ContainsKey("System/hgame.u")
+                ? UEEdition.HP2DataOf(m.GetValueOrDefault("System/Engine.dll"), m.GetValueOrDefault("System/hgame.u"))
+                : UEEdition.DataOf(m.GetValueOrDefault("System/Engine.dll"), m.GetValueOrDefault("System/Render.dll"),
+                    m.GetValueOrDefault("System/HPBase.u"));
             Console.WriteLine($"{ed.manifest}: {got}{(got == data ? "" : $", want {data}")}");
             if (got != data) bad++;
         }
@@ -205,7 +223,7 @@ static class Program
             // In name order (the same on every system): the first reason a candidate gave nothing is the one reported.
             foreach (var dir in Directory.EnumerateFiles(p, "*", scan).Order(StringComparer.Ordinal).GroupBy(Path.GetDirectoryName))
             {
-                var files = dir.ToList();
+                var files = dir.Where(f => !MacMetadata(f)).ToList();
                 bool sheet = files.Any(f => Ext(f) is ".cue" or ".mds" or ".iso");   // .bin/.mdf next to it is the same disc
                 foreach (string f in files)
                     if (Ext(f) is ".zip" or ".iso" or ".cue" or ".mds" or ".7z" or ".rar" or ".exe" || IsCabHeader(f)
@@ -261,6 +279,9 @@ static class Program
     static bool IsRoot(string d) => DirCI(d, "System") is not null && DirCI(d, "Maps") is not null;
 
     static string Ext(string f) => Path.GetExtension(f).ToLowerInvariant();
+    // macOS AppleDouble metadata ("._<name>", next to every file copied from a Mac to FAT/exFAT, SMB or a Mac-made tar):
+    // never game data, never copied (author 2026-11-18: "._Core.u" in an HP2 install broke the boot).
+    static bool MacMetadata(string f) => Path.GetFileName(f).StartsWith("._", StringComparison.Ordinal);
 
     static string Unquote(string s)
     {
@@ -332,13 +353,41 @@ static class Program
     {
         Console.WriteLine("STEP unpack");
         string o = NewTemp();
-        try { InstallShield.Extract(header, o); return Unpacked(o, header); }
+        try
+        {
+            string setupDir = Path.GetDirectoryName(Path.GetFullPath(header));
+            InstallShield.Extract(header, o, SetupLanguage(setupDir));
+            // The HP2 CD's setup script copies setup/hgame.u into System (it is not in the cabinet).
+            if (DirCI(o, "System") is string sys && FileCI(setupDir, "hgame.u") is string hgame && FileCI(sys, "hgame.u") is null)
+                File.Copy(hgame, Path.Combine(sys, "hgame.u"));
+            return Unpacked(o, header);
+        }
         catch (Exception e) when (e is InvalidDataException or IOException or UnauthorizedAccessException
                                   or IndexOutOfRangeException or ArgumentException or OverflowException)
         {
             _hint ??= new Reject("unpack_failed", $"Could not read the InstallShield cabinet {Path.GetFileName(header)}: {e.Message}");
             return null;
         }
+    }
+
+    // The language the InstallShield setup installs by default: setup.ini [Languages] Default=0x0009 -> "0009" (the group
+    // descriptors' form). No such line: null, the cabinet is unpacked as unshield does (every group in its own folder).
+    static string SetupLanguage(string setupDir)
+    {
+        if (FileCI(setupDir, "Setup.ini") is not string ini) return null;
+        bool inside = false;
+        foreach (string raw in File.ReadLines(ini))
+        {
+            string l = raw.Trim();
+            if (l.StartsWith('[')) inside = l.Equals("[Languages]", StringComparison.OrdinalIgnoreCase);
+            else if (inside && l.StartsWith("Default=", StringComparison.OrdinalIgnoreCase))
+            {
+                string v = l[8..].Trim();
+                if (v.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) v = v[2..];
+                return v.Length == 4 && v.All(char.IsAsciiHexDigit) ? v.ToLowerInvariant() : null;
+            }
+        }
+        return null;
     }
 
     // An installer that unpacked into something without the game folder: said by name if nothing else is found.
@@ -475,26 +524,34 @@ static class Program
         var files = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (string dir in new[] { "System", "Maps", "Textures", "Sounds", "Music" })
             if (DirCI(root, dir) is string d)
-                foreach (string f in Directory.EnumerateFiles(d)) files.TryAdd(dir + "/" + Path.GetFileName(f), f);
+                foreach (string f in Directory.EnumerateFiles(d))
+                    if (!MacMetadata(f)) files.TryAdd(dir + "/" + Path.GetFileName(f), f);
         return files;
     }
 
     static List<Entry> Check(string root)
     {
         var files = Index(root);
-        if (UEEdition.Identify(root).Game == UEEdition.Game.HP2)
-            throw new Reject("other_game", "This is Harry Potter and the Chamber of Secrets (2002). HPEngine runs Harry Potter and the "
-                + "Philosopher's Stone (PC, 2001); the Chamber of Secrets is not supported yet.");
-        string[] keys = { "System/Engine.dll", "System/Render.dll", "System/HPBase.u" };
+        var id = UEEdition.Identify(root);
+        if (!_hp2 && id.Game == UEEdition.Game.HP2)
+            throw new Reject("other_game", "This is Harry Potter and the Chamber of Secrets (2002). Install it on the launcher's "
+                + "Harry Potter 2 tab; here Harry Potter and the Philosopher's Stone (PC, 2001) is installed.");
+        if (_hp2 && id.Game != UEEdition.Game.HP2 && files.ContainsKey("System/HPBase.u"))
+            throw new Reject("other_game", "This is Harry Potter and the Philosopher's Stone (2001). Install it on the launcher's "
+                + "Harry Potter 1 tab; here Harry Potter and the Chamber of Secrets (PC, 2002) is installed.");
+        string[] keys = _hp2 ? new[] { "System/Engine.dll", "System/hgame.u" } : new[] { "System/Engine.dll", "System/Render.dll", "System/HPBase.u" };
         if (keys.FirstOrDefault(k => !files.ContainsKey(k)) is string absent)
             throw new Reject("missing_files", $"{absent} is missing. A full copy of the game is needed: the installed game folder or the game CD.");
-        var id = UEEdition.Identify(root);
+        // Core tells the games apart by Engine.dll alone: another Engine.dll beside hgame.u would run as HP1. Refused.
+        if (_hp2 && id.Game != UEEdition.Game.HP2)
+            throw new Reject("unknown_engine", "System/Engine.dll is not the Chamber of Secrets engine HPEngine knows (sha1 "
+                + id.EngineSha1 + "), so HPEngine cannot run this copy. Please report it: " + UEEdition.Issues);
         // Releases with modified game scripts (the author's inventory, audit/versions_survey_2026-11-03.md, or a listed
         // DLL build with another HPBase.u) and unknown releases have no manifest: installed as found, with a WARNING.
         (string manifest, string name) ed = Editions.TryGetValue(id.Data, out var known) ? known : ("", id.Data switch
         {
             UEEdition.DataSet.CITY_PL => "City re-release",
-            UEEdition.DataSet.MODDED_EN => "Modded re-release",
+            UEEdition.DataSet.MODDED_EN or UEEdition.DataSet.HP2_MODIFIED => "Modded re-release",
             _ => id.Tier == UEEdition.Support.Modified ? "Modified release" : "Unknown release",
         });
         var manifest = ed.manifest == "" ? new List<Entry>() : LoadManifest(ed.manifest);
@@ -522,7 +579,7 @@ static class Program
         // A supported edition with files that differ from its manifest: a patch, a mod or a damaged copy.
         var tier = differ.Count > 0 ? UEEdition.Support.Modified : id.Tier;
         _edition = $"{ed.name}: {tier.ToString().ToLowerInvariant()}";
-        Console.WriteLine($"EDITION {id.Edition} {_edition}");
+        Console.WriteLine($"EDITION {(_hp2 ? id.Data.ToString() : id.Edition.ToString())} {_edition}");   // HP2: no exe-based ids
         if (differ.Count > 0)
             Console.WriteLine($"WARNING modified {differ.Count} game file(s) differ from {ed.name} (for example "
                 + $"{string.Join(", ", differ.Take(3))}). " + UEEdition.ModifiedWarning);
@@ -576,7 +633,7 @@ static class Program
             if (DirCI(root, dir) is not string s) continue;
             foreach (string f in Directory.EnumerateFiles(s, "*", SearchOption.AllDirectories))
             {
-                if (Ext(f) == ".exe") continue;
+                if (Ext(f) == ".exe" || MacMetadata(f)) continue;
                 string rel = dir + "/" + Path.GetRelativePath(s, f).Replace('\\', '/');
                 plan.Add((f, canon.TryGetValue(rel, out string c) ? c : rel));
             }

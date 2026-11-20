@@ -88,9 +88,11 @@ namespace HP1.UEScript
         {
             DataSet.US153 => Support.Exact,
             // HP2_EN: the release the HP2 port is built against (en_root; the launcher's HP2 tab). Supported = runs, not
-            // proven exact; UEGameProfile.HP2.NotPorted says how far it runs.
-            DataSet.UK11 or DataSet.RU_EA or DataSet.HP2_EN => Support.Supported,
-            DataSet.Unknown or DataSet.HP2_RU_EA => Support.Unverified,
+            // proven exact; UEGameProfile.HP2.NotPorted says how far it runs. HP2_RU_EA: the same tier as EN (author
+            // 2026-11-17, DECISIONS "HP2 RU EA at EN's tier"): its DLLs, packages and data are EN's byte for byte; hgame.u
+            // differs only in a 20-byte SKU string; the rest is its Russian dialogue and text.
+            DataSet.UK11 or DataSet.RU_EA or DataSet.HP2_EN or DataSet.HP2_RU_EA => Support.Supported,
+            DataSet.Unknown => Support.Unverified,
             _ => Support.Modified,
         };
 

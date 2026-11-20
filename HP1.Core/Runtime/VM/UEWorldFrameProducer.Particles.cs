@@ -42,6 +42,9 @@ namespace HP1.UEScript
             // writes neither, they hold the rand()/__getptd frames GetParams left under execAddParticle). The port keeps
             // 0 and stops where they would become visible (UParticle::Update chaos, the rotated billboard).
             public bool NativeResidue;
+            // Presentation identity (ParticleInstance.Serial): not a UParticle field, never read by game code.
+            public readonly int Serial = System.Threading.Interlocked.Increment(ref _serials);
+            static int _serials;
         }
 
         // NATIVE-ONLY emitter state. Every DECLARED ParticleFX var — Age,

@@ -328,6 +328,14 @@ namespace HP1.UEScript
         // a nested Draw and PaintProgress do nothing while it is set (UELevelRuntime.PaintProgress).
         bool _inEngineFrame;
 
+        // Script run as the shipped one runs inside UGameEngine::Draw (a save then paints no progress frame).
+        internal void RunAsInsideFrame(Action body)
+        {
+            bool was = _inEngineFrame;
+            _inEngineFrame = true;
+            try { body(); } finally { _inEngineFrame = was; }
+        }
+
         // Original: Engine.dll ?Draw@UGameEngine@@UAEXPAVUViewport@@HPAEPAH@Z [HP1 0x1039fa40] [HP2 0x103a8aa0]
         public WorldFrame RunEngineFrame(UEInterpreter interp, int frameNumber, string label, float viewportDelta)
         {
@@ -440,7 +448,7 @@ namespace HP1.UEScript
         // whose collision primitive the ray crosses blocks the corona. TraceFlags 1 cannot be used here: with Source
         // NULL shipped maps every non-world actor to bit 0x10 (SingleLineCheckBody), so this is a direct pawn pass over
         // the collision hash. A pawn whose cylinder holds the ray start never blocks (the camera is inside it: first
-        // person, or a camera at its view target). Pure query: no touch, no RNG, no writes (the hash visit tag only
+        // person, or a camera at its view target), nor does one whose cylinder holds the lamp (the lamp's own housing). Pure query: no touch, no RNG, no writes (the hash visit tag only
         // dedups within one query).
         const int StyleModulated = 4;   // ERenderStyle STY_Modulated
         public bool CoronaPawnClear(Vector3 start, Vector3 end)
@@ -458,12 +466,62 @@ namespace HP1.UEScript
                 int style = UEValue.ToInt(p.GetProp(PK.Style));
                 float opacity = p.GetProp(PK.Opacity) is { } op ? UEValue.AsFloat(op) : 1f;
                 if (MeshTriangleOrder.ActorPolyFlags(style, opacity) != 0 || style == StyleModulated) continue;
-                Vector3 d = start - UEInterpreter.AsVector3(p.GetProp(PK.Location));
+                Vector3 loc = UEInterpreter.AsVector3(p.GetProp(PK.Location));
                 float r = UEInterpreter.AsFloat(p.GetProp(PK.CollisionRadius)), h = UEInterpreter.AsFloat(p.GetProp(PK.CollisionHeight));
+                Vector3 d = start - loc, e = end - loc;
                 if (d.x * d.x + d.y * d.y <= r * r && Math.Abs(d.z) <= h) continue;
+                // A pawn whose cylinder holds the lamp is its housing, not something in front of it: HP2's lamp props are
+                // pawns (Entryhall_hub LampEntrance, a Pawn with its corona Light382/393 inside the cylinder), so without
+                // this every such corona was hidden under Enhanced (author 2026-11-17, "the lanterns have no coronas").
+                if (e.x * e.x + e.y * e.y <= r * r && Math.Abs(e.z) <= h) continue;
+                // HP2: its props are pawns too (HProp -> HPawn -> Pawn: lamps, candles, furniture, trees, statues), and a prop's
+                // cylinder does not follow what is drawn (Entryhall_hub: LampEntrance0's 22x95 cylinder around a lantern on a
+                // thin post hid the corona of the lantern behind it, in plain view). There the ray must also cross a triangle
+                // the pawn was drawn with in this frame (audit 2026-11-17, DECISIONS "HP2 corona pawn rule").
+                if (UEGameProfile.Current.Game == UEEdition.Game.HP2 && !DrawnMeshCrosses(p, start, end)) continue;
                 return false;
             }
             return true;
+        }
+
+        // NOT ORIGINAL (HP2 corona pawn rule): the segment start..end crosses a face of the pose DrawFrame drew pawn p with in
+        // the corona's frame (no pose: p was not drawn there and hides nothing). Faces whose flags (material | actor) are
+        // see-through (invisible, translucent, modulated) let the lamp show through, as the actor rule above. Möller–Trumbore,
+        // both sides. ponytail: a masked face counts whole (leaves, grates); its texels are not sampled.
+        bool DrawnMeshCrosses(UEObject p, Vector3 start, Vector3 end)
+        {
+            if (FrameProducer?.CoronaFramePose(p.ObjectId) is not MeshPose mp) return false;
+            UEMeshSource src = MeshSource;
+            string cls = src?.Find(mp.MeshPath)?.Class;
+            int[] wv, tri, mat, mflags;
+            if (string.Equals(cls, "SkeletalMesh", StringComparison.OrdinalIgnoreCase))
+            { UERawSkeletalMesh m = src.Skeletal(mp.MeshPath); (wv, tri, mat, mflags) = (m.wedgeVertex, m.triWedge, m.triMaterial, m.materialFlags); }
+            else if (src?.Vertex(mp.MeshPath) is UERawVertexMesh m)
+            { (wv, tri, mat, mflags) = (m.wedgeVertex, m.triWedge, m.triMaterial, m.materialFlags); }
+            else throw new InvalidOperationException($"corona pawn trace: mesh {mp.MeshPath} of class {cls ?? "?"} has no faces to test");
+            int actorFlags = MeshTriangleOrder.ActorPolyFlags(UEValue.ToInt(p.GetProp(PK.Style)),
+                p.GetProp(PK.Opacity) is { } op ? UEValue.AsFloat(op) : 1f);
+            const int SeeThrough = 0x1 | 0x4 | 0x40;   // PF_Invisible | PF_Translucent | PF_Modulated
+            UEVector[] pts = mp.Points;
+            Vector3 d = end - start;
+            for (int t = 0; t + 2 < tri.Length; t += 3)
+            {
+                int mi = mat is not null && t / 3 < mat.Length ? mat[t / 3] : 0;
+                if ((((mflags is not null && mi >= 0 && mi < mflags.Length ? mflags[mi] : 0) | actorFlags) & SeeThrough) != 0) continue;
+                Vector3 v0 = pts[wv[tri[t]]], e1 = pts[wv[tri[t + 1]]] - v0, e2 = pts[wv[tri[t + 2]]] - v0;
+                Vector3 pv = Vector3.Cross(d, e2);
+                float det = Vector3.Dot(e1, pv);
+                if (det == 0f) continue;
+                Vector3 tv = start - v0;
+                float u = Vector3.Dot(tv, pv) / det;
+                if (u < 0f || u > 1f) continue;
+                Vector3 q = Vector3.Cross(tv, e1);
+                float v = Vector3.Dot(d, q) / det;
+                if (v < 0f || u + v > 1f) continue;
+                float k = Vector3.Dot(e2, q) / det;
+                if (k > 0f && k < 1f) return true;
+            }
+            return false;
         }
 
         // Model->Leaves / Model->Lights of the current level for the corona block: the published static geometry, or

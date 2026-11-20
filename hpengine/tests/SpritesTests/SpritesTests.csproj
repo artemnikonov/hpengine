@@ -10,6 +10,7 @@
   <ItemGroup>
     <Compile Include="*.cs" />
     <Compile Include="../../Sprites/*.cs" Link="Sprites/%(Filename)%(Extension)" />
+    <Compile Include="../../FramePacing.cs" Link="FramePacing.cs" />
     <Compile Include="../../RenderUnhandled.cs" Link="RenderUnhandled.cs" />
     <Compile Include="../../Camera.cs" Link="Camera.cs" />
   </ItemGroup>

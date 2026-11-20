@@ -88,6 +88,7 @@ static class Program
         Check("camera: 256 uu — not a cut yet", Interp.Lerp(c0, new CameraSnapshot(true, 7, new UEVector(256, 0, 0), default, 90f, true), 0.5f).Location.x == 128f);
         Check("camera: cut by rotation (> 45°)", Interp.Lerp(c0, new CameraSnapshot(true, 7, default, new UERotator(0, 8193, 0), 90f, true), 0.5f).Rotation.Yaw == 8193);
         Check("camera: view target change — cut", Interp.Lerp(c0, new CameraSnapshot(true, 8, new UEVector(10, 0, 0), default, 90f, true), 0.5f).Location.x == 10f);
+        Check("camera: FovAngle across 180 (Proj.Z changes sign) — cut", Interp.Lerp(c0, new CameraSnapshot(true, 7, default, default, 200f, true), 0.5f).FovAngle == 200f);
 
         // ── pose history: only adjacent ticks, cut by anchor ──
         var h = new PoseHistory();
@@ -129,11 +130,11 @@ static class Program
 
         // ── particles: backwards along velocity, the frame keeps all fields ──
         var parts = new[] { new ParticleInstance(5, new UEVector(10, 0, 0), 1, 2, 0.5f, new UEVector(1, 1, 1), 0.3f, "T", new UEVector(60, 0, 0), 0.7f) };
-        var sp = Interp.Particles(parts, 0.5f, 1 / 60f);
+        var sp = Interp.Particles(null, parts, 0.5f, 1 / 60f);
         Check("particle: pos − vel·(1−α)·dt", Math.Abs(sp[0].Pos.x - 9.5f) < 1e-5f && sp[0].DripTimer == 0.7f && sp[0].EmitterId == 5, $"{sp[0].Pos.x}");
         // spin back by the same time: SpinPos 0.3, SpinRate 6 rad/s, α 0.5 -> 0.3 − 6·(1/120) = 0.25; SpinRate 0 keeps SpinPos
         // and the View of the DrawParticleSystem call that kept it stays (2 = a child frame's call)
-        var spun = Interp.Particles(new[] { new ParticleInstance(5, new UEVector(10, 0, 0), 1, 2, 0.5f, new UEVector(1, 1, 1), 0.3f, "T", new UEVector(60, 0, 0), 0.7f, 6f, 2) }, 0.5f, 1 / 60f);
+        var spun = Interp.Particles(null, new[] { new ParticleInstance(5, new UEVector(10, 0, 0), 1, 2, 0.5f, new UEVector(1, 1, 1), 0.3f, "T", new UEVector(60, 0, 0), 0.7f, 6f, 2) }, 0.5f, 1 / 60f);
         Check("particle: spinPos − spinRate·(1−α)·dt", Math.Abs(spun[0].SpinPos - 0.25f) < 1e-6f && spun[0].SpinRate == 6f && sp[0].SpinPos == 0.3f, $"{spun[0].SpinPos} {sp[0].SpinPos}");
         Check("particle: view of its draw call kept", spun[0].View == 2 && sp[0].View == -1, $"{spun[0].View} {sp[0].View}");
         var f0 = new WorldFrame(1, "a", Array.Empty<ActorSnapshot>(), c0, Array.Empty<AudioCommand>(), default, Array.Empty<HudCommand>(), parts, 3);

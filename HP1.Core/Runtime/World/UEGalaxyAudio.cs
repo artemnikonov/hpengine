@@ -157,7 +157,33 @@ namespace HP1.UEScript
         public int ActorVoiceStopCalls, VoicesUnbound;
         public int RadiusApplied, PitchApplied;
 
-        public UEGalaxyAudio(IUEGalaxyWorld world) { _world = world ?? throw new ArgumentNullException(nameof(world)); }
+        public UEGalaxyAudio(IUEGalaxyWorld world)
+        {
+            _world = world ?? throw new ArgumentNullException(nameof(world));
+            if (WallClock is { } c) _clockLast = c();   // the constructor's +0x700 = appSeconds (Galaxy.dll.c:1905-1915)
+        }
+
+        // Galaxy's own clock (FTime: seconds as 32.32 fixed point, appSecondsSlow / rdtsc), set only by the player's
+        // window before boot. Null (headless, judges, scripted and hidden windows): the music step is the frame's dt, so
+        // their journals and corpora do not depend on wall time.
+        public static Func<long> WallClock;
+        long _clockLast = long.MinValue;   // +0x700
+
+        // Original: Galaxy.dll ?Update@UGalaxyAudioSubsystem@@UAEXUFPointRegion@@AAVFCoords@@@Z [HP1 0x106081F0] — its frame
+        // step (Galaxy.dll.c:6905-6930, disasm 0x1060828e..0x106082f4), read after the no-viewport return: the time since the
+        // previous Update by its own clock, (now - +0x700) fild · 2^-32 [0x1063a544] stored as float; +0x700 advances by
+        // ftol(that unrounded · 2^32 [0x1063a540]) = the exact difference. The step feeds only the music fade (+0x780,
+        // :7323-7345), clamped there by GalaxyStep. A load or a lost viewport runs no Update, so the next one sees that gap
+        // (a >= 1 s load ends a Fade at once). Without the clock (WallClock null) the frame's dt stands in.
+        float OwnStep(float frameDt)
+        {
+            if (WallClock is not { } c) return frameDt;
+            long now = c();
+            if (_clockLast == long.MinValue) _clockLast = now;
+            long diff = now - _clockLast;
+            _clockLast = now;
+            return (float)(diff * (1.0 / 4294967296.0));
+        }
 
         // Judge tap (diagnostics only): observes the
         // device calls after they ran ("cmd" AudioCommand, "destroy" actor id, "viewport" bool, "viewport-same") and the
@@ -722,11 +748,12 @@ namespace HP1.UEScript
             LastCallStops = _callStopSlots.ToArray(); _callStopSlots.Clear();
             LastMixDt = !_viewportLost && dt > 0f && _world.Galaxy is not null ? dt : 0f;
             if (_viewportLost) return;   // without a viewport Update returns at once (Galaxy.dll.c:6900-6902)
+            float step = OwnStep(dt);
             _inUpdate = true;
-            try { UpdateBody(music, dt, paused); } finally { _inUpdate = false; }
+            try { UpdateBody(music, dt, step, paused); } finally { _inUpdate = false; }
         }
 
-        void UpdateBody(MusicState music, float dt, bool paused)
+        void UpdateBody(MusicState music, float dt, float step, bool paused)
         {
             // Core's audio clock (mixed output frames since Galaxy start) advances by OutputRate·dt every engine frame
             // with a viewport, voices or not (the mixer FUN_10612250 runs its counter update at 0x10612aaf-0x10612b54 with
@@ -738,7 +765,7 @@ namespace HP1.UEScript
             if (paused != _menuPaused) { _menuPaused = paused; HoldForMenuPause(paused); }
             Advance(dt);
             MixAll(_world.Listener);
-            UpdateMusic(music, GalaxyStep(dt));
+            UpdateMusic(music, GalaxyStep(step));
         }
 
         // Galaxy Update measures its own frame delta and clamps it before the music block (Galaxy.dll.c:6918-6927,

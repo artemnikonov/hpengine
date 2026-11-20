@@ -236,7 +236,7 @@ namespace HP1.UEScript
         public bool ReverseStereo;  // +0xb8
         public bool UseEAX;         // +0xc0
         public bool CompatibilityMode;   // +0xc4
-        public float DopplerFactor; // +0xa4 (alDopplerFactor at Init: the frontend's device setup)
+        public float DopplerFactor; // +0xa4 (alDopplerFactor at Init: the "DopplerFactor" listener call)
         public bool Muted;          // +0x5c (gain 0 on play)
         public bool RestartRequest; // +0x58 (Exec RESTARTSOUNDS sets it; Update clears it and unpauses)
         public bool HasViewport;    // +0x2c
@@ -265,7 +265,7 @@ namespace HP1.UEScript
         // UEConfig.TryGetIni); a missing key is a loud failure, not a default. Init makes
         // min(Channels, 32) sources (alGenSources until an error: the model's device makes them all), fails with none
         // (Channels 0: "MaxChannels == 0", 0x10003056; below 0: no source, 0x1000316f): null, no device. RollOff <= 0 becomes
-        // 1. Its alDistanceModel(AL_INVERSE_DISTANCE_CLAMPED) and alDopplerFactor are the frontend's device setup;
+        // 1. Its alDistanceModel(AL_INVERSE_DISTANCE_CLAMPED) is the frontend's device setup, alDopplerFactor a listener call;
         // UsePrecache (+0xbc) is read by none of the ported bodies.
         public const int MaxSources = 32;   // Init's cap [HP2 0x10002f40]
         public static UEALAudio FromConfig(UEConfig config)
@@ -276,7 +276,7 @@ namespace HP1.UEScript
             int channels = int.Parse(Key("Channels"), System.Globalization.CultureInfo.InvariantCulture);
             if (channels <= 0) return null;
             float rolloff = Float("RollOff");
-            return new UEALAudio(Math.Min(channels, MaxSources))
+            var device = new UEALAudio(Math.Min(channels, MaxSources))
             {
                 ReverseStereo = bool.Parse(Key("ReverseStereo")),
                 UseEAX = bool.Parse(Key("UseEAX")),
@@ -286,6 +286,10 @@ namespace HP1.UEScript
                 DopplerFactor = Float("DopplerFactor"),
                 Rolloff = rolloff <= 0f ? 1f : rolloff,
             };
+            // Init's alDopplerFactor(+0xa4) (ALAudio.dll.c:1919, after alDistanceModel): the device's call, carried to the
+            // frontend's OpenAL executor like the listener calls (the distance model is fixed there).
+            device.Al(-1, "DopplerFactor", device.DopplerFactor);
+            return device;
         }
 
         // A new USound seen by the device (Order: its creation order).
@@ -529,6 +533,7 @@ namespace HP1.UEScript
             Al(slot, "Buffer", 0);
             if (s.Lip is not null) { LipStop(s.Lip); s.Lip = null; }   // 0x10006e8d..0x10006ea9
             s.Sound = null; s.Actor = 0; s.Flags = 0; s.Priority = 0f; s.Id = 0; s.F50 = 0; s.F54 = 0;
+            s.HeldForFocus = false;   // NOT ORIGINAL (D-51 for HP2): a stop ends the focus hold; a new play here is not resumed
         }
 
         // Original: ALAudio.dll ?StopSound@UALAudioSubsystem@@UAEHPAVAActor@@PAVUSound@@@Z [HP2 0x10004820]

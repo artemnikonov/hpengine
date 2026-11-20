@@ -49,7 +49,24 @@ namespace HPEngine.Input
             Log("[Mouse] macOS: window stuck in a move (SDL isMoving) released");
         }
 
+        // NOT ORIGINAL (platform, author 2026-11-19: HP2 started from the launcher with the system cursor and no input until a
+        // click). macOS: the game window is created under the splash; the splash's close leaves the app with no key window,
+        // and SDL_RaiseWindow at that moment cannot activate a background app (macOS 14+ cooperative activation). The
+        // launcher then activates the app, which becomes active with NO key window: SDL never gets FOCUS_GAINED ("[Mouse]
+        // capture on ... focus False"). The app has this one window, so "active, window on screen, not key" is never
+        // intended: make it key (Windows' SetForegroundWindow gives the original window activation and focus at once).
+        static bool _keyFixLogged;
+        public static void MacKeyWindowWhenActive(SDL_Window* w)
+        {
+            if (!OperatingSystem.IsMacOS() || (SDL_GetWindowFlags(w) & (SDL_WindowFlags.SDL_WINDOW_INPUT_FOCUS | SDL_WindowFlags.SDL_WINDOW_MINIMIZED | SDL_WindowFlags.SDL_WINDOW_HIDDEN)) != 0) return;
+            IntPtr app = Msg(ObjcClass("NSApplication"), Sel("sharedApplication"));
+            if (app == IntPtr.Zero || MsgBool(app, Sel("isActive")) == 0) return;
+            SDL_RaiseWindow(w);
+            if (!_keyFixLogged) { _keyFixLogged = true; Log("[Focus] app active without a key window: game window made key"); }
+        }
+
         const string ObjC = "/usr/lib/libobjc.A.dylib";
+        [DllImport(ObjC, EntryPoint = "objc_getClass")] static extern IntPtr ObjcClass(string name);
         [DllImport(ObjC, EntryPoint = "sel_registerName")] static extern IntPtr Sel(string name);
         [DllImport(ObjC, EntryPoint = "objc_msgSend")] static extern IntPtr Msg(IntPtr self, IntPtr sel);
         [DllImport(ObjC, EntryPoint = "objc_msgSend")] static extern byte MsgBool(IntPtr self, IntPtr sel);

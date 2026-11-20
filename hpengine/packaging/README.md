@@ -131,7 +131,7 @@ looks". It finds the game in what the player gives it, checks it, and copies the
   SHA-1 of `System/Engine.dll`, `Render.dll`, `HPBase.u`; the exe only names the No-CD variant), so HP1Setup and Core
   cannot disagree. Supported editions and tiers: US 1.53 — exact (`launcher/us153.sha1`, 254 files; equal to three
   separate US 1.53 copies); UK 1.1 — supported (`launcher/uk11.sha1`, 256 files: no `Textures/HPFonts.utx`; with the three Language=eng files `MenuArt.eng_utx`, `AllDialog.eng_uax`, `AllEmote.eng_uax`); RU EA —
-  supported (`launcher/ru_ea.sha1`, 254 files; menu text in the substitute font Liberation Sans, not original). Every
+  supported (`launcher/ru_ea.sha1`, 254 files; menu text in the substitute font Philosopher, not original). Every
   file of the edition's manifest (top-level `System/*.u *.dll`, `Maps/*.unr`, `Textures/*.utx`, `Sounds/*.uax`,
   `Music/*.umx`) must be present with that size and SHA-1, plus `System/DefUser.ini` and `Default.ini` (in `System/` or
   `System/0/`). The game exe is not checked or copied in any edition. HP1Setup prints `EDITION <UEEdition id> <edition:

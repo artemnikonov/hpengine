@@ -183,4 +183,55 @@ static partial class T
         }
         finally { Directory.Delete(tmp, true); }
     }
+
+    // The HP2 tab without an HP2: HP1's setup view installing HP2 (a stand-in HP1Setup: --game hp2 and the HP2 install root
+    // <HP2Data>/game), the tabs held while it runs, then the HP2 menu with the edition chip; files chosen again: the setup
+    // view with Install Again; a WARNING shown on the HP2 tab; switching to HP1 starts its own setup state afresh.
+    static void Hp2Install()
+    {
+        if (OperatingSystem.IsWindows()) return;   // the stand-in HP1Setup is a shell script
+        var tmp = Path.Combine(Path.GetTempPath(), "hp2-install-test-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var g = Path.Combine(tmp, "game"); Directory.CreateDirectory(g); File.WriteAllText(Path.Combine(g, ".hp1-installed"), "edition=US 1.53: exact\n");
+            var setup = Path.Combine(tmp, "HPEngine", "HP1Setup"); Directory.CreateDirectory(Path.GetDirectoryName(setup));
+            File.WriteAllText(setup, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\nwhile [ \"$1\" != --dest ]; do shift; done; d=$2\n"
+                + "echo STEP find; echo STEP check; echo 'EDITION HP2_RU_EA RU EA: supported'; echo STEP copy; echo PROGRESS 50\nread x < \"$0.go\" 2> /dev/null || sleep 1\n"
+                + "mkdir -p \"$d/System\" \"$d/Maps\"; echo x > \"$d/System/Engine.dll\"\n"
+                + "printf '[IDDIALOG_FrontEndPageMainMenu]\\nIDC_NewGame=New Game\\nIDC_LoadGame=Load Game\\n' > \"$d/System/Startup.int\"\n"
+                + "printf 'data=HP2_RU_EA\\nedition=RU EA: supported\\n' > \"$d/.hp1-installed\"; echo \"DONE $d\"\n");
+            File.SetUnixFileMode(setup, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            var w = new MainWindow(g, tmp, "0.4.0", false); w.Show(); Dispatcher.UIThread.RunJobs();
+            void Click(string n) { Find<Button>(w, n)?.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Dispatcher.UIThread.RunJobs(); }
+            Click("TabHp2");
+            Check("hp2 install: no HP2 -> the setup view (drop zone, Choose files gold), not the menu", Find<StackPanel>(w, "SetupPanel").IsVisible && !Find<StackPanel>(w, "Hp2Panel").IsVisible
+                && Find<Button>(w, "ChooseButton") is { IsVisible: true } c && c.Classes.Contains("gold") && Find<TextBlock>(w, "Status").Text == "Not installed"
+                && Find<TextBlock>(w, "Title").Text == MainWindow.Hp2Title);
+            w.Add(Path.Combine(tmp, "HP2 CD"));
+            Check("hp2 install: files chosen -> Install", Find<Button>(w, "InstallButton") is { IsVisible: true, IsEnabled: true });
+            Click("InstallButton");
+            for (int i = 0; i < 250 && Find<ProgressBar>(w, "ProgressBar").Value < 0.5; i++) { Thread.Sleep(20); Dispatcher.UIThread.RunJobs(); }
+            Click("TabHp1");
+            Check("hp2 install: running, the tabs stay (HP2 installing)", Find<StackPanel>(w, "SetupPanel").IsVisible && Find<TextBlock>(w, "Title").Text == MainWindow.Hp2Title
+                && Find<TextBlock>(w, "Status").Text == "Installing…");
+            for (int i = 0; i < 300 && Find<Button>(w, "Hp2NewGame") == null; i++) { Thread.Sleep(20); Dispatcher.UIThread.RunJobs(); }
+            Eq("hp2 install: HP1Setup --game hp2 into <HP2Data>/game", $"--game|hp2|--dest|{Path.Combine(tmp, "HP2Data", "game")}|{Path.Combine(tmp, "HP2 CD")}",
+                File.Exists(setup + ".args") ? string.Join("|", File.ReadAllLines(setup + ".args")) : "-");
+            Check("hp2 install: done -> the HP2 menu, no edition chip for a tested edition (RU EA supported)", Find<Button>(w, "Hp2NewGame") != null && !Find<StackPanel>(w, "SetupPanel").IsVisible
+                && !Find<TextBlock>(w, "EditionText").IsEffectivelyVisible && !Find<TextBlock>(w, "EditionChip").IsEffectivelyVisible);
+            w.Add(Path.Combine(tmp, "other"));
+            Check("hp2 install: files chosen again -> the setup view, Install Again", Find<StackPanel>(w, "SetupPanel").IsVisible && Find<Button>(w, "InstallButton").IsVisible
+                && ((StackPanel)Find<Button>(w, "InstallButton").Content).Children.OfType<TextBlock>().Any(t => t.Text == "Install Again"));
+            w.Handle("WARNING modified This copy of the game is modified.", new List<string>());
+            Check("hp2 install: a WARNING shows on the HP2 tab", Find<TextBlock>(w, "WarningText") is { IsEffectivelyVisible: true, Text: "This copy of the game is modified." });
+            Click("TabHp1");
+            Check("hp2 install: HP1's tab afresh (its ready panel, no HP2 warning or files)", Find<StackPanel>(w, "ReadyPanel").IsVisible && !Find<TextBlock>(w, "WarningText").IsEffectivelyVisible
+                && Find<TextBlock>(w, "Title").Text != MainWindow.Hp2Title);
+            Click("TabHp2");
+            Check("hp2 install: back on HP2: its menu (the chosen files dropped on the switch)", Find<Button>(w, "Hp2NewGame") != null);
+            fired.Add("hp2:install");
+            w.Close();
+        }
+        finally { Directory.Delete(tmp, true); }
+    }
 }

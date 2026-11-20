@@ -30,7 +30,7 @@ struct fs_main_in
 fragment fs_main_out fs_main(fs_main_in in [[stage_in]], constant type_FU& FU [[buffer(0)]], texture2d<float> base [[texture(0)]], texture2d<float> lm [[texture(1)]], texture2d<float> fogt [[texture(2)]], sampler baseSmplr [[sampler(0)]], sampler lmSmplr [[sampler(1)]], sampler fogtSmplr [[sampler(2)]], float4 gl_FragCoord [[position]])
 {
     fs_main_out out = {};
-    float4 _207;
+    float4 _216;
     do
     {
         bool _83;
@@ -48,27 +48,27 @@ fragment fs_main_out fs_main(fs_main_in in [[stage_in]], constant type_FU& FU [[
         }
         if (FU.mode.x > 3.5)
         {
-            _207 = float4(base.sample(baseSmplr, (gl_FragCoord.xy * FU.screen.xy)).xyz, 1.0);
+            _216 = float4(base.sample(baseSmplr, (gl_FragCoord.xy * FU.screen.xy)).xyz, 1.0);
             break;
         }
         if (FU.mode.x > 2.5)
         {
-            _207 = fogt.sample(fogtSmplr, in.in_var_TEXCOORD3);
+            _216 = fogt.sample(fogtSmplr, in.in_var_TEXCOORD3);
             break;
         }
         if (FU.mode.z > 0.5)
         {
-            _207 = float4(1.0, 0.0, 0.0, 1.0);
+            _216 = float4(1.0, 0.0, 0.0, 1.0);
             break;
         }
         if (FU.mode.z < (-0.5))
         {
-            _207 = float4(base.sample(baseSmplr, in.in_var_TEXCOORD0, bias(-0.5)).xyz, 1.0);
+            _216 = float4(base.sample(baseSmplr, in.in_var_TEXCOORD0, bias(-0.5)).xyz, 1.0);
             break;
         }
         if (FU.mode.w > 0.5)
         {
-            _207 = float4(lm.sample(lmSmplr, in.in_var_TEXCOORD1).xyz * 2.0, 1.0);
+            _216 = float4(lm.sample(lmSmplr, in.in_var_TEXCOORD1).xyz * 2.0, 1.0);
             break;
         }
         float4 _139 = base.sample(baseSmplr, (in.in_var_TEXCOORD0 + FU.uvoff.xy), bias(-0.5));
@@ -98,10 +98,10 @@ fragment fs_main_out fs_main(fs_main_in in [[stage_in]], constant type_FU& FU [[
         }
         if (FU.mode.x > 1.5)
         {
-            _207 = float4(fast::clamp((_150 * in.in_var_TEXCOORD2) + (in.in_var_TEXCOORD5 * FU.uvoff.z), float3(0.0), float3(1.0)), _159);
+            _216 = float4(fast::clamp((_150 * in.in_var_TEXCOORD2) + (in.in_var_TEXCOORD5 * FU.uvoff.z), float3(0.0), float3(1.0)), _159);
             break;
         }
-        float3 _202;
+        float3 _211;
         if (FU.mode.x < 0.5)
         {
             float4 _177 = lm.sample(lmSmplr, in.in_var_TEXCOORD1);
@@ -125,16 +125,22 @@ fragment fs_main_out fs_main(fs_main_in in [[stage_in]], constant type_FU& FU [[
             {
                 _200 = _184;
             }
-            _202 = fast::clamp(_200, float3(0.0), float3(1.0));
+            float3 _201 = fast::clamp(_200, float3(0.0), float3(1.0));
+            if (FU.uvoff.w > 1.5)
+            {
+                _216 = float4(_201, FU.screen.w);
+                break;
+            }
+            _211 = _201;
         }
         else
         {
-            _202 = _150;
+            _211 = _150;
         }
-        _207 = float4(_202, 1.0);
+        _216 = float4(_211, 1.0);
         break;
     } while(false);
-    out.out_var_SV_Target0 = _207;
+    out.out_var_SV_Target0 = _216;
     return out;
 }
 

@@ -145,7 +145,8 @@ namespace HP1.UEScript
         //        Core's lightmaps, fog and actor lighting read it (SurfLightmap.LightBrightness / TypeColour).
         //   33 — WorldFrame.TextureFrames: AnimNext chain state is Core's (UEWorldFrameProducer.TextureUses, every texture
         //        use of the frame incl. UCanvas::DrawTile); the frontend no longer steps a chain, it looks the frame up.
-        //        Added at 33 without a bump: DrawnWorld.Lumos (HP2 DrawFrame's Lumos DrawComplexSurface arguments; empty for HP1).
+        //        Added at 33 without a bump: DrawnWorld.Lumos (HP2 DrawFrame's Lumos DrawComplexSurface arguments; empty for HP1);
+        //        ParticleInstance.Serial (presentation identity of a Core particle for the display-frame interpolation).
         public const int Version = 33;
 
         // Contract types. The order is fixed — it is also the print order.
@@ -738,6 +739,9 @@ namespace HP1.UEScript
                 "UEWorldFrameProducer.EmitTile / DriveHud texts",
                 "tile: exec 466/468 (0x1038971d, 0x1038a0b7) | Texture->PolyFlags&PF_Masked (0x1038781f); text: WrappedPrint 0x10387d54, DrawTextClipped 0x1038a3f1", "HUD rasterizer",
                 ContractFieldStatus.Consumed, "HP1HudRender.DrawWithFlags (tile and glyph blending)") },
+            { "HudCommand.ActorId", new ContractField(ContractFieldKind.Presentation,
+                "UEWorldFrameProducer.CanvasMeshDraw", "UCanvas::execDrawActor [HP2 0x10391C00] -> URender::DrawActor [HP2 0x10B344A0] on the master frame", "HUD rasterizer + renderer",
+                ContractFieldStatus.Consumed, "HudBatcher (Actor marker), Renderer.DrawCanvasActor (the actor's master batches after a depth clear)") },
             { "HudCommand.Glyphs", new ContractField(ContractFieldKind.Presentation,
                 "UEWorldFrameProducer.DriveHud", "FUN_10388530 (Engine.dll 0x10388530): text layout for a paged font", "HUD rasterizer",
                 ContractFieldStatus.Consumed, "HP1HudRender.Rasterize (glyph rasterization)") },
@@ -801,6 +805,9 @@ namespace HP1.UEScript
             { "ParticleInstance.View", new ContractField(ContractFieldKind.Presentation,
                 "UEWorldFrameProducer.ParticleDrawerFade (one entry per DrawParticleSystem call)", "Render.dll FUN_10b184d0: the billboard pass of the call in that frame decides which particles are drawn, with which Alpha", "hpengine ParticleBuilder",
                 ContractFieldStatus.Consumed, "hpengine ParticleBuilder.Build (draws the particle only in its call's view)") },
+            { "ParticleInstance.Serial", new ContractField(ContractFieldKind.Presentation,
+                "UEWorldFrameProducer.Particle.Serial (one per Core particle object)", "not original: presentation identity, no UParticle field; never read by game code", "hpengine Interp.Particles",
+                ContractFieldStatus.Consumed, "hpengine Interp.Particles (a particle drawn in both ticks is lerped between them)") },
             { "ParticleInstance.DripTimer", new ContractField(ContractFieldKind.Presentation,
                 "UEWorldFrameProducer (AParticleFX::Update)", "Render.dll FUN_10b17ce0: particle DripTimer (+0x74) > 0 — hanging drip, otherwise FUN_10b15b50", "HP1ParticleBridge",
                 ContractFieldStatus.Consumed, "HP1ParticleBridge.BuildLiquidQuad (PPRIM_Liquid)") },
@@ -979,8 +986,8 @@ namespace HP1.UEScript
                 "UEWorldFrameProducer.DrawnOf", "drawn polygons whose draw-record PolyFlags OccludeBsp changed: PF_Mirrored|PF_Translucent with RenDev ShinySurfaces == 0 -> PolyFlags & ~PF_Translucent | 0x80000000, pass 1 (Render 0x10b23a8e..0x10b23ab8)", "hpengine WorldMesh.Select, MoverScene.EmitViews, Interp.Drawn",
                 ContractFieldStatus.Consumed, "hpengine WorldMesh.Select / MoverScene.EmitViews (the polygon's reflagged run: blending, opaque pass, no reflection)") },
             { "DrawnWorld.Lumos", new ContractField(ContractFieldKind.Presentation,
-                "UEWorldFrameProducer.DrawnOf (UELumosSurfaces)", "HP2 DrawFrame's DrawComplexSurface PolyFlags/alpha arguments of the drawn Lumos carrier polygons (surface PolyFlags & 0x800040; Render.dll [HP2 0x10b25da1..0x10b260ca]); empty for HP1", "hpengine WorldMesh.Select, MoverScene.EmitViews",
-                ContractFieldStatus.Unconsumed, "—") },
+                "UEWorldFrameProducer.DrawnOf (UELumosSurfaces)", "HP2 DrawFrame's DrawComplexSurface PolyFlags/alpha arguments of the drawn Lumos carrier polygons (surface PolyFlags & 0x800040; Render.dll [HP2 0x10b25da1..0x10b260ca]); empty for HP1", "hpengine WorldMesh.Select, SdlRenderer.DrawLumos, Interp.Drawn",
+                ContractFieldStatus.Consumed, "hpengine WorldMesh.Select / SdlRenderer.DrawLumos (a level carrier's own range: SetBlending's Lumos case, Z write by bit 31, the alpha byte; a mover carrier refused)") },
             { "DrawnWorld.SkyWindows", new ContractField(ContractFieldKind.Presentation,
                 "UEWorldFrameProducer.DrawnOf", "PF_FakeBackdrop nodes whose sky branch spawned the frame's sky child (OccludeBsp returns before FSavedPoly, UEOcclusion.Surface)", "hpengine WorldMesh.Select",
                 ContractFieldStatus.Consumed, "hpengine Renderer.DrawWorld (the window shows the sky view)") },

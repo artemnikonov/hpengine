@@ -146,7 +146,9 @@ namespace HP1.UEScript
             // GET's (the late-bound DLL rule below). A SET into a bound HP2 device section (ALAudio, D3DDrv) stops:
             // GlobalSetProperty writes the live device object, which the port's HP2 devices are not judged to read.
             // SET <Class> <Property> <Value>: the same StaticExec branch and GlobalSetProperty (ExecSet below;
-            // tools/hp2/console_set_judge.py). SET Input stays stopped (UInput's config section is not judged for HP2).
+            // tools/hp2/console_set_judge.py). SET Input: class Input's key properties come from UInput::StaticInitInput
+            // [HP1 0x103a44c0] over EInputKey — the body and both enums are HP1's (audit/hp2_set_input_judge.sh), so the
+            // HP1 route below (live binding, then [Engine.Input] in the user ini) is HP2's.
             bool hp2 = UEGameProfile.Current.Game == UEEdition.Game.HP2;
             // SETVOLUMES / MUTESOUNDS / UNMUTESOUNDS: no executor before UEngine::Exec's Audio takes them (exec_chain_words:
             // nor the Game.exe hook, whose words are HEAT, MPLAYER, Preferences, HideLog, EditActor, TakeFocus, ShowLog), and
@@ -197,9 +199,9 @@ namespace HP1.UEScript
                 && !ParseCommand(command, "GetColorDepths", out _) && !ParseCommand(command, "SetRes", out _)
                 && !ParseCommand(command, "MLOD", out _) && !ParseCommand(command, "GETPING", out _) && !ParseCommand(command, "GETLOSS", out _)
                 && !ParseCommand(command, "SAVEGAME", out _) && !ParseCommand(command, "FLUSH", out _)
-                && !(ParseCommand(command, "SET", out string hp2Set) && !(Tokens(hp2Set) is { Length: > 0 } hs
-                     && string.Equals(hs[0], "Input", StringComparison.OrdinalIgnoreCase))))
-                UEGameProfile.Stop(UEEdition.Game.HP2, $"ConsoleCommand(\"{command}\") (only GET, SET but SET Input, KEYNAME, KEYBINDING, MLOD, GETPING, GETLOSS, SAVEGAME and the resolution words of HP2's exec chain are judged)");
+                && !ParseCommand(command, "EXIT", out _) && !ParseCommand(command, "QUIT", out _)
+                && !ParseCommand(command, "SET", out _))
+                UEGameProfile.Stop(UEEdition.Game.HP2, $"ConsoleCommand(\"{command}\") (only GET, SET, KEYNAME, KEYBINDING, MLOD, GETPING, GETLOSS, SAVEGAME, EXIT, QUIT and the resolution words of HP2's exec chain are judged)");
             // UGameEngine::Exec SAVEGAME (Engine.dll.c:244086-244098; HP2 0x103a28a3..0x103a29ad the same test and appAtoi):
             // ParseCommand(SAVEGAME);
             // if the first char of the remainder is not '0'..'9' the command is ACCEPTED silently, with no save and no
@@ -214,6 +216,9 @@ namespace HP1.UEScript
                 if (hp2) Execute(config, "RestartSounds", input, viewport, interp, alAudio);
                 return saved;
             }
+            // Original: Engine.dll ?Exec@UGameEngine@@UAEHPBGAAVFOutputDevice@@@Z [HP1 0x10399c27..0x1039a104] [HP2 0x103a2785..0x103a3049] (EXIT/QUIT)
+            // HP2's branch is HP1's instruction for instruction but the two level members (+0x48/+0x50 -> +0x50/+0x58) and the
+            // register choice (tools/hp2/console_words_judge.py); the menu's Quit (UWindowRootWindow.DoQuitGame) sends "exit".
             // EXIT/QUIT (Engine.dll.c:244045): ParseCommand — leading spaces/tabs
             // are skipped, the word is followed by any non-[A-Za-z0-9] char or the end.
             if (ParseCommand(command, "EXIT", out _) || ParseCommand(command, "QUIT", out _))
@@ -852,6 +857,15 @@ namespace HP1.UEScript
             bool toFull = !vp.Fullscreen;
             (int x, int y) = UEViewportStartup.SavedSize(config, toFull);
             if (vp.Resize(x, y, 0, toFull) == ViewportResizeOutcome.Applied) CommitAppliedResize(config, vp);
+        }
+
+        // The player's mode switch — Alt+Enter (CoreInputSink) and the options page's Display Mode item, HP1 and HP2 — is
+        // also the next start's mode: StartupFullscreen, the key UEViewportStartup opens the window with (author 2026-11-18,
+        // NOT ORIGINAL, with D-70's Display Mode; the console word ToggleFullscreen stays the original's toggle alone).
+        public static void ToggleDisplayMode(UEConfig config, IViewportDevice viewport)
+        {
+            ToggleFullscreen(config, viewport);
+            Execute(config, "set ini:Engine.Engine.ViewportManager StartupFullscreen " + (viewport.Fullscreen ? "True" : "False"), null, viewport);
         }
 
         internal static void CommitAppliedResize(UEConfig config, IViewportDevice vp)

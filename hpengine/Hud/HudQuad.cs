@@ -18,7 +18,9 @@ namespace HPEngine.Hud
     }
 
     // Origin of the quad, for logs and tests; does not affect drawing.
-    public enum HudQuadSource { Fill, Tile, Glyph, Flash, Gamma }
+    // Actor: no quad — the place in the list where the backend clears depth and draws ActorId's canvas mesh draw
+    // (HudKind.Actor, UCanvas::execDrawActor) with the master camera.
+    public enum HudQuadSource { Fill, Tile, Glyph, Flash, Gamma, Actor }
 
     // Blend factors named as SDL_GPUBlendFactor (1:1).
     public enum HudBlendFactor { Zero, One, SrcColor, OneMinusSrcColor, DstColor, SrcAlpha, OneMinusSrcAlpha }
@@ -64,14 +66,16 @@ namespace HPEngine.Hud
         public readonly HudQuadSource Source;
         // Index of the HudCommand in frame.Hud; -1 means the quad does not come from a command.
         public readonly int Command;
-        // Bilinear sampling. 3D-world tiles drawn through this pass (coronas) sample as D3DDrv DrawTile: MAG/MINFILTER
-        // LINEAR (0x1000ae9b/0x1000aeaa) unless PF_NoSmooth; UI quads keep the nearest sampler.
+        // Bilinear sampling, as D3DDrv DrawTile samples every tile (UI and coronas): MAG/MINFILTER LINEAR unless
+        // PF_NoSmooth (SetBlending, HP1 0x1000949c, HP2 0x10009472).
         public readonly bool Smooth;
+        public readonly int ActorId;   // Source Actor: the canvas-drawn actor
 
         public HudQuad(float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1,
             float r, float g, float b, float a, HudBlend blend, bool alphaClip, string texture,
-            HudQuadSource source, int command, bool smooth = false)
+            HudQuadSource source, int command, bool smooth = false, int actorId = -1)
         {
+            ActorId = actorId;
             X0 = x0; Y0 = y0; X1 = x1; Y1 = y1; U0 = u0; V0 = v0; U1 = u1; V1 = v1;
             R = r; G = g; B = b; A = a; Blend = blend; AlphaClip = alphaClip; Texture = texture;
             Source = source; Command = command; Smooth = smooth;

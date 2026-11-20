@@ -157,6 +157,24 @@ namespace HP1.UEScript
             return face;
         }
 
+        // Original: Render.dll ?DrawLodMesh@URender@@QAEXPAUFSceneNode@@PAUFDynamicSprite@@PAVAActor@@ABVFCoords@@K@Z [HP1 0x10B0FF00] [HP2 0x10B0F800]
+        // The face loop's accepted count (TArray Num [ebp-0x30], HP1 0x10b11692..0x10b11697, HP2 0x10b10f62..0x10b10f67): is
+        // there at least one face the frame f accepts (Face, sorted or not). Zero -> DrawLodMesh jumps over the texture loop
+        // and FLightManager::SetupForActor to its tail (HP1 0x10b11ff9, HP2 0x10b118cc): the mesh is not lit and draws nothing.
+        public static bool AnyAccepted(UESceneNode f, int[] triWedge, int[] wedgeVertex, int[] triMaterial, int[] materialFlags,
+            UEVector[] points, int actorPolyFlags)
+        {
+            FramePoints(f, points, out float[] fx, out float[] fy, out float[] fz, out byte[] oc);
+            for (int t = 0; t < triWedge.Length / 3; t++)
+            {
+                int m = triMaterial is not null && t < triMaterial.Length ? triMaterial[t] : 0;
+                int matFlags = materialFlags is not null && m >= 0 && m < materialFlags.Length ? materialFlags[m] : 0;
+                if (Face(fx, fy, fz, oc, wedgeVertex[triWedge[t * 3]], wedgeVertex[triWedge[t * 3 + 1]], wedgeVertex[triWedge[t * 3 + 2]],
+                    matFlags | actorPolyFlags, f.Mirror, 0f, false, out _)) return true;
+            }
+            return false;
+        }
+
         // The pose in frame space and the outcodes of the face loop.
         static void FramePoints(UESceneNode f, UEVector[] points, out float[] fx, out float[] fy, out float[] fz, out byte[] oc)
         {
@@ -266,6 +284,10 @@ namespace HP1.UEScript
         // Loud: Textures.Num > 16 (appFailAssert, 0x10b0f219), a drawn TextureIndex outside Textures (DAT_10b66310 then holds
         // another mesh's slot, 0x10b0f8c0).
         public static int[] UMeshOrder(UESceneNode f, Hp1VertexMesh m, UEVector[] points, bool spanBased, bool ownerIsViewer)
+            => UMeshOrder(f, m, points, spanBased, ownerIsViewer, out _);
+        // accepted: the face loop's count [ebp-0x64] (PF_Invisible faces included); 0 -> DrawMesh returns before SetupForActor
+        // [HP1 0x10b0f1b0..0x10b0f1b8 -> 0x10b0fe8d] [HP2 0x10b0eafd..0x10b0eb05 -> 0x10b0f795].
+        public static int[] UMeshOrder(UESceneNode f, Hp1VertexMesh m, UEVector[] points, bool spanBased, bool ownerIsViewer, out int accepted)
         {
             BrushCoords c = f.Coords;
             int np = points.Length;
@@ -304,6 +326,7 @@ namespace HP1.UEScript
                 else key[n] = Fistp((fz[i2] + fz[i0]) + fz[i1]);
                 n++;
             }
+            accepted = n;
             if (n > 0 && m.TexturePath.Length > 16)
                 throw new System.IO.InvalidDataException($"DrawMesh UMesh branch: {m.Name} has {m.TexturePath.Length} textures (appFailAssert Mesh->Textures.Num() <= 16)");
             if (spanBased) Sort(face, key, n);

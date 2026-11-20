@@ -10,8 +10,8 @@
   <ItemGroup>
     <Compile Include="Runtime/**/*.cs" />
     <!-- NOT ORIGINAL (author 2026-11-03): the OS font of CreateNativeFont ('MS Sans Serif', RU edition) is served by
-         Liberation Sans (SIL OFL 1.1, Fonts/LiberationSans-LICENSE.txt), shipped unmodified. -->
-    <EmbeddedResource Include="Fonts/LiberationSans-Regular.ttf" LogicalName="HP1.Core.Fonts.LiberationSans-Regular.ttf" />
+         Philosopher (SIL OFL 1.1, Fonts/Philosopher-OFL.txt), shipped unmodified (author 2026-11-20). -->
+    <EmbeddedResource Include="Fonts/Philosopher-Regular.ttf" LogicalName="HP1.Core.Fonts.Philosopher-Regular.ttf" />
     <!-- The SAME patched UELib build every consumer and the runtime bind
          (the HP1 fork carries GetRawPropertyValueBytes(+All) and the
          KnowWonder opcode handlers). Referencing the upstream-clean

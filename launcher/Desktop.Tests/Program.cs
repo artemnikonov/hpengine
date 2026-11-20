@@ -70,12 +70,12 @@ static partial class T
         if (args.Length == 1 && args[0] == "--pad-map") { foreach (var l in PadTable()) Console.WriteLine(l); return 0; }
         if (args.Length == 3 && args[0] == "--engine-error")
         {
-            Console.WriteLine(EngineError.Banner(File.ReadAllLines(args[2]), int.Parse(args[1]), "L."));
+            Console.WriteLine(EngineError.Banner(File.ReadAllLines(args[2]), int.Parse(args[1])));
             return 0;
         }
         // The checks below run the preview build's HP2 tab; Hp2Off checks the release switch off.
         bool releaseDefault = Hp2Release.Available; Hp2Release.Available = true;
-        Protocol(); Ini(); Dirs(); Releases(); Removal(); Smoke(); Hp2Off(releaseDefault); Notice(); Errors(); ModProblems(); ModConflicts(); StartMaps(); OwnGame(); PadResetRule(); PadCases(); ScopeCases(); SelfUpdateCases(); SteamCases(); TitleCases(); Languages(); Hp2Tab();
+        Protocol(); Ini(); Dirs(); Releases(); Removal(); Smoke(); Hp2Off(releaseDefault); Notice(); Errors(); ModProblems(); ModConflicts(); StartMaps(); OwnGame(); PadResetRule(); PadCases(); ScopeCases(); SelfUpdateCases(); SteamCases(); TitleCases(); Languages(); Hp2Tab(); Hp2Install(); ErrorBannerWindow();
         Console.WriteLine("branches: " + string.Join(" ", fired.OrderBy(x => x)));
         if (fails > 0) return 1;
         foreach (var b in new[] { "language:overlay", "language:window", "language:missing", "language:stale", "language:default", "language:edition" })
@@ -87,7 +87,11 @@ static partial class T
         if (!OperatingSystem.IsWindows() && !Environment.IsPrivilegedProcess && !fired.Contains("upd:cleanup-denied")) { Console.WriteLine("NOVERDICT: branch did not execute: upd:cleanup-denied"); return 3; }
         foreach (var b in new[] { "hp2:tab", "hp2:hp1-unchanged" })
             if (!fired.Contains(b)) { Console.WriteLine("NOVERDICT: branch did not execute: " + b); return 3; }
-        if (!OperatingSystem.IsWindows() && !fired.Contains("hp2:play-args")) { Console.WriteLine("NOVERDICT: branch did not execute: hp2:play-args"); return 3; }
+        foreach (var b in new[] { "hp2:play-args", "hp2:install" })
+            if (!OperatingSystem.IsWindows() && !fired.Contains(b)) { Console.WriteLine("NOVERDICT: branch did not execute: " + b); return 3; }
+        foreach (var b in new[] { "banner:run-log", "banner:console", "banner:dismiss" })
+            if (!OperatingSystem.IsWindows() && !fired.Contains(b)) { Console.WriteLine("NOVERDICT: branch did not execute: " + b); return 3; }
+        if (!fired.Contains("banner:open-log-rule")) { Console.WriteLine("NOVERDICT: branch did not execute: banner:open-log-rule"); return 3; }
         if (!OperatingSystem.IsWindows() && !fired.Contains("map:play-args")) { Console.WriteLine("NOVERDICT: branch did not execute: map:play-args"); return 3; }
         Console.WriteLine("all passed");
         return 0;
@@ -247,8 +251,10 @@ static partial class T
         Eq("crash: the run log's crash line", crash[1], EngineError.Pick(crash, 134));
         Eq("crash: the runtime's line when there is no run log", crash[3], EngineError.Pick(crash.Skip(2), 134));
         Check("no line: nothing is made up", EngineError.Pick(new[] { "[Mods] none", "[Perf] 60 fps" }, 2) == null && EngineError.Pick(mods, 4) == null);
-        Eq("banner with the line", "The game stopped with an error (code 5): " + mods[2] + " See the log: L.", EngineError.Banner(mods, 5, "L."));
-        Eq("banner without a line", "The game stopped with an error (code 2). See the log: L.", EngineError.Banner(new[] { "[Mods] none" }, 2, "L."));
+        // author 2026-11-17: plain words, no file path ("Open log" opens the right one), the cause on its own line
+        Eq("banner with the line", "The game stopped with an error (code 5).\n" + mods[2], EngineError.Banner(mods, 5));
+        Eq("banner without a line", "The game stopped with an error (code 2).", EngineError.Banner(new[] { "[Mods] none" }, 2));
+        Eq("banner: crash", "The game stopped with an error (code 134).\n" + crash[1], EngineError.Banner(crash, 134));
         var noMap = new[] { "[Mods] active: Xmas (0 game files replaced, 1 added) -> /g/HPEngineData/modroot", "[Map] there is no map \"nosuch\": no Maps/nosuch.unr in the game or in an enabled mod" };
         Eq("code 6: the [Map] line", noMap[1], EngineError.Pick(noMap, 6));
         fired.Add("err:pick");
@@ -490,7 +496,93 @@ static partial class T
             yield return $"game hp2={(hp2 ? 1 : 0)} data={GameScope.DataDir(game, hp2)} logs={GameScope.LogsDir(game, hp2)} console={GameScope.ConsoleLog("/d/HPEngine.log", hp2)}";
         foreach (var on in new[] { false, true }) foreach (var folder in new[] { false, true })
             yield return $"hp2tab available={(on ? 1 : 0)} folder={(folder ? 1 : 0)} caption={Hp2Release.Caption(on, folder) ?? "-"} tip={Hp2Release.Tip(on) ?? "-"}";
+        foreach (var tab in new[] { false, true }) foreach (var h1 in new[] { null, "e1" }) foreach (var h2 in new[] { null, "e2" }) foreach (var l in new[] { null, "eL" })
+        {
+            var d = GameScope.Dismiss(tab, h1, h2, l);
+            yield return $"dismiss hp2Tab={(tab ? 1 : 0)} hp1={h1 ?? "-"} hp2={h2 ?? "-"} launcher={l ?? "-"} -> hp1={d.Hp1 ?? "-"} hp2={d.Hp2 ?? "-"} launcher={d.Launcher ?? "-"}";
+        }
+        foreach (var (now, before) in OpenLogNames)
+            yield return $"runlog now={string.Join(",", now)} before={string.Join(",", before)} -> {GameScope.RunLog(now, before) ?? "-"}";
+        foreach (var (c, logs, console) in OpenLogFolders(game))
+            yield return $"openlog {c} -> {GameScope.LogToOpen(logs, console, Before)[(game.Length + 1)..]}";
     }
+    // The open-log cases both launchers print (Launcher.swift GameScope.table): names, then real folders.
+    static readonly string[] Before = { "run_20261117_090000.log" };
+    static readonly (string[] Now, string[] Before)[] OpenLogNames = {
+        (new string[0], new string[0]), (new[] { "run_20261117_090000.log" }, Before), (new[] { "run_20261117_090000.log" }, new string[0]),
+        (new[] { "run_20261117_090000.log", "run_20261117_090000_x.log" }, Before),
+        (new[] { "run_20261117_090000.log", "run_20261117_100512.log", "run_20261117_100001.log", "notes.txt", "run_20261117_110000.txt" }, Before) };
+    static IEnumerable<(string Case, string Logs, string Console)> OpenLogFolders(string game)
+    {
+        foreach (var c in new[] { "run", "console", "none" })
+        {
+            var d = Path.Combine(game, "openlog", c); var logs = Path.Combine(d, "logs"); var console = Path.Combine(d, "HPEngine.log");
+            if (c != "none") { Directory.CreateDirectory(logs); File.WriteAllText(Path.Combine(logs, "run_20261117_090000.log"), "an earlier run"); File.WriteAllText(console, "console"); }
+            if (c == "run") File.WriteAllText(Path.Combine(logs, "run_20261117_100000.log"), "[Crash] x");
+            yield return (c, logs, console);
+        }
+    }
+    // The game-error banner in the window (author 2026-11-17), with a stand-in engine that fails: plain text without a path,
+    // no More/Less, "Open log" = that run's journal (an earlier one is not it) else the console capture, the × (and pad B on
+    // it) clears that tab's error only, a new error shows the banner again.
+    static void ErrorBannerWindow()
+    {
+        if (OperatingSystem.IsWindows()) return;   // the stand-in engine is a shell script
+        var tmp = Path.Combine(Path.GetTempPath(), "hp1-banner-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var g = Path.Combine(tmp, "game"); var logs = Path.Combine(g, "HPEngineData", "logs"); Directory.CreateDirectory(logs);
+            File.WriteAllText(Path.Combine(g, ".hp1-installed"), "data=x\nedition=US 1.53: exact\n");
+            var old = Path.Combine(logs, "run_20000101_000000.log"); File.WriteAllText(old, "an earlier run");
+            var h2 = Path.Combine(tmp, "hp2"); Directory.CreateDirectory(Path.Combine(h2, "System"));
+            File.WriteAllText(Path.Combine(h2, "System", "Engine.dll"), "x");
+            File.WriteAllText(Path.Combine(h2, "System", "Startup.int"), "[IDDIALOG_FrontEndPageMainMenu]\nIDC_NewGame=New Game\nIDC_LoadGame=Load Game\n[IDDIALOG_FrontEndPageNewGame]\nIDC_SlotEmpty=Empty\nIDC_SlotUsed=Used\n");
+            File.WriteAllText(Path.Combine(tmp, "hp2-root.txt"), h2);
+            var exe = Path.Combine(tmp, "HPEngine", "HPEngine"); Directory.CreateDirectory(Path.GetDirectoryName(exe));
+            // "run": a crash after the run journal started (HPEngineProgram's run_<stamp>.log); else: no start map, before any journal (code 6)
+            File.WriteAllText(exe, "#!/bin/sh\nread mode < \"$0.mode\"\nif [ \"$mode\" = run ]; then\n  echo '[Crash] unhandled exception: boom' > \"$2/HPEngineData/logs/run_$(date +%Y%m%d_%H%M%S).log\"\n"
+                + "  echo '[Mods] none'; echo '[Crash] unhandled exception: boom'; echo '   at X()'; exit 134\nfi\necho '[Map] there is no map \"nosuch\"'; exit 6\n");
+            File.SetUnixFileMode(exe, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            var w = new MainWindow(g, tmp, "0.4.0", false); w.Show(); Dispatcher.UIThread.RunJobs();
+            void Click(string n) { Find<Button>(w, n).RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Dispatcher.UIThread.RunJobs(); }
+            var text = Find<TextBlock>(w, "ErrorText");
+            void Run(string mode, string button, string code)
+            {
+                File.WriteAllText(exe + ".mode", mode + "\n");
+                Click(button);
+                for (int i = 0; i < 500 && !(text.IsEffectivelyVisible && text.Text?.Contains(code) == true); i++) { Thread.Sleep(20); Dispatcher.UIThread.RunJobs(); }
+            }
+            Run("run", "PlayButton", "(code 134)");
+            Eq("banner: what happened in plain words, the cause on its own line, no file path", "The game stopped with an error (code 134).\n[Crash] unhandled exception: boom", text.Text);
+            var banner = text.GetLogicalAncestors().OfType<Border>().First();
+            Seq("banner: Open log and the × only (no More / Less)", new[] { "OpenLogButton", "DismissButton" },
+                banner.GetLogicalDescendants().OfType<Button>().Where(b => b.IsVisible).Select(b => b.Name ?? b.Content?.ToString()));
+            Check("banner: the whole text wraps (no clamp)", text.TextWrapping == Avalonia.Media.TextWrapping.Wrap && text.TextTrimming == Avalonia.Media.TextTrimming.None);
+            Eq("banner: the × is labelled Dismiss", "Dismiss", Avalonia.Automation.AutomationProperties.GetName(Find<Button>(w, "DismissButton")));
+            var run = w.LogToOpen();
+            Check("open log: this run's journal, not the earlier one", run != old && Path.GetDirectoryName(run) == logs && Path.GetFileName(run).StartsWith("run_") && File.ReadAllText(run).Contains("[Crash]"), run);
+            fired.Add("banner:run-log");
+            Run("early", "PlayButton", "(code 6)");
+            Eq("banner: code 6 with its [Map] line", "The game stopped with an error (code 6).\n[Map] there is no map \"nosuch\"", text.Text);
+            Eq("open log: no journal of this run: the console capture", Path.Combine(tmp, "HPEngine.log"), w.LogToOpen());
+            fired.Add("banner:console");
+            Click("TabHp2"); Click("Hp2NewGame");
+            Run("early", "Hp2Slot3", "(code 6)");
+            Check("banner: HP2's own error on its tab", text.IsEffectivelyVisible && Find<Button>(w, "DismissButton").IsEffectivelyVisible);
+            Find<Button>(w, "DismissButton").Focus(Avalonia.Input.NavigationMethod.Directional); w.Pad(PadMap.B); Dispatcher.UIThread.RunJobs();
+            Check("dismiss: pad B on the × closes HP2's banner", !text.IsEffectivelyVisible);
+            Click("TabHp1");
+            Check("dismiss: HP1's error stays on its tab", text.IsEffectivelyVisible && text.Text?.Contains("(code 6)") == true);
+            Click("DismissButton");
+            Check("dismiss: the × closes HP1's banner", !text.IsEffectivelyVisible);
+            Run("run", "PlayButton", "(code 134)");
+            Check("dismiss: a new error shows the banner again", text.IsEffectivelyVisible && Find<Button>(w, "OpenLogButton").IsEffectivelyVisible);
+            fired.Add("banner:dismiss");
+            w.Close();
+        }
+        finally { Directory.Delete(tmp, true); }
+    }
+
     // The release switch off (Hp2Release, release 0.4.0): the HP2 tab disabled, "Coming soon", its tooltip; no click, Ctrl+2
     // or pad RB selects it; a saved HP2 folder is ignored. The plain build (no -p:HPEngineHp2) is the release.
     static void Hp2Off(bool releaseDefault)
@@ -527,6 +619,20 @@ static partial class T
         Eq("scope: HP1 logs in the install's HPEngineData", Path.Combine(g, "HPEngineData", "logs"), GameScope.LogsDir(g, false));
         Eq("scope: HP2 logs beside the HP2 saves (the engine's Hp2DataDir)", Path.Combine(Path.GetDirectoryName(Hp2FrontEnd.SaveDir(g)), "HPEngineData", "logs"), GameScope.LogsDir(g, true));
         Eq("scope: HP2's console log apart", "/d/HPEngine-HP2.log", GameScope.ConsoleLog("/d/HPEngine.log", true));
+        Check("dismiss: clears the shown tab's error only", GameScope.Dismiss(true, "e1", "e2", null) == ("e1", null, null) && GameScope.Dismiss(false, "e1", "e2", null) == (null, "e2", null));
+        Check("dismiss: the launcher's own error when that is shown", GameScope.Dismiss(false, "e1", "e2", "eL") == ("e1", "e2", null));
+        var og = Path.Combine(Path.GetTempPath(), "hp1-openlog-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var got = OpenLogFolders(og).ToDictionary(x => x.Case, x => GameScope.LogToOpen(x.Logs, x.Console, Before));
+            Eq("open log: the run's own journal (not an earlier one)", Path.Combine(og, "openlog", "run", "logs", "run_20261117_100000.log"), got["run"]);
+            Eq("open log: no journal of this run (codes 4/5/6): the console capture", Path.Combine(og, "openlog", "console", "HPEngine.log"), got["console"]);
+            Eq("open log: neither: the logs folder", Path.Combine(og, "openlog", "none", "logs"), got["none"]);
+            Eq("open log: the newest journal the run added", "run_20261117_100512.log", GameScope.RunLog(OpenLogNames[4].Now, OpenLogNames[4].Before));
+            Check("open log: a journal already there before the run is not this run's", GameScope.RunLog(OpenLogNames[1].Now, OpenLogNames[1].Before) == null);
+            fired.Add("banner:open-log-rule");
+        }
+        finally { Directory.Delete(og, true); }
         fired.Add("scope:rules");
     }
 
@@ -645,7 +751,7 @@ static partial class T
             File.WriteAllText(ini, "[Mods]\n; order matters\nEnabled=Beta\nEnabled=Alpha\n");
             w = new MainWindow(game, tmp, "0.1.0-beta", false); w.Show(); Dispatcher.UIThread.RunJobs();
             Check("installed: ready, Play shown", Find<StackPanel>(w, "ReadyPanel").IsVisible && Find<Button>(w, "PlayButton").IsVisible && !Find<StackPanel>(w, "SetupPanel").IsVisible);
-            Check("installed: edition from marker", Find<TextBlock>(w, "EditionText").Text == "US 1.53" && Find<TextBlock>(w, "EditionChip").Text == "verified");
+            Check("installed: no edition chip for a tested edition (US 1.53 exact)", !Find<TextBlock>(w, "EditionText").IsEffectivelyVisible && !Find<TextBlock>(w, "EditionChip").IsEffectivelyVisible);
             string Rows() => string.Join("|", Find<StackPanel>(w, "ModsList").GetLogicalDescendants().OfType<ToggleSwitch>().Select(c => c.Name[4..] + (c.IsChecked == true ? "+" : "-")));
             Eq("mods list reflects Mods.ini", "Beta+|Alpha+|Gamma-", Rows());
             // the bundled Cormorant Garamond where a renderer loads it (the Skia screenshots print it), else the system serif
@@ -676,7 +782,7 @@ static partial class T
             w.Pad(PadMap.A); Dispatcher.UIThread.RunJobs();
             Check("pad: A presses the focused Play (the engine is absent here)", Find<TextBlock>(w, "ErrorText").Text?.StartsWith("HPEngine was not found") == true, Find<TextBlock>(w, "ErrorText").Text);
             w.Pad(PadMap.RB); Dispatcher.UIThread.RunJobs();
-            Check("pad: RB selects Harry Potter 2", Find<StackPanel>(w, "Hp2Panel").IsVisible && Find<Button>(w, "TabHp2").Classes.Contains("on"));
+            Check("pad: RB selects Harry Potter 2 (no HP2 here: its setup view)", Find<StackPanel>(w, "SetupPanel").IsVisible && Find<TextBlock>(w, "Title").Text == MainWindow.Hp2Title && Find<Button>(w, "TabHp2").Classes.Contains("on"));
             Check("scope: HP1's error is not carried to the HP2 tab", !Find<TextBlock>(w, "ErrorText").IsEffectivelyVisible, Find<TextBlock>(w, "ErrorText").Text);
             w.Pad(PadMap.LB); Dispatcher.UIThread.RunJobs();
             Check("scope: back on HP1 its error is there", Find<TextBlock>(w, "ErrorText").IsEffectivelyVisible && Find<TextBlock>(w, "ErrorText").Text?.StartsWith("HPEngine was not found") == true);
@@ -700,7 +806,7 @@ static partial class T
             Find<Button>(w, "MenuButton").Flyout.Hide(); Dispatcher.UIThread.RunJobs();
             Check("menu closed: its button no longer pressed", !Find<Button>(w, "MenuButton").Classes.Contains("held"));
             Press(Avalonia.Input.Key.D2, Avalonia.Input.KeyModifiers.Control);
-            Check("keys: Ctrl+2 selects Harry Potter 2", Find<StackPanel>(w, "Hp2Panel").IsVisible);
+            Check("keys: Ctrl+2 selects Harry Potter 2", Find<Button>(w, "TabHp2").Classes.Contains("on") && Find<TextBlock>(w, "Title").Text == MainWindow.Hp2Title);
             Press(Avalonia.Input.Key.D1, Avalonia.Input.KeyModifiers.Control);
             Check("keys: Ctrl+1 back to Harry Potter 1", Find<StackPanel>(w, "ReadyPanel").IsVisible && !Find<StackPanel>(w, "Hp2Panel").IsVisible);
             fired.Add("keys:shortcuts");
@@ -785,6 +891,23 @@ static partial class T
             w = Show(new MainWindow(game, tmp, "0.4.0", false));
             w.Handle("ERROR crashed The game stopped unexpectedly. Missing package \"HP_Menu\".", new List<string>());
             Save(w, "desktop_hp1_error_start_map.png");
+            if (!OperatingSystem.IsWindows())
+            {
+                // a failed game run (a stand-in engine): the game-error banner with Open log and the ×, then the × focused by the pad
+                var engine = Path.Combine(tmp, "HPEngine", "HPEngine"); Directory.CreateDirectory(Path.GetDirectoryName(engine));
+                File.WriteAllText(engine, "#!/bin/sh\necho '[Crash] unhandled exception: System.IO.InvalidDataException: package HP_Menu: bad header'; exit 134\n");
+                File.SetUnixFileMode(engine, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                foreach (var focus in new[] { false, true })
+                {
+                    w = Show(new MainWindow(game, tmp, "0.4.0", false));
+                    Click(w, "PlayButton");
+                    for (int i = 0; i < 500 && !Find<Button>(w, "OpenLogButton").IsEffectivelyVisible; i++) { Thread.Sleep(20); Dispatcher.UIThread.RunJobs(); }
+                    if (focus) { Find<Button>(w, "DismissButton").Focus(NavigationMethod.Directional); w.Pad(-1); }
+                    Settle();
+                    Save(w, focus ? "error_banner_desktop_hp1_focus.png" : "error_banner_desktop_hp1_crash.png");
+                }
+                File.Delete(engine);
+            }
             Put(game, "System/Default.ini", "[Core.System]\nPaths=../System/*.u\nPaths=../Maps/*.unr\n"); Put(game, "Maps/Startup.unr", "x"); Put(game, "Mods/Beta/Textures/Beta.utx", "x");   // map paths and game files in both enabled mods: Alpha's map becomes a start map
             w = Show(new MainWindow(game, tmp, "0.4.0", false));
             Find<ComboBox>(w, "StartMap").IsDropDownOpen = true; Settle();

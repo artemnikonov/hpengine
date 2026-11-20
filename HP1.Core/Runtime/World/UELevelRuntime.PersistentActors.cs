@@ -114,8 +114,14 @@ namespace HP1.UEScript
         // the count, per actor its Name, its Class's Name and AActor::SerializePersistence [HP2 0x103811d0] (the
         // persistent properties, Hp2PersistentFields), then "EOF". The result (true on a writer error) has no caller use.
         internal void SavePersistentActors(string mapArg)
-            => Hp2SavePersistentActors(Hp2SlotDir?.Invoke(), Path.GetDirectoryName(LoadedMapPath ?? ""), mapArg, Actors,
+        {
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            Hp2SavePersistentActors(Hp2SlotDir?.Invoke(), Path.GetDirectoryName(LoadedMapPath ?? ""), mapArg, Actors,
                 (a, rec) => { foreach (var kv in Hp2PersistentFields(a)) rec.Fields[kv.Key] = kv.Value; });
+            SavePersistentActorsTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0; SavePersistentActorsCalls++;
+        }
+        // Wall time spent here (Stopwatch ticks) and calls: read only by the product window's --frame-trace (audit/product_budget.sh).
+        public long SavePersistentActorsTicks; public int SavePersistentActorsCalls;
 
         // Returns the PA file written, or null (no bPersistent actor: nothing is written).
         internal string Hp2SavePersistentActors(string slotDir, string mapsDir, string mapArg, IEnumerable<UEObject> actors,
@@ -144,18 +150,34 @@ namespace HP1.UEScript
         // ArIsPersistent skipped, no AuxAnims rule).
         internal static IEnumerable<KeyValuePair<string, object>> Hp2PersistentFields(UEObject a)
         {
-            var props = new Dictionary<string, UProperty>(UEPropNameComparer.Instance);
-            for (UClass c = a.Class; c is not null; c = UEInterpreter.CanonicalSuper(c))
-                foreach (UProperty p in c.EnumerateFields<UProperty>())
-                    if (p is not null) props.TryAdd(p.Name.ToString(), p);
-            foreach (var (name, dim) in Hp2PersistentProperties(a.Class))
+            foreach (var (name, dim, p) in PersistentPlan(a.Class))
             {
-                UProperty p = props[name];
-                if (p is UObjectProperty) continue;
                 object v = a.GetProp(name);
                 if (dim <= 1) { yield return new(name, PersistentValue(p, v, name)); continue; }
                 for (int i = 0; i < dim; i++) yield return new($"{name}[{i}]", PersistentValue(p, ElementAt(v, i), $"{name}[{i}]"));
             }
+        }
+
+        // The class's persistent (name, ArrayDim, property) list without object and class properties, cached per class until
+        // the package catalogue changes: rebuilt per actor it was half of SAVEPACTORS's cost (right before every HP2 travel).
+        sealed class PersistentPlanEntry { public HP1.Core.UEClassRegistry Registry; public int Generation; public (string, int, UProperty)[] Plan; }
+        static readonly System.Runtime.CompilerServices.ConditionalWeakTable<UClass, PersistentPlanEntry> _persistentPlans = new();
+
+        static (string Name, int Dim, UProperty Prop)[] PersistentPlan(UClass cls)
+        {
+            var reg = HP1.Core.UEClassRegistry.Shared;
+            if (_persistentPlans.TryGetValue(cls, out var hit) && ReferenceEquals(hit.Registry, reg) && hit.Generation == reg.Generation)
+                return hit.Plan;
+            var props = new Dictionary<string, UProperty>(UEPropNameComparer.Instance);
+            for (UClass c = cls; c is not null; c = UEInterpreter.CanonicalSuper(c))
+                foreach (UProperty p in c.EnumerateFields<UProperty>())
+                    if (p is not null) props.TryAdd(p.Name.ToString(), p);
+            var plan = new List<(string, int, UProperty)>();
+            foreach (var (name, dim) in Hp2PersistentProperties(cls))
+                if (props[name] is not UObjectProperty) plan.Add((name, dim, props[name]));
+            var arr = plan.ToArray();
+            _persistentPlans.AddOrUpdate(cls, new PersistentPlanEntry { Registry = reg, Generation = reg.Generation, Plan = arr });
+            return arr;
         }
 
         static object PersistentValue(UProperty p, object v, string where)
@@ -200,11 +222,11 @@ namespace HP1.UEScript
                     int idx = int.Parse(kv.Key.Substring(br + 1, kv.Key.Length - br - 2), System.Globalization.CultureInfo.InvariantCulture);
                     if (a.GetProp(name) is not System.Collections.IList arr || idx >= arr.Count)
                         throw new InvalidDataException($"persistent actors: {a.GetProp(PK.Name)}.{name} — no static array for {kv.Key}");
-                    arr[idx] = kv.Value is TravelStructDelta ed ? ApplyStructDelta(arr[idx] ?? UEObject.ZeroStructValue(p), ed, StructOf(p, kv.Key), kv.Key, out _) : kv.Value;
+                    arr[idx] = kv.Value is TravelStructDelta ed ? ApplyStructDelta(arr[idx], ed, StructOf(p, kv.Key), kv.Key, out _) : kv.Value;
                     continue;
                 }
-                // An absent struct value is the zero struct (the port keeps Props sparse; the original's memory is there).
-                a.Props[name] = kv.Value is TravelStructDelta sd ? ApplyStructDelta(a.GetProp(name) ?? UEObject.ZeroStructValue(p), sd, StructOf(p, name), name, out _) : kv.Value;
+                // An absent struct value is the zero struct (ApplyStructDelta; the port keeps Props sparse, the original's memory is there).
+                a.Props[name] = kv.Value is TravelStructDelta sd ? ApplyStructDelta(a.GetProp(name), sd, StructOf(p, name), name, out _) : kv.Value;
             }
         }
 

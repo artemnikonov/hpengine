@@ -68,7 +68,7 @@ namespace HPEngine.Input
         public void ToggleFullscreen()
         {
             if (Viewport is null) { Warn?.Invoke("[Input] Alt+Enter: the sink has no window device — screen not switched"); return; }
-            UEConsoleCommand.ToggleFullscreen(_rt.Config, Viewport);
+            UEConsoleCommand.ToggleDisplayMode(_rt.Config, Viewport);
         }
     }
 }

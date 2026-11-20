@@ -71,7 +71,7 @@ namespace HP1.UEScript
                 "NotEqual_VectorVector", "NumParticles", "Or_IntInt", "OrOr_BoolBool", "OrthoRotation", "ParseKillMessage",
                 "Percent_FloatFloat", "PickAnyTarget", "PickTarget", "PlayAnim", "PlayerCanSeeMe", "PlayMusic", "PlayOwnedSound", "PlaySound", "pointReachable", "RadiusActors", "Rand",
                 "RandRange", "RecomputeDeltas", "RemovePawn", "ResetConfig", "ResetKeyboard", "Right", "RotRand", "SaveConfig", "SaveGameExists", "SaveGameSaveInfo",
-                "ScreenToWorld", "SetBase", "SetCollision", "SetCollisionSize", "SetLocation", "SetOwner", "SetParticleParams", "SetPhysics", "SetPropertyText", "SetRotation",
+                "ScreenToWorld", "ScriptedTexture.DrawColoredText", "ScriptedTexture.DrawText", "ScriptedTexture.TextSize", "SetBase", "SetCollision", "SetCollisionSize", "SetLocation", "SetOwner", "SetParticleParams", "SetPhysics", "SetPropertyText", "SetRotation",
                 "SetTimer", "Sin", "Sleep", "Smerp", "Spawn", "Sqrt", "Square", "StaticSaveConfig", "StopAllMusic", "StopMusic", "StopSound", "StopWaiting",
                 "StrafeFacing", "StrafeTo", "StrLen", "Subtract_ColorColor", "Subtract_FloatFloat", "Subtract_IntInt", "Subtract_PreFloat",
                 "Subtract_PreInt", "Subtract_PreVector", "Subtract_RotatorRotator", "Subtract_VectorVector",

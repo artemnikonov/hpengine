@@ -353,6 +353,7 @@ namespace HPEngine
                 rc = Worst(rc, SceneSampler(stem));
                 rc = Worst(rc, SceneCull(stem + ".cull.png"));
                 rc = Worst(rc, SceneUploads(stem + ".uploads.png"));
+                rc = Worst(rc, SceneCanvasActor(stem + ".canvas.png"));
             }
             Console.WriteLine(rc == 0 ? "selftest-gpu PASS" : rc == 3 ? "selftest-gpu REFUSED" : rc == 2 ? "selftest-gpu NO GPU" : "selftest-gpu FAIL");
             return rc;
@@ -448,7 +449,8 @@ namespace HPEngine
         // Quads 32×16 px, U 0..1 over a 2×1 texture (texel 0 black, texel 1 white), Opaque (branch 0, white colour):
         // S Smooth at x 0..32, P nearest at x 64..96. Column i samples u = (i + 0.5)/32: bilinear gives
         // 255·clamp(2u − 0.5, 0, 1) (texel centres 0.25 / 0.75, weights in 1/32 steps), nearest 0 below u = 0.5 and
-        // 255 above. Checked columns 8..23 stay off the REPEAT wrap (u < 0.25 would blend texel 1 back in).
+        // 255 above. Columns 0..7 (u < 0.25): the smooth tile's window lies inside the texture, so it samples CLAMP and
+        // stays black (REPEAT would blend texel 1 back in, the HP1 loading-parchment seam; not original, SdlHudPass).
         static int SceneHudSampling(Renderer r, string png)
         {
             const string T = "selftest.hud2x1";
@@ -463,16 +465,17 @@ namespace HPEngine
             string stem = png.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ? png[..^4] : png;
             Png.Write(stem + ".hud.png", r.Width, r.Height, rgba);
             int bad = 0, graded = 0;
-            for (int i = 8; i < 24; i++)
+            for (int i = 0; i < 24; i++)
             {
                 double u = (i + 0.5) / 32.0;
+                if (i < 8) { int e = rgba[(8 * r.Width + i) * 4]; if (e > Tol && bad++ < 8) Console.WriteLine($"  MISMATCH hud clamp col {i}: frame {e} expected 0"); continue; }
                 int wantS = (int)Math.Round(255 * Math.Clamp(2 * u - 0.5, 0, 1)), wantP = u < 0.5 ? 0 : 255;
                 int gotS = rgba[(8 * r.Width + i) * 4], gotP = rgba[(8 * r.Width + 64 + i) * 4];
                 if (wantS != 0 && wantS != 255 && wantS != wantP) graded++;
                 if (Math.Abs(gotS - wantS) > Tol && bad++ < 8) Console.WriteLine($"  MISMATCH hud smooth col {i}: frame {gotS} expected {wantS}");
                 if (gotP != wantP && bad++ < 8) Console.WriteLine($"  MISMATCH hud nearest col {i}: frame {gotP} expected {wantP}");
             }
-            Console.WriteLine($"selftest-gpu hud sampling: columns 16, bilinear distinguishable from nearest {graded}, mismatches {bad} (tolerance {Tol})");
+            Console.WriteLine($"selftest-gpu hud sampling: columns 24 (0..7 clamp), bilinear distinguishable from nearest {graded}, mismatches {bad} (tolerance {Tol})");
             if (graded == 0) { Console.WriteLine("selftest-gpu REFUSED: hud sampling: the scene does not distinguish bilinear from nearest"); return 3; }
             return bad == 0 ? 0 : 1;
         }
@@ -954,6 +957,45 @@ namespace HPEngine
                 },
                 (panel, sx, sy) => NearRect(RA, false, sx, sy) || NearRect(RFull, false, sx, sy),
                 new[] { "cull-kept", "cull-culled", "bg", "clear" }, reg => reg == "clear", png, null);
+        }
+
+        // ---- canvas mesh draw (Core HudKind.Actor: UCanvas::execDrawActor after RenDev->ClearZ) ----
+        //
+        // A world wall at depth 200 over the frame; two actor quads behind it at depth 300: CA (ActorId 7) is the HUD's
+        // canvas actor (an Actor marker in the HUD list, SetCanvasActors), CB (ActorId 8) a world actor. Expected: CA drawn
+        // over the wall (its pass clears depth and runs after the world), CB hidden by the wall (world pass, depth test);
+        // CA drawn in the world pass instead, or without the depth clear, leaves the wall.
+        static int SceneCanvasActor(string png)
+        {
+            var s = new Scene(1);
+            s.World(new Batch { Blend = Blend.Opaque, NoSmooth = true, Unlit = true }, 0, RFull, 200, 1, 0, 0, 0, 0, new[] { (1, 1, Fill(1, 1, Bg2)) });
+            foreach (var (id, rect) in new[] { (7, RA), (8, RB) })
+            {
+                string tex = "selftest/canvas" + id;
+                s.ActorTex[tex] = (1, 1, Fill(1, 1, G));
+                var ad = new ActorDraw { Texture = tex, Blend = ActorBlend.Opaque, Unlit = true, ActorId = id };
+                var av = new List<Vertex>(); var ai = new List<uint>();
+                s.Quad(av, ai, 0, rect, 300, 1, 0, 0, 0, 0, new[] { 1f, 1f, 1f }, out _, out _);
+                ad.Vertices.AddRange(av); ad.Indices.AddRange(ai);
+                s.Actors.Add(ad);
+            }
+            Renderer r = s.Load(Atlas(LA, LB, LRest), Atlas(new byte[] { 0, 0, 0, 0 }, new byte[] { 0, 0, 0, 0 }, new byte[] { 0, 0, 0, 0 }), null);
+            if (r is null) { Console.Error.WriteLine("GPU: " + SDL_GetError()); return 2; }
+            r.SetCanvasActors(new[] { new HudCommand(HudKind.Actor, 0, 0, 0, 0, 0, 0, 0, 0, null, null, null, default, 0, false, false, actorId: 7) });
+            r.SetHud(new[] { new HPEngine.Hud.HudQuad(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, HPEngine.Hud.HudBlend.Opaque, false, null,
+                HPEngine.Hud.HudQuadSource.Actor, 0, actorId: 7) });
+            r.RenderOffscreen(new Camera { Fov = 90f }, out byte[] rgba);
+            r.SetHud(Array.Empty<HPEngine.Hud.HudQuad>()); r.SetCanvasActors(null);
+            Png.Write(png, r.Width, r.Height, rgba);
+            return Compare("canvas", r, 1, rgba, (int panel, float sx, float sy, out string region) =>
+                {
+                    if (In(RA, sx, sy)) { region = "canvas-actor"; return Rgb(G); }
+                    if (In(RFull, sx, sy)) { region = "wall"; return Rgb(Bg2); }
+                    region = "clear";
+                    return new[] { 0, 0, 0 };
+                },
+                (panel, sx, sy) => NearRect(RA, false, sx, sy) || NearRect(RB, false, sx, sy) || NearRect(RFull, false, sx, sy),
+                new[] { "canvas-actor", "wall", "clear" }, reg => reg == "clear", png, null);
         }
 
         // ---- NOT ORIGINAL (D-78): per-use upload of a world texture ----
