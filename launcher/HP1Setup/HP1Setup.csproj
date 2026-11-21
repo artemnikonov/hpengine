@@ -18,5 +18,7 @@
     <EmbeddedResource Include="../hp2_ru_ea.sha1" LogicalName="hp2_ru_ea.sha1" />
     <Compile Include="../../HP1.Core/Runtime/World/UEEdition.cs" Link="Core/UEEdition.cs" />
     <Compile Include="../../HP1.Core/Runtime/World/UEInstallPath.cs" Link="Core/UEInstallPath.cs" />
+    <Compile Include="../../hpengine/packaging/ModInstall.cs" Link="ModInstall.cs" />
+    <Compile Include="../../hpengine/packaging/InstallRoot.cs" Link="InstallRoot.cs" />
   </ItemGroup>
 </Project>

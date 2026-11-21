@@ -108,23 +108,20 @@ static partial class T
                 .Select(c => new LanguageChoice(c, c, "0")).ToList();
             var display = EditionLabel.Describe("UK 1.1: modified", nordic);
             Eq("Nordic label describes data rather than claiming a UK disc", "Nordic multilingual data", display.Name);
-            Eq("manifest difference is not called a modified disc", "different data", display.Tier);
             Check("engine family retained as separate information", display.Detail.StartsWith("Engine family: UK 1.1."));
             Eq("other multilingual sets are not labelled Nordic", "Multilingual game data", EditionLabel.Describe("UK 1.1: modified", nordic.Take(2).ToList()).Name);
             Eq("single-language edition keeps original name", "US 1.53", EditionLabel.Describe("US 1.53: exact", nordic.Take(1).ToList()).Name);
-            Eq("single-language exact support is retained", "exact", EditionLabel.Describe("US 1.53: exact", nordic.Take(1).ToList()).Tier);
-            Eq("known modified releases keep the modified warning", "modified", EditionLabel.Describe("Modded re-release: modified", nordic).Tier);
             foreach (var (code, folder) in new[] { ("dan", "1"), ("fin", "2"), ("nor", "4"), ("swe", "3") })
                 Put("System/" + folder + "/Default.ini", "[Engine.Engine]\nLanguage=" + code + "\n");
             Put(".hp1-installed", "edition=UK 1.1: modified\n");
             window = new MainWindow(game, tmp, "0.3.0-beta", false); window.Show(); Dispatcher.UIThread.RunJobs();
             Eq("window shows Nordic data label", "Nordic multilingual data", Find<TextBlock>(window, "EditionText").Text);
-            Check("window shows no chip for the genuine disc's manifest difference", !Find<TextBlock>(window, "EditionChip").IsEffectivelyVisible && !Find<TextBlock>(window, "EditionText").IsEffectivelyVisible);
+            Check("window shows no chip for the genuine disc's manifest difference", !Find<TextBlock>(window, "EditionText").IsEffectivelyVisible);
             Check("window exposes engine family separately", Find<TextBlock>(window, "EditionDetail").IsVisible && Find<TextBlock>(window, "EditionDetail").Text.Contains("UK 1.1"));
             window.Close();
             Put(".hp1-installed", "edition=Modded re-release: modified\n");
             window = new MainWindow(game, tmp, "0.3.0-beta", false); window.Show(); Dispatcher.UIThread.RunJobs();
-            Check("a modified copy keeps the warning chip", Find<TextBlock>(window, "EditionChip") is { IsEffectivelyVisible: true, Text: "modified" });
+            Check("a modified copy shows no chip and no warning (author 2026-11-20)", !Find<TextBlock>(window, "EditionText").IsEffectivelyVisible && !Find<TextBlock>(window, "WarningText").IsEffectivelyVisible);
             window.Close(); fired.Add("language:edition");
         }
         finally

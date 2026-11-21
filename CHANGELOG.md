@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.5.1-beta — 2026-11-21
+
+Fixed (Philosopher's Stone):
+
+- Voice lines in MPEG Layer I (e.g. the Dutch release, issue #5) were silent.
+- **Installer: a UK 1.1 copy in another language** (issue #5, e.g. the Dutch retail release). The
+  installer takes the language from the copy's `System/Default.ini` (`Language=`) and requires `AllDialog`, `AllEmote`
+  and `MenuArt` in that language (`AllDialog.dut_uax`, ...) instead of the English-named ones; the copy's `Default.ini`
+  keeps its language.
+
+New (both games):
+
+- **Mods page for Chamber of Secrets**, and on both tabs: **Add Mod…** (or drop a mod folder, a `.zip`, `.7z` or `.rar`,
+  or a single map onto the Mods page) and **×** to remove a mod. HP2 mods live in `HP2Data/game/Mods`, switched on and
+  off like HP1's. HP2 mods made for Metallicafan212's engine do not load yet (their packages have a newer format); the
+  log names such packages.
+- An HP2 mod made for Metallicafan212's newer HP2 engine no longer crashes the game: the Mods page says so under the mod,
+  and Play refuses it with "<mod> was made for a newer HP2 engine and does not run in HPEngine".
+
+Fixed (both games):
+
+- Windows/Linux launcher: every confirmation dialog (Remove game, Reset settings, About, Add to Steam, replacing an HP2
+  save slot) failed to open.
+
+Changed (both games):
+
+- The window no longer flashes up at 1280x720 before switching to the saved size.
+- The launcher's "Reset gamepad bindings" is always available (it was greyed out until a button was rebound).
+- HP1: the Mouse Sensitivity slider is saved between launches.
+
+- **The launcher no longer labels a copy as verified, supported, modified or "not verified"** (issue #6). Any release
+  installs and runs without a label; the edition, hashes and differing files stay in the log for bug reports. The launcher
+  warns only about what breaks play: a missing file (the install is refused, naming the file) and, after a run, a port
+  script fix that found no target in the copy's scripts.
+
 ## 0.5.0-beta — 2026-11-20
 
 Updating from 0.4.0: the launcher updates itself; your game, saves, settings and mods stay where they are.

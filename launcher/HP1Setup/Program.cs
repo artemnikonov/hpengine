@@ -4,6 +4,7 @@
 //   HP1Setup                        (in a terminal: asks for the source)
 //   HP1Setup --unpack-cab <data1.hdr> <dir>   (test: only unpacks an InstallShield cabinet)
 //   HP1Setup --check-manifests               (test: the manifests agree with UEEdition)
+//   HP1Setup --add-mod <install> <source>    (a mod folder or archive into <install>/Mods: MOD <name> | ERROR add_mod <why>)
 //
 // <source>: the installed game folder, the game CD (its drive or mount point), a folder copy of the CD, a .zip of
 // those, (macOS only) a disc image .iso / .bin+.cue / .mdf+.mds, or a game installer: Inno Setup (Setup.exe with its
@@ -92,6 +93,11 @@ static class Program
             return 0;
         }
         if (args.Length == 1 && args[0] == "--check-manifests") return CheckManifests();   // launcher/test_setup.sh
+        if (args.Length == 3 && args[0] == "--add-mod")   // launcher/Launcher.swift Mods page: hpengine/packaging/ModInstall.cs
+        {
+            try { Console.WriteLine("MOD " + HPEngine.Packaging.ModInstall.Add(args[1], args[2])); return 0; }
+            catch (Exception e) when (e is InvalidDataException or IOException or UnauthorizedAccessException) { Console.WriteLine("ERROR add_mod " + e.Message); return 2; }
+        }
         if (args.Length >= 2 && args[0] == "--game")
         {
             if (args[1] is not ("hp1" or "hp2")) { Console.WriteLine($"ERROR usage --game is hp1 or hp2, not {args[1]}"); return 1; }
@@ -555,6 +561,7 @@ static class Program
             _ => id.Tier == UEEdition.Support.Modified ? "Modified release" : "Unknown release",
         });
         var manifest = ed.manifest == "" ? new List<Entry>() : LoadManifest(ed.manifest);
+        var localized = _hp2 ? new List<string>() : Localize(manifest, SourceLanguage(root));
         var missing = manifest.Where(e => !files.ContainsKey(e.Path)).Select(e => e.Path).ToList();
         if (missing.Count > 0)
             throw new Reject("missing_files", $"{missing.Count} game file(s) missing here (for example "
@@ -565,7 +572,7 @@ static class Program
         foreach (var e in manifest)
         {
             string path = files[e.Path];
-            if (Size(path) != e.Size || Sha1(path) != e.Sha1) differ.Add(e.Path);
+            if (e.Sha1 != "" && (Size(path) != e.Size || Sha1(path) != e.Sha1)) differ.Add(e.Path);   // "": localized, not verified
             done += e.Size;
             Progress(done, total, ref shown);
         }
@@ -580,6 +587,10 @@ static class Program
         var tier = differ.Count > 0 ? UEEdition.Support.Modified : id.Tier;
         _edition = $"{ed.name}: {tier.ToString().ToLowerInvariant()}";
         Console.WriteLine($"EDITION {(_hp2 ? id.Data.ToString() : id.Edition.ToString())} {_edition}");   // HP2: no exe-based ids
+        // The WARNING/REPORT lines are for the log and bug reports only: the launchers do not show them (author 2026-11-20).
+        if (localized.Count > 0)
+            Console.WriteLine($"WARNING localized {localized.Count} localized game file(s) ({string.Join(", ", localized.Take(3))}) are for the "
+                + $"language of this copy's Default.ini, not UK English: present, not verified against {ed.name}.");
         if (differ.Count > 0)
             Console.WriteLine($"WARNING modified {differ.Count} game file(s) differ from {ed.name} (for example "
                 + $"{string.Join(", ", differ.Take(3))}). " + UEEdition.ModifiedWarning);
@@ -587,6 +598,45 @@ static class Program
         if (id.ReportUrl is string report) Console.WriteLine("REPORT " + report);
         _data = id.Data;
         return manifest;
+    }
+
+    // [Engine.Engine] Language= of the source's Default.ini (System/ or the CD's System/0/), lower case; "" if none.
+    // File.ReadLines honours a UTF-16 BOM (RU copies).
+    static string SourceLanguage(string root)
+    {
+        string sys = DirCI(root, "System");
+        if (sys is null || (FileCI(sys, "Default.ini") ?? FileCI(DirCI(sys, "0"), "Default.ini")) is not string ini) return "";
+        bool inside = false;
+        foreach (string raw in File.ReadLines(ini))
+        {
+            string l = raw.Trim();
+            if (l.StartsWith('[')) inside = l.Equals("[Engine.Engine]", StringComparison.OrdinalIgnoreCase);
+            else if (inside && l.StartsWith("Language=", StringComparison.OrdinalIgnoreCase)) return l[9..].Trim().ToLowerInvariant();
+        }
+        return "";
+    }
+
+    // A manifest's <Name>.eng_<ext> files (UK 1.1 only: the HP1 manifests have no others) are the Language=eng ones. For
+    // another source language the entry becomes <Name>.<lang>_<ext> (Core's lookup), required but unhashed (Sha1 ""),
+    // and its plain <Name>.<ext> sibling is dropped (Core never reads it beside a language file; its bytes are the
+    // language's, not UK English). lang=int: only plain names, so the .eng_ entries go. No Language / eng: unchanged.
+    // Returns the localized paths. Hashes of other languages are not known: never claimed verified.
+    static List<string> Localize(List<Entry> manifest, string lang)
+    {
+        var done = new List<string>();
+        if (lang is "" or "eng") return done;
+        foreach (var e in manifest.Where(e => e.Path.Contains(".eng_", StringComparison.Ordinal)).ToList())
+        {
+            int dot = e.Path.LastIndexOf(".eng_", StringComparison.Ordinal);
+            string plain = e.Path[..dot] + "." + e.Path[(dot + 5)..];
+            manifest.Remove(e);
+            if (lang == "int") continue;
+            manifest.RemoveAll(x => x.Path.Equals(plain, StringComparison.OrdinalIgnoreCase));
+            string path = e.Path[..dot] + "." + lang + "_" + e.Path[(dot + 5)..];
+            manifest.Add(new Entry("", 0, path));
+            done.Add(path);
+        }
+        return done;
     }
 
     static UEEdition.DataSet _data;   // of the checked root, written into the marker (the Launcher shows edition=)

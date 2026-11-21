@@ -101,10 +101,10 @@ public sealed partial class MainWindow : Window
     readonly List<string> _inputs = new();
     List<ModEntry> _mods = new();
     Process _setup, _play;
-    int _step = -1; double _progress; bool _running, _playing; string _edition, _warning, _error, _report, _runError;
+    int _step = -1; double _progress; bool _running, _playing; string _edition, _warning, _error, _runError;
     string _hp2Error, _hp2RunError, _launcherError;   // per game (GameScope): HP1's in _error, HP2's, the launcher's own (update)
     string[] _runLogsBefore, _hp2RunLogsBefore;   // each game's run journals before its last run started: "Open log" opens the one that run wrote
-    bool _modsOpen;   // the Mods page in place of the main page (HP1)
+    bool _modsOpen;   // the Mods page in place of the selected tab's main page
     Release _newer;
     static readonly HttpClient Http = new();
 
@@ -113,7 +113,6 @@ public sealed partial class MainWindow : Window
         _metaExtra = new() { FontSize = 13, VerticalAlignment = VerticalAlignment.Center },
         _editionText = new() { Name = "EditionText", FontSize = 12, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis, MaxWidth = 420 },
         _editionDetail = new() { Name = "EditionDetail", FontSize = 12, TextWrapping = TextWrapping.Wrap, IsVisible = false, Margin = new Thickness(0, 6, 0, 0) },
-        _editionChip = new() { Name = "EditionChip", FontSize = 13, VerticalAlignment = VerticalAlignment.Center },
         _warningText = new() { Name = "WarningText", VerticalAlignment = VerticalAlignment.Center },
         _errorText = new() { Name = "ErrorText", VerticalAlignment = VerticalAlignment.Center };
     readonly Glyph _statusIcon = new() { Width = 16, Height = 16, StrokeThickness = 1.8, StrokeLineCap = PenLineCap.Round, StrokeJoin = PenLineJoin.Round, Stretch = Stretch.Uniform, VerticalAlignment = VerticalAlignment.Center };
@@ -145,8 +144,6 @@ public sealed partial class MainWindow : Window
     readonly Border _updateBanner = new() { Name = "UpdateBanner", IsVisible = false, Margin = new Thickness(16, 12, 16, 0), Padding = new Thickness(14, 4, 4, 4), CornerRadius = new CornerRadius(10),
         Background = new SolidColorBrush(Colors.Black, 0.30), BorderBrush = Th.Stroke, BorderThickness = new Thickness(1) };
     readonly TextBlock _updateText = new() { VerticalAlignment = VerticalAlignment.Center, FontSize = 13 };
-    // An unrecognised release: HP1Setup's REPORT link (UEEdition.ReportUrl), opened from the warning banner.
-    readonly Button _reportButton = new() { Name = "ReportButton", Content = "Report…", IsVisible = false };
     readonly Button _openLog = new() { Name = "OpenLogButton", Content = "Open log", IsVisible = false };
     readonly Button _dismiss = new() { Name = "DismissButton", IsVisible = false };   // the error banner's ×
     readonly Button _updateOpen = new() { Content = "What's new" }, _updateInstall = new() { Name = "UpdateButton", Content = "Update" };
@@ -168,17 +165,17 @@ public sealed partial class MainWindow : Window
         Title = "HPEngine Launcher"; Width = 600; Height = 560; CanResize = false;
         Th.Use(false);
         Background = new SolidColorBrush(Color.Parse("#14050A")); Foreground = Th.Text; FontSize = 14;
-        AddStyles();
+        AddStyles(Styles);
         _edition = Edition();
         try { Icon = ShieldIcon.Make(); } catch (Exception) { /* no renderer for the bitmap: the default icon stays */ }
 
         _title.FontSize = 32; _title.FontWeight = FontWeight.Bold; _title.Foreground = Th.Title; _title.FontFamily = Th.Serif; _title.TextWrapping = TextWrapping.Wrap; _title.LineHeight = 35;
-        foreach (var t in new[] { _heroSub, _metaExtra, _editionDetail, _editionChip, _percent, _resumeNote, _versionText, _modsValue }) t.Foreground = Th.Dim;
+        foreach (var t in new[] { _heroSub, _metaExtra, _editionDetail, _percent, _resumeNote, _versionText, _modsValue }) t.Foreground = Th.Dim;
         _chipBox.Child = _editionText; _chipBox.BorderBrush = Th.Stroke;
         _hero.Children.Add(_title);
         _hero.Children.Add(_heroSub);
         _hero.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Margin = new Thickness(0, 8, 0, 0), Children = {
-            new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Children = { _statusIcon, _status } }, _chipBox, _editionChip, _metaExtra } });
+            new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Children = { _statusIcon, _status } }, _chipBox, _metaExtra } });
         _hero.Children.Add(_editionDetail);
         _versionText.Text = "HPEngine " + version;
 
@@ -191,15 +188,13 @@ public sealed partial class MainWindow : Window
         _updateText.Margin = new Thickness(10, 0, 0, 0);
 
         _stepsCard = Well(_stepsList, _bar, _percent);
-        _reportButton.Classes.Add("quiet");
-        _reportButton.Click += (_, _) => { if (_report != null) Open(_report); };
         _openLog.Classes.Add("quiet");
         _openLog.Click += (_, _) => { var f = LogToOpen(); if (f == GameScope.LogsDir(_game, _hp2Tab)) OpenFolder(f); else Open(f); };
         _dismiss.Classes.Add("flat"); _dismiss.Width = 32; _dismiss.Height = 32; _dismiss.Padding = new Thickness(0); _dismiss.VerticalAlignment = VerticalAlignment.Top;
         var cross = Glyph24(Cross, Th.Dim, 14); cross.HorizontalAlignment = HorizontalAlignment.Center; _dismiss.Content = cross;
         Avalonia.Automation.AutomationProperties.SetName(_dismiss, "Dismiss"); ToolTip.SetTip(_dismiss, "Dismiss");
         _dismiss.Click += (_, _) => DismissError();
-        _warningBanner = MakeBanner(Th.Warn, Alert, _warningText, _reportButton);
+        _warningBanner = MakeBanner(Th.Warn, Alert, _warningText);
         _errorBanner = MakeBanner(Th.Err, Stop, _errorText, _openLog, _dismiss);
         BuildSetupPanel();
         BuildReadyPanel();
@@ -273,7 +268,7 @@ public sealed partial class MainWindow : Window
         AddHandler(DragDrop.DropEvent, (_, e) =>
         {
             foreach (var f in e.DataTransfer.TryGetFiles() ?? Array.Empty<IStorageItem>())
-                if (f.TryGetLocalPath() is { } p) Add(p);
+                if (f.TryGetLocalPath() is { } p) { if (_modsOpen && ModsReady) AddMod(p); else Add(p); }
         });
         Closing += (_, _) => { if (_setup is { HasExited: false }) try { _setup.Kill(true); } catch { } };   // HP1Setup resumes an interrupted copy
         Opened += (_, _) => KeepFocus();
@@ -284,6 +279,11 @@ public sealed partial class MainWindow : Window
     static Control Dock(Control c, Dock d) { DockPanel.SetDock(c, d); return c; }
     bool Installed => _own || File.Exists(Path.Combine(_game, ".hp1-installed"));   // HP1Setup writes it last
     bool Setup => !Installed || _running || _inputs.Count > 0;
+    // The selected tab's mods (ModOverlay): HP1 <game>/Mods with <game>/HPEngineData/Mods.ini; HP2 <its game folder>/Mods
+    // with <HP2Data>/HPEngineData/Mods.ini, the data dir the engine runs HP2 with (InstallRoot.Hp2DataDir).
+    string ModsGame => _hp2Tab ? Hp2Root : _game;
+    string ModsData => GameScope.DataDir(_game, _hp2Tab);
+    bool ModsReady => _hp2Tab ? Hp2Root != null : Installed;
     string Edition() => EditionOf(_hp2Tab ? Hp2Game : _game);   // the selected tab's game
     static string EditionOf(string root) => !File.Exists(Path.Combine(root, ".hp1-installed")) ? null : File.ReadLines(Path.Combine(root, ".hp1-installed")).FirstOrDefault(l => l.StartsWith("edition="))?[8..];
     void SetupError(string e) { if (_hp2Tab) _hp2Error = e; else _error = e; }   // the setup's errors: the selected tab's game
@@ -304,7 +304,7 @@ public sealed partial class MainWindow : Window
     // Button looks (proposal §5): "gold" (primary: accent fill, 52 high, radius 10, one per screen), "quiet" (secondary:
     // surface + border, 44 high), "flat" (no box, 44 high), "row" (a 52-high list row), "tab" (game switcher segment, 44
     // high; "on" = selected). Fluent restyles the template's presenter on hover, so the states are set there.
-    void AddStyles()
+    void AddStyles(Styles st)
     {
         Resources["ToggleSwitchFillOn"] = Th.Accent; Resources["ToggleSwitchFillOnPointerOver"] = Th.AccentHover; Resources["ToggleSwitchFillOnPressed"] = Th.AccentPress;
         Resources["ToggleSwitchKnobFillOn"] = Th.OnAccent; Resources["ToggleSwitchKnobFillOnPointerOver"] = Th.OnAccent; Resources["ToggleSwitchKnobFillOnPressed"] = Th.OnAccent;
@@ -323,34 +323,34 @@ public sealed partial class MainWindow : Window
                 s.Setters.Add(new Setter(ContentPresenter.BorderBrushProperty, edge ?? border));
                 return s;
             }
-            Styles.Add(new Style(x => x.OfType<Button>().Class(cls)) { Setters = { new Setter(Button.MinHeightProperty, height), new Setter(Button.CornerRadiusProperty, new CornerRadius(radius)),
+            st.Add(new Style(x => x.OfType<Button>().Class(cls)) { Setters = { new Setter(Button.MinHeightProperty, height), new Setter(Button.CornerRadiusProperty, new CornerRadius(radius)),
                 new Setter(Button.PaddingProperty, pad), new Setter(Button.FontWeightProperty, weight), new Setter(Button.FontSizeProperty, size), new Setter(Button.BackgroundProperty, bg), new Setter(Button.ForegroundProperty, fg),
                 new Setter(Button.BorderBrushProperty, border), new Setter(Button.BorderThicknessProperty, new Thickness(border == Brushes.Transparent ? 0 : 1)),
                 new Setter(Button.VerticalContentAlignmentProperty, VerticalAlignment.Center), new Setter(Button.VerticalAlignmentProperty, VerticalAlignment.Center) } });
             // keyboard / pad focus looks like hover (plus the ring); a framed button's border brightens on both
             var hotEdge = border == Brushes.Transparent ? null : Th.Hot;
-            Styles.Add(Pres(null, bg, fg)); Styles.Add(Pres(":focus-visible", hover, fg, hotEdge)); Styles.Add(Pres(":pointerover", hover, fg, hotEdge)); Styles.Add(Pres(":pressed", pressed, fg, hotEdge));
-            if (offBg == null) Styles.Add(new Style(x => x.OfType<Button>().Class(cls).Class(":disabled")) { Setters = { new Setter(OpacityProperty, 0.45) } });
-            Styles.Add(Pres(":disabled", offBg ?? bg, offFg ?? fg));
+            st.Add(Pres(null, bg, fg)); st.Add(Pres(":focus-visible", hover, fg, hotEdge)); st.Add(Pres(":pointerover", hover, fg, hotEdge)); st.Add(Pres(":pressed", pressed, fg, hotEdge));
+            if (offBg == null) st.Add(new Style(x => x.OfType<Button>().Class(cls).Class(":disabled")) { Setters = { new Setter(OpacityProperty, 0.45) } });
+            st.Add(Pres(":disabled", offBg ?? bg, offFg ?? fg));
         }
         Look("gold", Th.Accent, Th.AccentHover, Th.AccentPress, Th.OnAccent, Brushes.Transparent, 52, 10, new Thickness(28, 0), FontWeight.SemiBold, 17, Th.Surface2, Th.Dim);
         Look("quiet", Th.Surface, Th.Surface2, new SolidColorBrush(Colors.Black, 0.40), Th.Text, Th.Stroke, 44, 10, new Thickness(18, 0), FontWeight.SemiBold, 14);
-        Styles.Add(new Style(x => x.OfType<Button>().Class("quiet").Class("held").Template().OfType<ContentPresenter>()) { Setters = { new Setter(ContentPresenter.BackgroundProperty, Th.Surface2) } });
+        st.Add(new Style(x => x.OfType<Button>().Class("quiet").Class("held").Template().OfType<ContentPresenter>()) { Setters = { new Setter(ContentPresenter.BackgroundProperty, Th.Surface2) } });
         Look("flat", Brushes.Transparent, Th.Surface, Th.Surface2, Th.Dim, Brushes.Transparent, 44, 10, new Thickness(12, 0), FontWeight.SemiBold, 14);
         Look("row", Brushes.Transparent, Th.Surface, Th.Surface2, Th.Text, Brushes.Transparent, 52, 0, new Thickness(16, 0), FontWeight.Normal, 14);
         Look("tab", Brushes.Transparent, Th.Surface, Th.Surface2, Th.Dim, Brushes.Transparent, 44, 9, new Thickness(8, 0), FontWeight.Medium, 14);
-        Styles.Add(new Style(x => x.OfType<Button>().Class("gold")) { Setters = { new Setter(MinWidthProperty, 168.0), new Setter(Button.HorizontalContentAlignmentProperty, HorizontalAlignment.Center) } });
-        Styles.Add(new Style(x => x.OfType<Button>().Class("row")) { Setters = { new Setter(Button.HorizontalAlignmentProperty, HorizontalAlignment.Stretch), new Setter(Button.HorizontalContentAlignmentProperty, HorizontalAlignment.Stretch) } });
-        Styles.Add(new Style(x => x.OfType<Button>().Class("tab")) { Setters = { new Setter(Button.HorizontalAlignmentProperty, HorizontalAlignment.Stretch), new Setter(Button.HorizontalContentAlignmentProperty, HorizontalAlignment.Center) } });
-        Styles.Add(new Style(x => x.OfType<Button>().Class("tab").Class("on").Template().OfType<ContentPresenter>()) { Setters = {
+        st.Add(new Style(x => x.OfType<Button>().Class("gold")) { Setters = { new Setter(MinWidthProperty, 168.0), new Setter(Button.HorizontalContentAlignmentProperty, HorizontalAlignment.Center) } });
+        st.Add(new Style(x => x.OfType<Button>().Class("row")) { Setters = { new Setter(Button.HorizontalAlignmentProperty, HorizontalAlignment.Stretch), new Setter(Button.HorizontalContentAlignmentProperty, HorizontalAlignment.Stretch) } });
+        st.Add(new Style(x => x.OfType<Button>().Class("tab")) { Setters = { new Setter(Button.HorizontalAlignmentProperty, HorizontalAlignment.Stretch), new Setter(Button.HorizontalContentAlignmentProperty, HorizontalAlignment.Center) } });
+        st.Add(new Style(x => x.OfType<Button>().Class("tab").Class("on").Template().OfType<ContentPresenter>()) { Setters = {
             new Setter(ContentPresenter.BackgroundProperty, Th.Surface2), new Setter(ContentPresenter.ForegroundProperty, Th.Text), new Setter(ContentPresenter.BorderBrushProperty, Th.Stroke),
             new Setter(ContentPresenter.BorderThicknessProperty, new Thickness(1)) } });
-        Styles.Add(new Style(x => x.OfType<Button>().Class("tab").Class("on")) { Setters = { new Setter(Button.FontWeightProperty, FontWeight.SemiBold) } });
-        Styles.Add(new Style(x => x.OfType<ComboBox>()) { Setters = { new Setter(MinHeightProperty, 44.0), new Setter(ComboBox.CornerRadiusProperty, new CornerRadius(10)) } });
-        Styles.Add(new Style(x => x.OfType<MenuItem>()) { Setters = { new Setter(MinHeightProperty, 40.0) } });
-        Interaction();
+        st.Add(new Style(x => x.OfType<Button>().Class("tab").Class("on")) { Setters = { new Setter(Button.FontWeightProperty, FontWeight.SemiBold) } });
+        st.Add(new Style(x => x.OfType<ComboBox>()) { Setters = { new Setter(MinHeightProperty, 44.0), new Setter(ComboBox.CornerRadiusProperty, new CornerRadius(10)) } });
+        st.Add(new Style(x => x.OfType<MenuItem>()) { Setters = { new Setter(MinHeightProperty, 40.0) } });
+        Interaction(st);
         // Focus ring (proposal §6): 3 px in the title colour, 3 px outside the control, whenever focus came by keyboard or pad.
-        Styles.Add(new Style(x => x.Is<Control>()) { Setters = { new Setter(FocusAdornerProperty, new FuncTemplate<Control>(() =>
+        st.Add(new Style(x => x.Is<Control>()) { Setters = { new Setter(FocusAdornerProperty, new FuncTemplate<Control>(() =>
         {
             var ring = new Border { BorderBrush = Th.Title, BorderThickness = new Thickness(3), CornerRadius = new CornerRadius(13), Margin = new Thickness(-6), IsHitTestVisible = false };
             ring.SetValue(AdornerLayer.IsClipEnabledProperty, false);   // the ring sits outside the control's bounds
@@ -362,19 +362,19 @@ public sealed partial class MainWindow : Window
     // press darkens and scales to 0.97, the primary lifts 1 px, the pointing hand over what can be clicked, list items lit
     // in the title gold; a list grows out of its control (160 ms) and a new banner slides in (200 ms). With reduce motion
     // (Motion) only the colours change.
-    void Interaction()
+    void Interaction(Styles st)
     {
         var hand = new Cursor(StandardCursorType.Hand);
         foreach (var t in new[] { typeof(Button), typeof(MenuItem), typeof(ComboBox), typeof(ComboBoxItem), typeof(ToggleSwitch) })
-            Styles.Add(new Style(x => x.Is(t).Not(y => y.Class(":disabled"))) { Setters = { new Setter(CursorProperty, hand) } });
-        Styles.Add(new Style(x => x.OfType<Button>().Class("gold").Class(":pointerover")) { Setters = { new Setter(RenderTransformProperty, TransformOperations.Parse(Motion.Reduced ? "none" : "translateY(-1px)")) } });   // the primary lifts
-        Styles.Add(new Style(x => x.OfType<Button>().Class("gold").Class(":pointerover")) { Setters = { new Setter(RenderTransformProperty, TransformOperations.Parse(Motion.Reduced ? "none" : "translateY(-1px)")) } });   // the primary lifts
-        Styles.Add(new Style(x => x.OfType<Button>().Class(":pressed")) { Setters = { new Setter(RenderTransformProperty, TransformOperations.Parse(Motion.Reduced ? "none" : "scale(0.97)")) } });
-        Styles.Add(new Style(x => x.OfType<Button>().Class("row").Class(":pressed")) { Setters = { new Setter(RenderTransformProperty, TransformOperations.Parse("none")) } });   // a full-width row: the fill says it
+            st.Add(new Style(x => x.Is(t).Not(y => y.Class(":disabled"))) { Setters = { new Setter(CursorProperty, hand) } });
+        st.Add(new Style(x => x.OfType<Button>().Class("gold").Class(":pointerover")) { Setters = { new Setter(RenderTransformProperty, TransformOperations.Parse(Motion.Reduced ? "none" : "translateY(-1px)")) } });   // the primary lifts
+        st.Add(new Style(x => x.OfType<Button>().Class("gold").Class(":pointerover")) { Setters = { new Setter(RenderTransformProperty, TransformOperations.Parse(Motion.Reduced ? "none" : "translateY(-1px)")) } });   // the primary lifts
+        st.Add(new Style(x => x.OfType<Button>().Class(":pressed")) { Setters = { new Setter(RenderTransformProperty, TransformOperations.Parse(Motion.Reduced ? "none" : "scale(0.97)")) } });
+        st.Add(new Style(x => x.OfType<Button>().Class("row").Class(":pressed")) { Setters = { new Setter(RenderTransformProperty, TransformOperations.Parse("none")) } });   // a full-width row: the fill says it
         // the gold primary: a soft shadow that grows on hover
-        Styles.Add(new Style(x => x.OfType<Button>().Class("gold").Template().OfType<ContentPresenter>()) { Setters = { new Setter(ContentPresenter.BoxShadowProperty, BoxShadows.Parse("0 6 18 0 #59000000")) } });
-        Styles.Add(new Style(x => x.OfType<Button>().Class("gold").Class(":pointerover").Template().OfType<ContentPresenter>()) { Setters = { new Setter(ContentPresenter.BoxShadowProperty, BoxShadows.Parse("0 8 24 0 #73000000")) } });
-        Styles.Add(new Style(x => x.OfType<Button>().Class("gold").Class(":disabled").Template().OfType<ContentPresenter>()) { Setters = { new Setter(ContentPresenter.BoxShadowProperty, BoxShadows.Parse("0 0 0 0 #00000000")) } });
+        st.Add(new Style(x => x.OfType<Button>().Class("gold").Template().OfType<ContentPresenter>()) { Setters = { new Setter(ContentPresenter.BoxShadowProperty, BoxShadows.Parse("0 6 18 0 #59000000")) } });
+        st.Add(new Style(x => x.OfType<Button>().Class("gold").Class(":pointerover").Template().OfType<ContentPresenter>()) { Setters = { new Setter(ContentPresenter.BoxShadowProperty, BoxShadows.Parse("0 8 24 0 #73000000")) } });
+        st.Add(new Style(x => x.OfType<Button>().Class("gold").Class(":disabled").Template().OfType<ContentPresenter>()) { Setters = { new Setter(ContentPresenter.BoxShadowProperty, BoxShadows.Parse("0 0 0 0 #00000000")) } });
         // list items (Menu, Language, Start map) and the drop-down boxes themselves
         foreach (var k in new[] { "MenuFlyoutItemBackgroundPointerOver", "ComboBoxItemBackgroundPointerOver", "ComboBoxItemBackgroundSelectedPointerOver" }) Resources[k] = Th.ItemHover;
         foreach (var k in new[] { "MenuFlyoutItemBackgroundPressed", "ComboBoxItemBackgroundPressed", "ComboBoxItemBackgroundSelectedPressed", "ComboBoxItemBackgroundSelected" }) Resources[k] = Th.ItemPress;
@@ -382,12 +382,12 @@ public sealed partial class MainWindow : Window
             "ComboBoxItemForegroundSelected", "ComboBoxItemForegroundSelectedPointerOver", "ComboBoxItemForegroundSelectedPressed" }) Resources[k] = Th.Text;
         Resources["ComboBoxBackgroundPointerOver"] = Th.Surface2; Resources["ComboBoxBackgroundPressed"] = new SolidColorBrush(Colors.Black, 0.40);
         Resources["ComboBoxBorderBrushPointerOver"] = Th.Hot; Resources["ComboBoxBorderBrushPressed"] = Th.Hot;
-        Styles.Add(new Style(x => x.OfType<ComboBox>().Class(":focus-visible")) { Setters = { new Setter(BackgroundProperty, Th.Surface2), new Setter(BorderBrushProperty, Th.Hot) } });
+        st.Add(new Style(x => x.OfType<ComboBox>().Class(":focus-visible")) { Setters = { new Setter(BackgroundProperty, Th.Surface2), new Setter(BorderBrushProperty, Th.Hot) } });
         // a long drop-down (Start map, Language) scrolls within MaxDropDownHeight; its scroll bar always shows; typing jumps
-        Styles.Add(new Style(x => x.OfType<ComboBox>().Template().OfType<ScrollViewer>()) { Setters = { new Setter(ScrollViewer.AllowAutoHideProperty, false) } });
-        Styles.Add(new Style(x => x.OfType<ComboBox>()) { Setters = { new Setter(ComboBox.IsTextSearchEnabledProperty, true) } });
-        Styles.Add(new Style(x => x.OfType<ComboBoxItem>()) { Setters = { new Setter(MinHeightProperty, 36.0), new Setter(VerticalContentAlignmentProperty, VerticalAlignment.Center) } });
-        Styles.Add(new Style(x => x.OfType<ComboBoxItem>().Class(":selected")) { Setters = { new Setter(FontWeightProperty, FontWeight.SemiBold) } });
+        st.Add(new Style(x => x.OfType<ComboBox>().Template().OfType<ScrollViewer>()) { Setters = { new Setter(ScrollViewer.AllowAutoHideProperty, false) } });
+        st.Add(new Style(x => x.OfType<ComboBox>()) { Setters = { new Setter(ComboBox.IsTextSearchEnabledProperty, true) } });
+        st.Add(new Style(x => x.OfType<ComboBoxItem>()) { Setters = { new Setter(MinHeightProperty, 36.0), new Setter(VerticalContentAlignmentProperty, VerticalAlignment.Center) } });
+        st.Add(new Style(x => x.OfType<ComboBoxItem>().Class(":selected")) { Setters = { new Setter(FontWeightProperty, FontWeight.SemiBold) } });
         // Colours switch at once: a BrushTransition alone was seen to stall part way (Avalonia 11.3, headless), which would leave
         // a half-lit state; the movement (press 0.97, the primary's 1 px lift) is the animated part.
         if (!_handlers) TemplateAppliedEvent.AddClassHandler<Button>((b, _) =>   // a class handler: once per process
@@ -396,17 +396,17 @@ public sealed partial class MainWindow : Window
         });
         _handlers = true;
         if (Motion.Reduced) return;
-        Styles.Add(new Style(x => x.OfType<Glyph>().Class("spin").PropertyEquals(IsVisibleProperty, true)) { Animations = { new Animation { Duration = TimeSpan.FromMilliseconds(900), IterationCount = IterationCount.Infinite, Children = {
+        st.Add(new Style(x => x.OfType<Glyph>().Class("spin").PropertyEquals(IsVisibleProperty, true)) { Animations = { new Animation { Duration = TimeSpan.FromMilliseconds(900), IterationCount = IterationCount.Infinite, Children = {
             new KeyFrame { Cue = new Cue(0), Setters = { Turn("rotate(0deg)") } },
             new KeyFrame { Cue = new Cue(1), Setters = { Turn("rotate(360deg)") } } } } } });
         // entrances: a list from its control (the Menu from its right edge, a drop-down from its top), a banner from above
         Animation Enter(double ms, string from) => new() { Duration = TimeSpan.FromMilliseconds(ms), Easing = new CubicEaseOut(), FillMode = FillMode.Forward, Children = {
             new KeyFrame { Cue = new Cue(0), Setters = { new Setter(OpacityProperty, 0.0), Turn(from) } },
             new KeyFrame { Cue = new Cue(1), Setters = { new Setter(OpacityProperty, 1.0), Turn("none") } } } };
-        Styles.Add(new Style(x => x.OfType<MenuFlyoutPresenter>()) { Setters = { new Setter(RenderTransformOriginProperty, new RelativePoint(1, 0, RelativeUnit.Relative)) }, Animations = { Enter(160, "translateY(-6px) scale(0.94)") } });
-        Styles.Add(new Style(x => x.OfType<ComboBox>().Class(":dropdownopen").Template().OfType<Border>().Name("PopupBorder")) { Setters = { new Setter(RenderTransformOriginProperty, new RelativePoint(0.5, 0, RelativeUnit.Relative)) },
+        st.Add(new Style(x => x.OfType<MenuFlyoutPresenter>()) { Setters = { new Setter(RenderTransformOriginProperty, new RelativePoint(1, 0, RelativeUnit.Relative)) }, Animations = { Enter(160, "translateY(-6px) scale(0.94)") } });
+        st.Add(new Style(x => x.OfType<ComboBox>().Class(":dropdownopen").Template().OfType<Border>().Name("PopupBorder")) { Setters = { new Setter(RenderTransformOriginProperty, new RelativePoint(0.5, 0, RelativeUnit.Relative)) },
             Animations = { Enter(160, "translateY(-6px) scale(0.94)") } });
-        Styles.Add(new Style(x => x.OfType<Border>().Class("banner").PropertyEquals(IsVisibleProperty, true)) { Animations = { Enter(200, "translateY(-6px)") } });
+        st.Add(new Style(x => x.OfType<Border>().Class("banner").PropertyEquals(IsVisibleProperty, true)) { Animations = { Enter(200, "translateY(-6px)") } });
     }
 
     static bool _handlers;
@@ -500,15 +500,24 @@ public sealed partial class MainWindow : Window
         var back = _modsBack; Back(back);
         back.Click += (_, _) => { _modsOpen = false; Refresh(); };
         var openMods = new Button { Name = "OpenModsButton", Content = "Open Mods Folder" }; var refresh = new Button { Name = "RefreshMods", Content = "Refresh" };
-        openMods.Classes.Add("quiet"); refresh.Classes.Add("quiet");
-        openMods.Click += (_, _) => OpenFolder(Path.Combine(_game, "Mods"));
+        Button addMod = new() { Name = "AddModButton", Content = "Add Mod…" }, addFolder = new() { Name = "AddModFolderButton", Content = "Add Folder…" };
+        foreach (var b in new[] { addMod, addFolder, openMods, refresh }) b.Classes.Add("quiet");
+        openMods.Click += (_, _) => { if (ModsReady) OpenFolder(Path.Combine(ModsGame, "Mods")); };
         refresh.Click += (_, _) => Refresh();
+        addMod.Click += async (_, _) =>
+        {
+            foreach (var f in await StorageProvider.OpenFilePickerAsync(new() { AllowMultiple = true, Title = "Mod archive (.zip, .7z, .rar)" })) if (f.TryGetLocalPath() is { } p) AddMod(p);
+        };
+        addFolder.Click += async (_, _) =>
+        {
+            foreach (var f in await StorageProvider.OpenFolderPickerAsync(new() { Title = "Mod folder" })) if (f.TryGetLocalPath() is { } p) AddMod(p);
+        };
         _modsHint.Foreground = Th.Dim; _noMods.Foreground = Th.Dim; ((TextBlock)_modsNotice.Children[1]).Foreground = Th.Dim;
         ((Border)_modsNotice.Children[0]).BorderBrush = Th.Warn; ((TextBlock)((Border)_modsNotice.Children[0]).Child).Foreground = Th.Warn;
         _modsPage.Children.Add(SubHeader(back, "Mods"));
         _modsPage.Children.Add(Well(_noMods, _modsList));
         _modsPage.Children.Add(_modsNotice);
-        _modsPage.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { openMods, refresh } });
+        _modsPage.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { addMod, addFolder, openMods, refresh } });
         _modsPage.Children.Add(_modsHint);
     }
 
@@ -527,7 +536,7 @@ public sealed partial class MainWindow : Window
             Child = new TextBlock { Text = "i", FontSize = 10, FontWeight = FontWeight.Bold, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center } },
         new TextBlock { Name = "ModsNoticeText", FontSize = 12, TextWrapping = TextWrapping.Wrap, MaxWidth = 500 } } };
     readonly TextBlock _modsHint = new() { Name = "ModsHint", Text = ModsIni.OrderHint, FontSize = 12, TextWrapping = TextWrapping.Wrap },
-        _noMods = new() { Name = "NoMods", Text = "No mods yet. Put a mod's folder into the Mods folder; it shows up here to switch on and off.", FontSize = 13, TextWrapping = TextWrapping.Wrap };
+        _noMods = new() { Name = "NoMods", Text = ModsIni.NoMods, FontSize = 13, TextWrapping = TextWrapping.Wrap };
 
     // The Menu (proposal §2): "This game" (per tab; Remove game its last item, in red), "Launcher".
     readonly List<(MenuItem Item, Func<bool> Visible, Func<bool> Enabled)> _menuItems = new();
@@ -552,7 +561,7 @@ public sealed partial class MainWindow : Window
         M("InstallAgain", "Install again from other files…", () => _ = PickFiles(), () => _hp2Tab || !_own, () => !_running && !_playing);
         M("Hp2Folder", "Change game folder…", () => _ = Hp2ChooseFolder(), () => _hp2Tab && !Hp2Installed, () => !_playing && !_running);
         M("ResetSettings", "Reset settings…", () => _ = ResetSettings(), hp1, () => Installed);
-        M("ResetPad", "Reset gamepad buttons…", () => _ = ResetPad(), hp1, () => Installed && !_playing && PadReset.Rebound(_game) > 0);
+        M("ResetPad", "Reset gamepad buttons…", () => _ = ResetPad(), hp1, () => Installed && !_playing);
         var rm = M("RemoveGame", "Remove game…", () => _ = RemoveGame(), null, () => (_hp2Tab ? Hp2Installed : !_own && Installed) && !_running && !_playing);
         rm.Foreground = Th.Err;
         fly.Items.Add(new Separator());
@@ -593,14 +602,9 @@ public sealed partial class MainWindow : Window
             if (_languages.Count > 1)
             {
                 _editionText.Text = editionDisplay.Name;
-                _editionChip.Text = editionDisplay.Tier;
                 _editionDetail.Text = editionDisplay.Detail;
             }
             _editionDetail.IsVisible = _languages.Count > 1 && !Setup;
-            if (EditionLabel.Quiet(editionDisplay.Tier)) _chipBox.IsVisible = _editionChip.IsVisible = false;
-            ToolTip.SetTip(_chipBox, editionDisplay.Tier == "different data"
-                ? "These files differ from the engine family's reference manifest. This alone does not establish that your disc was modified."
-                : null);
             string selected = HPEngine.Packaging.GameLanguage.Selected(_game);
             var labels = _languages.Select(l => l.Label).Prepend(HPEngine.Packaging.GameLanguage.DefaultLabel).ToList();
             int index = _languages.FindIndex(l => l.Code == selected) + 1;
@@ -613,8 +617,7 @@ public sealed partial class MainWindow : Window
         { _error = "Could not read game languages: " + e.Message; UpdateBanners(); }
         finally { _loadingLanguage = false; }
         ((Control)((Panel)_languageRow.Parent).Children[1]).IsVisible = _languageRow.IsVisible;
-        _mods = Installed ? ModsIni.Load(_game) : new List<ModEntry>();
-        RebuildMods();
+        LoadMods();
         KeepFocus();
     }
 
@@ -622,16 +625,12 @@ public sealed partial class MainWindow : Window
     // HP2: its install root). Both tabs, one look.
     void RefreshSetup(bool installed, bool setup, bool own)
     {
-        // "US 1.53: exact" -> name in the chip + the tier (exact: verified, green; supported: gold; others the warning colour with the tier text)
+        // "US 1.53: exact" -> the name only (author 2026-11-20: no tier, no verified/modified wording); the chip is shown only for the player's own folder
         var parts = (_edition ?? "").Split(": ");
-        var tier = parts.Length > 1 ? parts[^1] : "";
         _editionText.Text = _edition == null ? (own ? "Your game folder: " + _game : "Installed") : parts.Length > 1 ? string.Join(": ", parts[..^1]) : _edition;
-        var (cc, label) = tier switch { "exact" => (Th.Ok, "verified"), "supported" => (Th.Accent, "supported"), _ => (Th.Warn, tier.Length == 0 ? "unknown" : tier) };
         bool steps = _running || _step >= 0;
-        bool quiet = EditionLabel.Quiet(tier);
-        _chipBox.IsVisible = (!setup || steps) && (_edition != null ? !quiet : own); _chipBox.Background = _edition != null ? Th.Surface : null; _chipBox.BorderThickness = new Thickness(_edition != null ? 1 : 0);
+        _chipBox.IsVisible = (!setup || steps) && _edition == null && own; _chipBox.Background = _edition != null ? Th.Surface : null; _chipBox.BorderThickness = new Thickness(_edition != null ? 1 : 0);
         _editionText.Foreground = _edition != null ? Th.Text : Th.Dim;
-        _editionChip.IsVisible = _edition != null && !quiet && (!setup || steps); _editionChip.Text = label; _editionChip.Foreground = cc;
         UpdateBanners();
         _inputsList.Children.Clear();
         foreach (var i in _inputs) _inputsList.Children.Add(new TextBlock { Text = Path.GetFileName(i.TrimEnd('/', '\\')) is { Length: > 0 } n ? n : i, TextTrimming = TextTrimming.CharacterEllipsis, HorizontalAlignment = HorizontalAlignment.Center });
@@ -676,7 +675,7 @@ public sealed partial class MainWindow : Window
 
     void UpdateBanners()
     {
-        _warningText.Text = _warning; _warningBanner.IsVisible = _warning != null; _reportButton.IsVisible = _report != null;   // HP1Setup's: the selected tab's (reset on a tab switch)
+        _warningText.Text = _warning; _warningBanner.IsVisible = _warning != null;   // a run's override miss or an unreadable setup line: the selected tab's (reset on a tab switch)
         // An unfinished rollback of an earlier update stays on screen while its marker exists (SelfUpdate.IncompleteNotice).
         var error = GameScope.Error(_hp2Tab, _error, _hp2Error, _launcherError) ?? SelfUpdate.IncompleteNotice(_appDir);
         _errorText.Text = error; _errorBanner.IsVisible = error != null;
@@ -704,17 +703,20 @@ public sealed partial class MainWindow : Window
         return b;
     }
 
+    void LoadMods() { _mods = ModsReady ? ModsIni.Load(ModsGame, ModsData) : new List<ModEntry>(); RebuildMods(); }
+
     void RebuildMods()
     {
         _modsList.Children.Clear();
-        var notice = Installed ? ModsNotice.Lines(_game, _mods).Concat(ModsIni.Misplaced(_game, _mods)).Concat(ModsIni.Conflicts(_game)).ToList() : new List<string>();
+        // HP1's slots name their mod set (ModsNotice); HP2's slot notice is not ported (what HP2 does with such a save is not established)
+        var notice = ModsReady ? (_hp2Tab ? new List<string>() : ModsNotice.Lines(_game, _mods)).Concat(ModsIni.Misplaced(ModsGame, _mods)).Concat(ModsIni.Conflicts(ModsGame, ModsData)).ToList() : new List<string>();
         _modsNotice.IsVisible = notice.Count > 0;
         ((TextBlock)_modsNotice.Children[1]).Text = string.Join("\n", notice);
         _noMods.IsVisible = _mods.Count == 0; _modsHint.IsVisible = _mods.Any(m => m.Enabled);
         _modsValue.Text = _mods.Count == 0 ? "None" : $"{_mods.Count(m => m.Enabled)} of {_mods.Count} on"; _modsAlert.IsVisible = notice.Count > 0;
         // The start maps of the mods as they are enabled now; the chosen one stays while it is still there, else "Game".
         var chosen = SelectedMap;
-        _addedMaps = _play2.IsVisible ? StartMap.Added(_game) : new();
+        _addedMaps = _play2.IsVisible && !_hp2Tab ? StartMap.Added(_game) : new();
         _startMap.ItemsSource = StartMap.Labels(_addedMaps).Prepend(StartMap.Game).ToList();
         _startMap.SelectedIndex = _addedMaps.FindIndex(m => m.Map == chosen) + 1;
         _startMapBox.IsVisible = _addedMaps.Count > 0; _startMap.IsEnabled = !_playing;
@@ -738,19 +740,45 @@ public sealed partial class MainWindow : Window
             if (m.Enabled) name.Children.Add(new TextBlock { Name = "ModOrder_" + m.Name, Text = (i + 1).ToString(), FontSize = 11, Foreground = Th.Dim, MinWidth = 12, VerticalAlignment = VerticalAlignment.Center });
             name.Children.Add(new TextBlock { Text = m.Name, Foreground = m.Enabled ? Th.Text : Th.Dim, TextTrimming = TextTrimming.CharacterEllipsis });
             if (!m.Present) name.Children.Add(new TextBlock { Text = "folder missing", FontSize = 12, Foreground = Th.Warn, VerticalAlignment = VerticalAlignment.Center });
-            var row = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto"), MinHeight = 44 };
-            row.Children.Add(sw); Grid.SetColumn(name, 1); row.Children.Add(name);
+            Control label = name;
+            if (_hp2Tab && ModsIni.NewerEngine(ModsGame, m) is string newer)   // HP2: under the mod, the line Play refuses with
+                label = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 4), Children = { name,
+                    new TextBlock { Name = "ModNewer_" + m.Name, Text = newer, FontSize = 12, Foreground = Th.Warn, TextWrapping = TextWrapping.Wrap } } };
+            var remove = Chevron("Remove_" + m.Name, "M3,3 L11,11 M11,3 L3,11", !_playing && m.Present);
+            Avalonia.Automation.AutomationProperties.SetName(remove, "Remove " + m.Name); ToolTip.SetTip(remove, "Remove " + m.Name);
+            remove.Click += (_, _) => _ = RemoveMod(m.Name);
+            var row = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto,Auto"), MinHeight = 44 };
+            row.Children.Add(sw); Grid.SetColumn(label, 1); row.Children.Add(label);
             if (m.Enabled) { Grid.SetColumn(up, 2); row.Children.Add(up); Grid.SetColumn(down, 3); row.Children.Add(down); }
+            if (m.Present) { Grid.SetColumn(remove, 4); row.Children.Add(remove); }
             _modsList.Children.Add(new Border { CornerRadius = new CornerRadius(8), Padding = new Thickness(8, 0), Background = m.Enabled ? Th.Surface : null, Child = row });
         }
     }
 
     void SaveMods()
     {
-        try { ModsIni.Save(_game, _mods); _error = null; }
-        catch (Exception e) { _error = "Could not save Mods.ini: " + e.Message; }
-        _mods = Installed ? ModsIni.Load(_game) : _mods;
-        RebuildMods(); Refresh2();
+        if (!ModsReady) return;
+        try { ModsIni.Save(ModsGame, _mods, ModsData); SetupError(null); }
+        catch (Exception e) { SetupError("Could not save Mods.ini: " + e.Message); }
+        LoadMods(); Refresh2();
+    }
+
+    // Add (button or a drop on the Mods page): ModsIni.Add, the mod listed switched off.
+    void AddMod(string source)
+    {
+        if (!ModsReady || _playing) return;
+        SetupError(ModsIni.Add(ModsGame, source));
+        Refresh();
+    }
+
+    async Task RemoveMod(string name)
+    {
+        if (!ModsReady || _playing) return;
+        var fate = OperatingSystem.IsWindows() ? "Its folder is moved to the Recycle Bin." : "Its folder is deleted permanently.";
+        if (!await Confirm("Remove mod?", $"Remove the mod {name}? {fate}", "Remove")) return;
+        try { ModsIni.Remove(ModsGame, ModsData, _mods, name, OperatingSystem.IsWindows() ? Recycle : null); SetupError(null); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { SetupError("Could not remove the mod: " + e.Message); }
+        Refresh();
     }
     void Refresh2() => UpdateBanners();
 
@@ -846,7 +874,7 @@ public sealed partial class MainWindow : Window
     {
         if ((_own && !_hp2Tab) || _inputs.Count == 0 || _running || _playing) return;
         if (!File.Exists(Exe("HP1Setup"))) { SetupError($"HP1Setup was not found (the HPEngine folder must stay next to the Launcher) ({Exe("HP1Setup")})."); Refresh(); return; }
-        _running = true; SetupError(null); _warning = null; _report = null; _step = 0; _progress = 0;
+        _running = true; SetupError(null); _warning = null; _step = 0; _progress = 0;
         var psi = new ProcessStartInfo(Exe("HP1Setup")) { RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true, CreateNoWindow = true, UseShellExecute = false };
         if (_hp2Tab) { psi.ArgumentList.Add("--game"); psi.ArgumentList.Add("hp2"); }
         psi.ArgumentList.Add("--dest"); psi.ArgumentList.Add(_hp2Tab ? Hp2Game : _game);
@@ -887,8 +915,7 @@ public sealed partial class MainWindow : Window
             case SetupKind.Step: _step = l.Index; _progress = 0; break;
             case SetupKind.Progress: _progress = l.Progress; break;
             case SetupKind.Error: SetupError(l.Text); _edition = Edition(); break;   // the installed edition is still the marker's
-            case SetupKind.Warning: _warning = l.Text; break;
-            case SetupKind.Report: _report = l.Text; break;
+            case SetupKind.Warning: case SetupKind.Report: break;   // log only (author 2026-11-20): every copy runs
             case SetupKind.Edition: _edition = l.Text; break;
             case SetupKind.Done: _step = SetupProtocol.Steps.Length; _inputs.Clear(); _edition = Edition(); break;
             case SetupKind.Malformed:
@@ -902,7 +929,7 @@ public sealed partial class MainWindow : Window
     void Play()
     {
         if (_playing) return;
-        if (Installed) { _mods = ModsIni.Load(_game); RebuildMods(); }   // the folders as they are now
+        LoadMods();   // the folders as they are now
         if (ModsIni.Missing(_mods) is string gone) { _error = gone; Refresh(); return; }
         if (!File.Exists(Exe("HPEngine"))) { _error = $"HPEngine was not found (the HPEngine folder must stay next to the Launcher) ({Exe("HPEngine")})."; Refresh(); return; }
         try
@@ -925,6 +952,7 @@ public sealed partial class MainWindow : Window
                 Dispatcher.UIThread.Post(() =>
                 {
                     _playing = false;
+                    lock (log) _warning = EngineError.OverrideWarning(said);
                     if (p.ExitCode != 0) lock (log) _error = _runError = EngineError.Banner(said, p.ExitCode);
                     Refresh();
                 });
@@ -977,7 +1005,7 @@ public sealed partial class MainWindow : Window
             if (hp2 && all.IsChecked == true)
                 foreach (var dir in new[] { Hp2FrontEnd.SaveDir(_game), GameScope.DataDir(_game, true) }.Where(Directory.Exists))
                     if (OperatingSystem.IsWindows()) Recycle(dir); else GameRemoval.Walk(dir, false);
-            SetupError(null); _warning = null; _report = null; _step = -1; _edition = null;
+            SetupError(null); _warning = null; _step = -1; _edition = null;
         }
         catch (Exception e) { SetupError("Could not remove the game: " + e.Message); }
         if (hp2) { _hp2Page = "Main"; Hp2Scan(); }
@@ -1010,7 +1038,7 @@ public sealed partial class MainWindow : Window
     Window Dialog(string title, double width)
     {
         var d = new Window { Title = title, Width = width, SizeToContent = SizeToContent.Height, WindowStartupLocation = WindowStartupLocation.CenterOwner, CanResize = false, Background = new SolidColorBrush(Th.Popup.Color), Foreground = Th.Text, FontSize = 14 };
-        foreach (var s in Styles) d.Styles.Add(s);
+        AddStyles(d.Styles);   // a Style has one owner (Avalonia 11): the dialog gets its own copies
         return d;
     }
 

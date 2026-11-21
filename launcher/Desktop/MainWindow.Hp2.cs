@@ -60,7 +60,7 @@ public sealed partial class MainWindow
     void SwitchTo(bool hp2)
     {
         if (_hp2Tab == hp2) return;
-        _hp2Tab = hp2; _inputs.Clear(); _step = -1; _warning = null; _report = null; _edition = Edition();
+        _hp2Tab = hp2; _inputs.Clear(); _step = -1; _warning = null; _edition = Edition();
     }
 
     // The dialog's OnInitDialog: the slot scan (MakeDirectory, used/unused, an unused slot cleared) — each time the menu
@@ -105,6 +105,13 @@ public sealed partial class MainWindow
             RefreshSetup(Hp2Installed, true, false);
             return;
         }
+        LoadMods();
+        if (_modsOpen)   // the Mods page (MainWindow.BuildModsPage), HP2's folders (ModsGame, ModsData)
+        {
+            _hp2Panel.IsVisible = _hero.IsVisible = false; _modsPage.IsVisible = true; _primary = _modsBack;
+            UpdateBanners();
+            return;
+        }
         var (st, col, icon) = _playing ? ("Playing", Th.Ok, Check) : ("Ready to play", Th.Ok, Check);
         Status(st, col, icon);
         RefreshSetup(Hp2Installed, false, false);   // the edition chip (an installed copy)
@@ -142,6 +149,18 @@ public sealed partial class MainWindow
                 if (name == primary) _primary = b;
             }
             _hp2Panel.Children.Add(row);
+            // Mods: a summary row that opens the Mods page, as HP1's (BuildReadyPanel)
+            var mods = new Button { Name = "Hp2ModsRow", Margin = new Thickness(0, 8, 0, 0) }; mods.Classes.Add("row");
+            var line = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto"), ColumnSpacing = 8 };
+            line.Children.Add(new TextBlock { Text = "Mods", VerticalAlignment = VerticalAlignment.Center });
+            var alert = new Border { Width = 8, Height = 8, CornerRadius = new CornerRadius(4), VerticalAlignment = VerticalAlignment.Center, Background = Th.Warn, IsVisible = _modsAlert.IsVisible };
+            var value = new TextBlock { Name = "Hp2ModsSummary", Text = _modsValue.Text, FontSize = 13, Foreground = Th.Dim, VerticalAlignment = VerticalAlignment.Center };
+            var chev = Glyph24(Chev, Th.Dim, 16);
+            Grid.SetColumn(alert, 1); Grid.SetColumn(value, 2); Grid.SetColumn(chev, 3);
+            line.Children.Add(alert); line.Children.Add(value); line.Children.Add(chev);
+            mods.Content = line;
+            mods.Click += (_, _) => { _modsOpen = true; Refresh(); };
+            _hp2Panel.Children.Add(new Border { Background = Th.Well, BorderBrush = Th.Stroke, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(12), ClipToBounds = true, Child = mods });
         }
         else
         {
@@ -200,6 +219,8 @@ public sealed partial class MainWindow
     void Hp2Play(string root, string cmdline)
     {
         if (_playing) return;
+        LoadMods();   // the folders as they are now; an enabled mod whose folder is gone stops the engine (exit code 5)
+        if ((ModsIni.Missing(_mods) ?? ModsIni.NewerEngine(root, _mods)) is string gone) { _hp2Error = gone; Refresh(); return; }
         if (!File.Exists(Exe("HPEngine"))) { _hp2Error = $"HPEngine was not found (the HPEngine folder must stay next to the Launcher) ({Exe("HPEngine")})."; Refresh(); return; }
         try
         {
@@ -221,6 +242,7 @@ public sealed partial class MainWindow
                 Dispatcher.UIThread.Post(() =>
                 {
                     _playing = false;
+                    lock (log) _warning = EngineError.OverrideWarning(said);
                     if (p.ExitCode != 0) lock (log) _hp2Error = _hp2RunError = EngineError.Banner(said, p.ExitCode);
                     _hp2Page = "Main"; Hp2Scan(); Refresh();
                 });

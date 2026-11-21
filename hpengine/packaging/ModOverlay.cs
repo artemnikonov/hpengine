@@ -47,10 +47,10 @@ namespace HPEngine.Packaging
         public const string WorkDirName = "modroot";
 
         // Install directories that are not game data: never linked into the working copy.
-        static readonly string[] NotGameData = { ModsDirName, InstallRoot.DataDirName, "HPEngine" };
+        static readonly string[] NotGameData = ModInstall.NotGameData;
 
         public sealed record Result(string GameRoot, IReadOnlyList<string> Active, int Replaced, int Added,
-            IReadOnlyList<string> Ignored, IReadOnlyList<string> Misplaced);
+            IReadOnlyList<string> Ignored, IReadOnlyList<string> Misplaced, IReadOnlyList<string> Newer = null);
 
         // The enabled mod names from <data>/Mods.ini, in order; none when the file is missing.
         public static List<string> Enabled(string dataDir)
@@ -114,7 +114,20 @@ namespace HPEngine.Packaging
                     }
                     Link(dest, file);
                 }
-            return new Result(work, enabled, replaced, added, ignored, misplaced);
+            return new Result(work, enabled, replaced, added, ignored, misplaced, Newer(install, mods.Skip(1)));
+        }
+
+        // The enabled mods' Unreal packages saved with a newer package version than the install's System/Engine.u (e.g. HP2
+        // maps made with a later community engine: versions 93..110 against the retail 79), as "<rel> (<version>)". Only
+        // named in the log (HPEngineProgram): some such files load (HP1 mods carry 79 and 126 against 76), so nothing is refused.
+        static List<string> Newer(string install, IEnumerable<List<(string Source, string Rel)>> mods)
+        {
+            static int Version(string f) => PackageVersion(f);
+            string engine = FindDir(install, "System") is string sys ? FindFile(sys, "Engine.u") : null;
+            int game = engine is null ? -1 : Version(engine);
+            if (game < 0) return new List<string>();
+            return mods.SelectMany(m => m).Select(f => (f.Rel, V: Version(f.Source))).Where(f => f.V > game)
+                .Select(f => $"{f.Rel.Replace('\\', '/')} ({f.V} > {game})").ToList();
         }
 
         // The maps the enabled mods ADD: Maps/<name>.unr (where Core's Boot opens a map) by Prepare's placement, with no
@@ -224,6 +237,36 @@ namespace HPEngine.Packaging
                     map[parts[2][1..]] = parts[1];
             }
             return map;
+        }
+
+        // HP2 (coordinator 2026-11-21, DECISIONS): a mod with a package newer than HP2's retail format does not run. The
+        // version is Core's UEGameProfile.HP2.MaxPackageVersion (MIRROR; selftest game_profile_selected_from_install checks
+        // the two agree); the Launchers and HPEngineProgram refuse such a mod by name before Core opens anything.
+        public const int Hp2PackageVersion = 79;
+        public static string NewerHp2Engine(string mod) => $"{mod} was made for a newer HP2 engine and does not run in HPEngine";
+
+        // The first Unreal package (by its header) among the mod folder's files — every non-hidden file at any depth,
+        // whether or not the game would open it — with a version above max, as "<path in the mod> (version <n>)"; null:
+        // none. Same rule in launcher/Launcher.swift newerPackage.
+        public static string NewerPackage(string modDir, int max)
+        {
+            foreach (string f in Directory.EnumerateFiles(modDir, "*", SearchOption.AllDirectories).OrderBy(f => f, StringComparer.Ordinal))
+            {
+                if (Path.GetRelativePath(modDir, f).Split(Path.DirectorySeparatorChar).Any(p => p.StartsWith('.'))) continue;
+                if (PackageVersion(f) is int v && v > max) return $"{Path.GetRelativePath(modDir, f).Replace('\\', '/')} (version {v})";
+            }
+            return null;
+        }
+
+        // The package version of an Unreal package file; -1: not a package (or unreadable).
+        static int PackageVersion(string f)
+        {
+            try
+            {
+                using var s = File.OpenRead(f); var b = new byte[6];
+                return s.Read(b, 0, 6) == 6 && BitConverter.ToUInt32(b, 0) == 0x9E2A83C1u ? BitConverter.ToUInt16(b, 4) : -1;
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return -1; }
         }
 
         internal static string FindFile(string dir, string name) =>

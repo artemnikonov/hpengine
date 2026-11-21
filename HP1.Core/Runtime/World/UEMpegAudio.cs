@@ -1,4 +1,6 @@
 // MPEG-1/2 LAYER II DECODER — PORT OF THE ENGINE.DLL DECODER (CMpegBase, integer MMX path).
+// Layer I (FUN_10453630, e.g. the Dutch retail AllDialog.dut_uax) shares the header, the MMX dequantisation table and
+// the synthesis below; its frame body is UEMpegAudio.DecodeLayer1.
 //
 // Shipped audio is mp2: all voice (AllDialog.uax), music (Music/*.umx) and almost all
 // effects (HPSounds etc.); the rest is PCM WAV. The build ships no original files and decodes mp2
@@ -115,17 +117,21 @@ namespace HP1.UEScript
     // synthesis (FUN_10453150). Full decoding is the same read (UEMpegAudio.Decode).
     public sealed class UEMpegStream
     {
-        public const int FrameSamples = 1152;
+        // Samples per channel of one decoded frame: Open FUN_10452bc0 sets the output frame size +0x248c to
+        // channels·0x300 bytes for layer I and channels·0x900 otherwise.
+        public static int FrameSamplesOf(int layer) => layer == 1 ? 384 : 1152;
         readonly byte[] _data;
         readonly string _what;
         readonly int[] _offsets;
         readonly UEMpegAudio.EngineSynth _synth = new UEMpegAudio.EngineSynth();
         readonly short[] _sub = new short[3 * 2 * 32 * 12];
+        readonly int _layer;
         readonly short[] _buf;
         int _bufPos, _bufLen, _next;
 
         public int SampleRate { get; }
         public int Channels { get; }
+        public int FrameSamples { get; }
         public long Frames => (long)_offsets.Length * FrameSamples;   // samples per channel
 
         public UEMpegStream(byte[] data, string what)
@@ -140,11 +146,15 @@ namespace HP1.UEScript
                 var hd = UEMpegAudio.ParseHeader(h, offsets.Count, pos, what);
                 // Original: Engine.dll not exported: CMpegFilePlayer Open, frame decode, frame read [HP1 0x10453030, 0x10452C80, 0x104531E0]
                 // The stream's format is the first frame's: Open fixes the output frame size (+0x249c) and the rate Galaxy
-                // plays at; every frame is then decoded by its OWN header (FUN_10452c80 -> layer II FUN_10456190). A later
+                // plays at; every frame is then decoded by its OWN header (FUN_10452c80 -> layer I FUN_10453630 / layer II FUN_10456190). A later
                 // frame with another rate or MPEG version but the same channel count decodes exactly as it does alone
                 // (unicorn on the real bodies: Common_Room 8 frames + Green_Cauldron_mx 8 frames, 22050 MPEG-2 -> 44100
                 // MPEG-1: frames 1-7 after the change byte-equal to Green_Cauldron decoded alone) and plays at the first rate.
-                if (offsets.Count == 0) { SampleRate = hd.Rate; Channels = hd.Channels; }
+                if (offsets.Count == 0) { SampleRate = hd.Rate; Channels = hd.Channels; _layer = hd.Layer; FrameSamples = FrameSamplesOf(hd.Layer); }
+                else if (hd.Layer != _layer)
+                    // The output frame size (+0x249c) stays the first frame's while the decoder writes the new layer's
+                    // 384 or 1152 samples: what FUN_104531e0 then delivers is not read — STOP.
+                    throw new NotSupportedException($"{what}: frame {offsets.Count} changes the layer ({hd.Layer} versus {_layer}) — not ported (STOP)");
                 else if (hd.Channels != Channels)
                     // A mono frame in a stereo stream yields a full stereo-size frame (4608 bytes) that is neither its mono
                     // decode nor stale data (same unicorn run with Invisible's mono frames): the layer II rule for a mode
@@ -237,7 +247,7 @@ namespace HP1.UEScript
         // Original: Engine.dll not exported: MP2SoundStream::FillBuffer FUN_1037e550 [HP1 0x1037E550]
         public UEMp2SoundStream(byte[] data, int endBytes, string what)
         {
-            _dec = new UEMpegStream(data, what);   // accepts layer II only
+            _dec = new UEMpegStream(data, what);   // accepts layers I and II
             int layer = 4 - ((data[1] >> 1) & 3);
             _skip = SkipBytes(layer) / 2;
             if (endBytes < 0)
@@ -386,7 +396,7 @@ namespace HP1.UEScript
 
         internal struct Header
         {
-            public int Rate, Channels, Bytes, Mode, ModeExt, Table;
+            public int Layer, Rate, Channels, Bytes, Mode, ModeExt, Table;
         }
 
         internal static Header ParseHeader(uint h, int frame, int pos, string what)
@@ -405,20 +415,28 @@ namespace HP1.UEScript
             if (brIndex == 0)
                 throw new InvalidDataException($"{what}: frame {frame} has a free bitrate — the engine's AUDIO ASSERT \"bad bit rate\" ends in int3 (0x104528f1), fatal (0x{h:x8})");
             // Not read (STOP): bit 20 clear (MPEG-2.5/reserved: ProcessHeader returns -1, 0x10452770, the caller's
-            // handling is not read), layer I/III (other decoders, FUN_10453630), bitrate 15 (table 0x10482aa8 gives 0:
-            // a frame body of -4 bytes) and sample-rate index 3.
-            if (version == 1 || version == 0 || layer != 2 || brIndex == 15 || srIndex == 3)
-                throw new NotSupportedException($"{what}: frame {frame} is not MPEG-1/2 Layer II with a listed bitrate and rate (0x{h:x8}) — not ported (STOP)");
+            // handling is not read), layer III and the reserved layer (FUN_10452c80 calls no decoder and returns 0: what
+            // the frame buffer then holds is not read), bitrate 15 (table 0x10482aa8 gives 0: a frame body of -4 bytes)
+            // and sample-rate index 3.
+            if (version == 1 || version == 0 || (layer != 1 && layer != 2) || brIndex == 15 || srIndex == 3)
+                throw new NotSupportedException($"{what}: frame {frame} is not MPEG-1/2 Layer I or II with a listed bitrate and rate (0x{h:x8}) — not ported (STOP)");
             bool lsf = version != 3;
             int fs = srIndex == 0 ? 44100 : srIndex == 1 ? 48000 : 32000;
             if (version == 2) fs >>= 1; else if (version == 0) fs >>= 2;
             int mode = (int)(h >> 6) & 3;
             int nch = mode == 3 ? 1 : 2;               // FUN_10452760: (mode != 3) + 1 — all stereo modes alike
-            int bitrate = Layer2Bitrate[(lsf ? 16 : 0) + brIndex] * 1000;
+            // FUN_10452760: kbit/s = table 0x10482aa8 row (lsf·3 + layer); body bytes +0x2498 = layer I
+            // ((kbit·12000)/fs + padding)·4 - 4 (a slot is 4 bytes), otherwise (kbit·144000)/fs + padding - 4.
+            int pad = (int)(h >> 9) & 1;
+            int bitrate = (layer == 1 ? Layer1Bitrate : Layer2Bitrate)[(lsf ? 16 : 0) + brIndex] * 1000;
             return new Header
             {
-                Rate = fs, Channels = nch, Mode = mode, ModeExt = (int)(h >> 4) & 3,
-                Bytes = 144 * bitrate / fs + ((int)(h >> 9) & 1),
+                Layer = layer,
+                Rate = fs,
+                Channels = nch,
+                Mode = mode,
+                ModeExt = (int)(h >> 4) & 3,
+                Bytes = layer == 1 ? (12 * bitrate / fs + pad) * 4 : 144 * bitrate / fs + pad,
                 Table = lsf ? 4 : Translate[srIndex * 32 + (2 - nch) * 16 + brIndex],
             };
         }
@@ -441,9 +459,10 @@ namespace HP1.UEScript
             // read right after the header, so a CRC frame decodes its CRC word as allocation bits (mp2 engine oracle,
             // HP1_MP2_EDGE crc).
             int nch = hd.Channels;
+            var br = new BitReader(data, pos + 4, pos + hd.Bytes);
+            if (hd.Layer == 1) { DecodeLayer1(br, nch, st, sub, output); return; }
             short[] alloc = Tables[hd.Table];
             int sblimit = SbLimit[hd.Table];
-            var br = new BitReader(data, pos + 4, pos + hd.Bytes);
 
             // Bit allocation (the engine has no joint-stereo bound: both channels up to sblimit).
             Span<int> ba = stackalloc int[2 * 32];
@@ -516,6 +535,37 @@ namespace HP1.UEScript
             }
         }
 
+        // Original: Engine.dll not exported: FUN_10453630 (layer I frame; dispatcher FUN_10452c80 calls it for layer byte +0x2490 == 1) [HP1 0x10453630]
+        // Original: Engine.dll not exported: FUN_10453520 (layer I stereo subband dequantisation, called by FUN_10453630) [HP1 0x10453520]
+        // Layer I frame, MMX branch (0x10453b37-0x10454f84; DAT_10601e9c = 1 as for layer II) -> 384 samples per channel.
+        // Like layer II the CRC word is not skipped and there is no joint-stereo bound: a stereo frame reads 32 allocation
+        // bytes (high nibble channel 0, low nibble channel 1), a mono frame 16 bytes (high nibble = even subband); then
+        // 6-bit scale factors of the subbands with bits (subband order, channel 0 then 1); then 12 slices x 32 subbands x
+        // channels. Allocation a != 0 reads a + 1 bits c (mask 0x10482bac) and gives the int16 (truncated)
+        // ((c + offset[a]) * Q[a + 1][sf]) >> 12, offset 0x10482c48 = 1 - 2^a, Q the DAT_10480fc8 row a + 1 (the stereo
+        // pair FUN_10453520 and the inlined mono path index the same row); a = 0 gives 0. Each slice then goes through the
+        // same synthesis FUN_104579f0 as layer II. Allocation 15 (reserved in the standard) decodes as 16 bits.
+        static void DecodeLayer1(BitReader br, int nch, EngineSynth st, short[] sub, short[] output)
+        {
+            Span<int> ba = stackalloc int[2 * 32];
+            Span<int> scale = stackalloc int[2 * 32];
+            for (int sb = 0; sb < 32; sb++)
+                for (int ch = 0; ch < nch; ch++) ba[ch * 32 + sb] = br.Read(4);
+            for (int sb = 0; sb < 32; sb++)
+                for (int ch = 0; ch < nch; ch++)
+                    if (ba[ch * 32 + sb] != 0) scale[ch * 32 + sb] = br.Read(6);
+            for (int slice = 0; slice < 12; slice++)
+                for (int sb = 0; sb < 32; sb++)
+                    for (int ch = 0; ch < nch; ch++)
+                    {
+                        int i = ch * 32 + sb, a = ba[i];
+                        sub[slice * 64 + i] = a == 0 ? (short)0
+                            : (short)(((br.Read(a + 1) + 1 - (1 << a)) * QuantUngrouped[(a + 1) * 64 + scale[i]]) >> 12);
+                    }
+            for (int slice = 0; slice < 12; slice++)
+                SynthSlot(st, sub, slice * 64, nch, output, slice * 32 * nch);
+        }
+
         // A 32-sample slice per channel (FUN_104579f0 + FUN_10459070).
         static void SynthSlot(EngineSynth st, short[] sub, int at, int nch, short[] output, int outAt)
         {
@@ -583,7 +633,7 @@ namespace HP1.UEScript
         // Derived tables are built in the static constructor: field initialisers run in text order, and
         // the standard tables are declared below. Checked against Engine.dll by a self-check
         // (module bytes from the install) and the stream oracle.
-        static readonly int[] QuantUngrouped;       // [bits·64 + sf], bits 3..16 (DAT_10480fc8 rows 3..16)
+        static readonly int[] QuantUngrouped;       // [bits·64 + sf], bits 2..16 (DAT_10480fc8 rows 2..16; row 2 is the 3-level digit 2 = 2/3)
         static readonly int[][] QuantGrouped;       // [L][digit·64 + sf], L = 3/5/9
         static readonly int[] DctA, DctB;           // 17×16 and 16×16 (0x1060f200)
         static readonly int[] Window;               // 32×16 by slice age
@@ -591,7 +641,7 @@ namespace HP1.UEScript
         static UEMpegAudio()
         {
             QuantUngrouped = new int[17 * 64];
-            for (int bits = 3; bits <= 16; bits++)
+            for (int bits = 2; bits <= 16; bits++)
                 for (int sf = 0; sf < 64; sf++) QuantUngrouped[bits * 64 + sf] = Quant(2.0 / ((1 << bits) - 1), sf);
             QuantGrouped = new int[10][];
             foreach (int l in new[] { 3, 5, 9 })
@@ -808,6 +858,13 @@ namespace HP1.UEScript
             0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 3, 3, 3, 3, 3, 3, 0, 0, 0, 1, 1, 1, 1, 1, 0,
             0, 3, 3, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0,
+        };
+
+        // 0x10482aa8 rows 1 (MPEG-1) and 4 (LSF): layer I.
+        static readonly int[] Layer1Bitrate =
+        {
+            0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448, 0,
+            0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256, 0,
         };
 
         static readonly int[] Layer2Bitrate =

@@ -33,6 +33,7 @@ namespace HP1.UEScript
             var r = new RawReader(_data);
             if (r.UInt32() != 0x9e2a83c1) throw new InvalidDataException("not an Unreal package: " + path);
             _version = r.UInt16();
+            UEPackageOpen.RefuseNewer(path, _version);
             r.UInt16(); // licensee version
             r.UInt32(); // package flags
             int nameCount = CheckedCount(r.Int32(), "names");

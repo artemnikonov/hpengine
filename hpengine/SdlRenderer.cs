@@ -66,7 +66,8 @@ namespace HPEngine
             }
             if (window && !offscreenWindow)
             {
-                Window = SDL_CreateWindow(UELocalization.ViewportCaption(), w, h, SDL_WindowFlags.SDL_WINDOW_RESIZABLE | SDL_WindowFlags.SDL_WINDOW_HIGH_PIXEL_DENSITY);
+                Window = SDL_CreateWindow(UELocalization.ViewportCaption(), w, h, SDL_WindowFlags.SDL_WINDOW_RESIZABLE | SDL_WindowFlags.SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WindowFlags.SDL_WINDOW_HIDDEN);
+                // Hidden until the startup mode is applied (HPEngineProgram shows it after OpenStartup): the first visible frame has the final size.
                 if (Window == null || !SDL_ClaimWindowForGPUDevice(_dev, Window)) return false;
                 // Pacing is set by the window (HPEngineProgram.Window, --fps); present mode MAILBOX (no tearing and no
                 // waiting for refresh), otherwise VSYNC.

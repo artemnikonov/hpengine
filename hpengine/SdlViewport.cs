@@ -115,6 +115,8 @@ namespace HPEngine
             var before = (SizeX, SizeY, Fullscreen);
             if (fullscreen)
             {
+                // The startup window is created hidden; a hidden window may defer the fullscreen switch past the wait below.
+                if (!_hostIndependentModes && (SDL_GetWindowFlags(_w) & SDL_WindowFlags.SDL_WINDOW_HIDDEN) != 0) SDL_ShowWindow(_w);
                 if (!SDL_SetWindowFullscreenMode(_w, null) || !SDL_SetWindowFullscreen(_w, true)) return ViewportResizeOutcome.Rejected;
             }
             else

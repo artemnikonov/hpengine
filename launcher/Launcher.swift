@@ -51,8 +51,7 @@ final class LineReader: @unchecked Sendable {
   @Published var step = -1
   @Published var progress = 0.0
   @Published var error: String?
-  @Published var warning: String?  // HP1Setup's WARNING line (an unverified edition): shown, the install goes on
-  @Published var report: URL?      // HP1Setup's REPORT line: a new-issue link for an unrecognised release (UEEdition.ReportUrl)
+  @Published var warning: String?  // a run's override miss (Launcher.overrideWarning); HP1Setup's WARNING lines are log-only (author 2026-11-20)
   @Published var running = false
   @Published var playing = false
   @Published var installed = Launcher.isInstalled()
@@ -63,7 +62,7 @@ final class LineReader: @unchecked Sendable {
   @Published var hp2RunError: String?
   @Published var launcherError: String?
   var runLogsBefore: [String]?, hp2RunLogsBefore: [String]?   // each game's run journals before its last run started (GameScope.logToOpen)
-  @Published var modsOpen = false   // HP1: the Mods page in place of the game page
+  @Published var modsOpen = false   // the Mods page in place of the selected tab's game page
   // Focus and gamepad (extension below): the focused target, the ring (once the pad or the keys moved focus), a pad
   // connected (the button hints), the open list (Menu, Language, Start map) and the targets the window registered.
   @Published var padFocus: String?
@@ -139,7 +138,7 @@ final class LineReader: @unchecked Sendable {
 
   func install() {
     guard !inputs.isEmpty, !running, !playing, !updating, unquarantine() else { return }  // nothing swaps the data or the app under it
-    running = true; setupError(nil); warning = nil; report = nil; step = 0; progress = 0
+    running = true; setupError(nil); warning = nil; step = 0; progress = 0
     let p = Process()
     current = p
     p.executableURL = Launcher.runtimeURL.appendingPathComponent("HP1Setup")
@@ -176,9 +175,8 @@ final class LineReader: @unchecked Sendable {
     case "PROGRESS": progress = (Double(arg) ?? 0) / 100
     case "ERROR":  // "<key> <text>": the text is for the player; the installed edition is still the marker's
       setupError(String(arg.drop(while: { $0 != " " }).dropFirst())); edition = Launcher.installedEdition(hp2Tab ? Launcher.hp2GameURL : Launcher.gameURL)
-    case "WARNING": warning = String(arg.drop(while: { $0 != " " }).dropFirst())  // "<key> <text>"
-    case "REPORT": if arg.hasPrefix("https://") { report = URL(string: arg) }
-    case "EDITION": edition = String(arg.drop(while: { $0 != " " }).dropFirst())  // "<id> <edition: tier>"
+    // WARNING (modified / localized / unverified) and REPORT lines are for the log only (author 2026-11-20): every copy runs
+    case "EDITION": edition = String(arg.drop(while: { $0 != " " }).dropFirst())  // "<id> <name: tier>"; the tier is never shown
     case "DONE": step = steps.count; inputs = []; if hp2Tab { hp2Page = "Main"; hp2Scan() } else { installed = true }
     default: break
     }
@@ -203,8 +201,9 @@ final class LineReader: @unchecked Sendable {
         MainActor.assumeIsolated {
           self.playing = false
           self.updateModsNotice()   // the run may have written slots
+          let said = ((try? String(contentsOf: Launcher.launchLogURL, encoding: .utf8)) ?? "").components(separatedBy: "\n")
+          self.warning = Launcher.overrideWarning(said)
           if status != 0 {
-            let said = ((try? String(contentsOf: Launcher.launchLogURL, encoding: .utf8)) ?? "").components(separatedBy: "\n")
             self.error = Launcher.errorBanner(said, code: status)
             self.runError = self.error
           }
@@ -262,6 +261,13 @@ final class LineReader: @unchecked Sendable {
     if code == 4 { return lines.last { $0.contains("not a game install") || $0.hasPrefix("game install not found") } }
     return lines.last { $0.hasPrefix("[Crash] ") } ?? lines.last { $0.hasPrefix("Unhandled exception. ") }
   }
+  // Author 2026-11-20: the only thing the launcher warns about besides a missing file. The game logs "[Overrides] WARNING: <Class.Function>
+  // is not in the loaded scripts: ..." when a port script fix finds no target in this copy's scripts (mirrored by EngineError.OverrideWarning).
+  nonisolated static func overrideWarning(_ lines: [String]) -> String? {
+    let miss = lines.filter { $0.hasPrefix("[Overrides] WARNING: ") && $0.contains(" is not in the loaded scripts") }
+      .map { String($0.dropFirst(21).prefix { $0 != " " }) }
+    return miss.isEmpty ? nil : "\(miss.count) of the port's fixes do not apply to this copy of the game (\(miss.joined(separator: ", "))), so those parts may not work as intended. The log has the details."
+  }
   // The banner (author 2026-11-17): what happened in plain words, the engine's line on its own line; no file path ("Open log").
   nonisolated static func errorBanner(_ lines: [String], code: Int32) -> String {
     "The game stopped with an error (code \(code))." + (errorLine(lines, code: code).map { "\n" + $0.trimmingCharacters(in: .whitespaces) } ?? "")
@@ -313,7 +319,7 @@ final class LineReader: @unchecked Sendable {
     }
     return (kept.joined(separator: "\n"), removed)
   }
-  // Lines a reset would remove (0 = nothing was rebound: the menu item is off). reset: also write the files back.
+  // Lines a reset would remove (0 = nothing was rebound; the menu item stays enabled, author 2026-11-20). reset: also write the files back.
   nonisolated static func padRebound(game: URL, reset: Bool = false) -> Int {
     let rules: [(String, String, (String) -> Bool)] = [
       ("DefUser.ini", "Engine.Input", { $0.lowercased().hasPrefix("joy") }),
@@ -375,7 +381,7 @@ final class LineReader: @unchecked Sendable {
           try FileManager.default.trashItem(at: URL(fileURLWithPath: d), resultingItemURL: nil)
         }
       }
-      installed = Launcher.isInstalled(); edition = nil; step = -1; setupError(nil); warning = nil; report = nil
+      installed = Launcher.isInstalled(); edition = nil; step = -1; setupError(nil); warning = nil
     } catch {
       installed = Launcher.isInstalled()
       setupError("Could not remove the game: \(error.localizedDescription)")
@@ -391,10 +397,13 @@ final class LineReader: @unchecked Sendable {
   // ── Mods (hpengine/packaging/ModOverlay.cs): folders in game/Mods; game/HPEngineData/Mods.ini [Mods] Enabled=<name>
   // lines in order (a later mod wins). The list: enabled mods in that order, then the other folders by name.
   struct Mod: Identifiable, Equatable { let name: String; var enabled: Bool; var missing: Bool; var id: String { name } }
-  static let modsURL = gameURL.appendingPathComponent("Mods")
   static let modsIniURL = settingsURL.appendingPathComponent("Mods.ini")
   nonisolated static func modsIniURL(_ game: URL) -> URL { game.appendingPathComponent("HPEngineData/Mods.ini") }
   @Published var mods: [Mod] = []
+  // The selected tab's mods, as launcher/Desktop/MainWindow.cs ModsGame / ModsData: HP1 game/Mods with
+  // game/HPEngineData/Mods.ini; HP2 <its game folder>/Mods with <HP2Data>/HPEngineData/Mods.ini (the engine's InstallRoot.Hp2DataDir).
+  var modsGame: URL? { hp2Tab ? Launcher.hp2Root.map { URL(fileURLWithPath: $0) } : Launcher.gameURL }
+  var modsIni: URL { hp2Tab ? URL(fileURLWithPath: GameScope.dataDir(Launcher.gameURL.path, hp2: true)).appendingPathComponent("Mods.ini") : Launcher.modsIniURL }
 
   nonisolated static func subfolders(_ dir: URL) -> [String] {
     ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey])) ?? [])
@@ -402,9 +411,9 @@ final class LineReader: @unchecked Sendable {
       .map(\.lastPathComponent).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
   }
 
-  nonisolated static func modList(game: URL) -> [Mod] {
+  nonisolated static func modList(game: URL, ini: URL? = nil) -> [Mod] {
     let folders = subfolders(game.appendingPathComponent("Mods"))
-    let on = enabledMods(ini: (try? String(contentsOf: modsIniURL(game), encoding: .utf8)) ?? "")
+    let on = enabledMods(ini: (try? String(contentsOf: ini ?? modsIniURL(game), encoding: .utf8)) ?? "")
     return on.map { n in Mod(name: folders.first { $0.caseInsensitiveCompare(n) == .orderedSame } ?? n, enabled: true,
                              missing: !folders.contains { $0.caseInsensitiveCompare(n) == .orderedSame }) }
       + folders.filter { f in !on.contains { $0.caseInsensitiveCompare(f) == .orderedSame } }.map { Mod(name: $0, enabled: false, missing: false) }
@@ -412,9 +421,69 @@ final class LineReader: @unchecked Sendable {
 
   func loadMods() {
     loadLanguages()
-    mods = Launcher.modList(game: Launcher.gameURL)
+    mods = modsGame.map { Launcher.modList(game: $0, ini: modsIni) } ?? []
     updateModsNotice()
     updateStartMaps()
+  }
+
+  // Add (button or a drop on the Mods page): the bundled HP1Setup --add-mod runs hpengine/packaging/ModInstall.cs, the
+  // rule launcher/Desktop calls directly (ModsIni.Add); the mod is listed switched off. One source after the other.
+  @Published var addingMod = false
+  nonisolated static func addModArguments(install: String, source: String) -> [String] { ["--add-mod", install, source] }
+  // HP1Setup's answer: "MOD <name>" -> nil; "ERROR add_mod <why>" -> the page's error (launcher/Desktop/Logic.cs ModsIni.Add's text).
+  nonisolated static func addModError(_ out: String) -> String? {
+    let lines = out.components(separatedBy: "\n")
+    if lines.contains(where: { $0.hasPrefix("MOD ") }) { return nil }
+    if let e = lines.first(where: { $0.hasPrefix("ERROR add_mod ") }) { return "Could not add the mod: " + e.dropFirst(14) }
+    return "Could not add the mod: the setup stopped unexpectedly."
+  }
+  func addMods(_ urls: [URL]) {
+    guard let game = modsGame, !urls.isEmpty, !playing, !addingMod, unquarantine() else { return }
+    addingMod = true
+    let tool = Launcher.runtimeURL.appendingPathComponent("HP1Setup"), hp2 = hp2Tab
+    DispatchQueue.global().async {
+      var failed: String?
+      for u in urls { if let e = Launcher.runAddMod(tool: tool, install: game.path, source: u.path) { failed = e; break } }
+      DispatchQueue.main.async {
+        MainActor.assumeIsolated {
+          self.addingMod = false
+          if hp2 { self.hp2Error = failed } else { self.error = failed }
+          self.loadMods()
+        }
+      }
+    }
+  }
+  // One HP1Setup --add-mod run (blocking: off the main thread); nil: added, else the page's error.
+  nonisolated static func runAddMod(tool: URL, install: String, source: String) -> String? {
+    let p = Process(), pipe = Pipe()
+    p.executableURL = tool; p.arguments = addModArguments(install: install, source: source)
+    p.standardInput = FileHandle.nullDevice; p.standardOutput = pipe; p.standardError = pipe
+    do { try p.run() } catch { return "Could not add the mod: \(error.localizedDescription)" }
+    let out = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    p.waitUntilExit()
+    return addModError(out)
+  }
+  func chooseMods() {
+    let p = NSOpenPanel()
+    p.canChooseDirectories = true; p.canChooseFiles = true; p.allowsMultipleSelection = true
+    p.message = "A mod's folder, or its archive (.zip, .7z, .rar)"
+    if p.runModal() == .OK { addMods(p.urls) }
+  }
+
+  // Remove: asked first; switched off in Mods.ini, then its folder goes to the Trash (as launcher/Desktop ModsIni.Remove).
+  func removeMod(_ name: String) {
+    guard let game = modsGame, !playing else { return }
+    let a = NSAlert()
+    a.messageText = "Remove mod?"
+    a.informativeText = "Remove the mod \(name)? Its folder is moved to the Trash."
+    a.addButton(withTitle: "Remove"); a.addButton(withTitle: "Cancel")
+    guard a.runModal() == .alertFirstButtonReturn else { return }
+    mods.removeAll { $0.name == name }
+    saveMods()
+    if let dir = Launcher.child(game.appendingPathComponent("Mods"), name, dir: true) {
+      do { try FileManager.default.trashItem(at: dir, resultingItemURL: nil) } catch { setupError("Could not remove the mod: \(error.localizedDescription)") }
+    }
+    loadMods()
   }
 
   // ── Game language (NOT ORIGINAL): the languages of the installed data, chosen as the Windows/Linux Launcher does. The
@@ -518,13 +587,13 @@ final class LineReader: @unchecked Sendable {
     return e
   }
   // The Game card's edition text with a multilingual data set (launcher/Desktop/Logic.cs EditionLabel.Describe).
-  nonisolated static func editionDisplay(_ edition: String, _ langs: [LanguageChoice]) -> (name: String, tier: String, detail: String?) {
+  nonisolated static func editionDisplay(_ edition: String, _ langs: [LanguageChoice]) -> (name: String, detail: String?) {
     let parts = edition.components(separatedBy: ": ")
-    let name = parts.count > 1 ? parts.dropLast().joined(separator: ": ") : edition, tier = parts.count > 1 ? parts.last! : ""
-    if langs.count < 2 { return (name, tier, nil) }
+    let name = parts.count > 1 ? parts.dropLast().joined(separator: ": ") : edition
+    if langs.count < 2 { return (name, nil) }
     let nordic = Set(langs.map { $0.code.lowercased() }) == ["dan", "eng", "fin", "nor", "swe"]
     let detail = (name.isEmpty ? "" : "Engine family: \(name). ") + "Languages: " + langs.map(\.label).joined(separator: ", ") + "."
-    return (nordic ? "Nordic multilingual data" : "Multilingual game data", nordic && name == "UK 1.1" && tier == "modified" ? "different data" : tier, detail)
+    return (nordic ? "Nordic multilingual data" : "Multilingual game data", detail)
   }
   @Published var languageList: [LanguageChoice] = []
   @Published var language: String?
@@ -583,9 +652,9 @@ final class LineReader: @unchecked Sendable {
   nonisolated static func child(_ dir: URL, _ name: String, dir wantDir: Bool) -> URL? {
     entries(dir).first { $0.lastPathComponent.caseInsensitiveCompare(name) == .orderedSame && isDir($0) == wantDir }
   }
-  nonisolated static func placedFiles(game: URL) -> [(mod: String, rels: [String])]? {
+  nonisolated static func placedFiles(game: URL, ini: URL? = nil) -> [(mod: String, rels: [String])]? {
     let fm = FileManager.default
-    let mods = modList(game: game).filter(\.enabled)
+    let mods = modList(game: game, ini: ini).filter(\.enabled)
     if mods.isEmpty { return [] }
     // extension (lower case, with the dot) -> game directory, for flat files; nil: no Default.ini
     var flatDirs: [String: String]?
@@ -643,8 +712,8 @@ final class LineReader: @unchecked Sendable {
   // Two enabled mods with a file at the same game path: the later mod's file is used. One line per (earlier, later) pair
   // in mod order, the paths without case. MIRRORS ModOverlay.Conflicts (the owner) and launcher/Desktop/Logic.cs
   // ModsIni.Conflicts (the texts).
-  nonisolated static func conflictLines(game: URL) -> [String] {
-    guard let placed = placedFiles(game: game), placed.count > 1 else { return [] }
+  nonisolated static func conflictLines(game: URL, ini: URL? = nil) -> [String] {
+    guard let placed = placedFiles(game: game, ini: ini), placed.count > 1 else { return [] }
     var owner: [String: Int] = [:], pairs: [(earlier: Int, later: Int, files: [String])] = []
     for (i, p) in placed.enumerated() {
       for rel in p.rels {
@@ -666,6 +735,43 @@ final class LineReader: @unchecked Sendable {
   // The apply order of an enabled mod (1 first; a higher number wins a file both have); nil for a disabled one.
   // As launcher/Desktop/MainWindow.cs ModOrder_ and Logic.cs ModsIni.OrderHint.
   nonisolated static let orderHint = "Enabled mods apply in number order: a higher number wins"
+  // HP2: a mod made for a newer HP2 engine (a package above HP2's retail format) does not run. MIRROR of
+  // hpengine/packaging/ModOverlay.cs Hp2PackageVersion / NewerHp2Engine / NewerPackage (Core's UEGameProfile.MaxPackageVersion
+  // owns the number); launcher/test_update.sh compares --newer-package with the owner.
+  nonisolated static let hp2PackageVersion = 79
+  nonisolated static func newerHp2Engine(_ mod: String) -> String { "\(mod) was made for a newer HP2 engine and does not run in HPEngine" }
+  // Every non-hidden file of the mod folder, any depth, in path order: the first Unreal package above max, "<rel> (version <n>)".
+  nonisolated static func newerPackage(modDir: URL, max: Int) -> String? {
+    let fm = FileManager.default, base = modDir.standardizedFileURL.path
+    var files: [String] = []
+    for case let f as URL in fm.enumerator(at: modDir, includingPropertiesForKeys: [.isRegularFileKey]) ?? FileManager.DirectoryEnumerator()
+    where (try? f.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false {
+      let rel = String(f.standardizedFileURL.path.dropFirst(base.count + 1))
+      if !rel.split(separator: "/").contains(where: { $0.hasPrefix(".") }) { files.append(rel) }
+    }
+    for rel in files.sorted(by: { Array($0.utf16).lexicographicallyPrecedes(Array($1.utf16)) }) {
+      guard let h = FileHandle(forReadingAtPath: base + "/" + rel) else { continue }
+      let b = [UInt8]((try? h.read(upToCount: 6)) ?? Data()); try? h.close()
+      guard b.count == 6, b[0] == 0xC1, b[1] == 0x83, b[2] == 0x2A, b[3] == 0x9E else { continue }
+      let v = Int(b[4]) | Int(b[5]) << 8
+      if v > max { return "\(rel) (version \(v))" }
+    }
+    return nil
+  }
+  // HP2 only: the line under a mod on the Mods page (launcher/Desktop/Logic.cs ModsIni.NewerEngine); nil: none.
+  nonisolated static func newerEngineLine(game: URL, mod: String) -> String? {
+    guard let dir = child(game.appendingPathComponent("Mods"), mod, dir: true), newerPackage(modDir: dir, max: hp2PackageVersion) != nil else { return nil }
+    return newerHp2Engine(mod)
+  }
+
+  // The empty Mods page (launcher/Desktop/Logic.cs ModsIni.NoMods).
+  nonisolated static let noModsText = "No mods yet. Drop a mod's folder or archive (.zip, .7z, .rar) here, or use Add Mod; it shows up here to switch on and off."
+  func openModsFolder() {
+    guard let game = modsGame else { return }
+    let dir = game.appendingPathComponent("Mods")
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    open(dir)
+  }
   nonisolated static func orderNumber(_ mods: [Mod], _ m: Mod) -> Int? { mods.filter(\.enabled).firstIndex(of: m).map { $0 + 1 } }
 
   // Why Play cannot start: enabled mods whose folder is gone (the engine would stop with exit code 5); nil: none.
@@ -784,15 +890,18 @@ final class LineReader: @unchecked Sendable {
     }
   }
   func updateModsNotice() {
-    modsNotice = Launcher.noticeLines(enabled: mods.filter(\.enabled).map(\.name), slots: Launcher.slotMods(game: Launcher.gameURL))
-      + Launcher.misplacedLines(game: Launcher.gameURL, mods: mods) + Launcher.conflictLines(game: Launcher.gameURL)
+    guard let game = modsGame else { modsNotice = []; return }
+    // HP1's slots name their mod set; HP2's slot notice is not ported (what HP2 does with such a save is not established)
+    modsNotice = (hp2Tab ? [] : Launcher.noticeLines(enabled: mods.filter(\.enabled).map(\.name), slots: Launcher.slotMods(game: game)))
+      + Launcher.misplacedLines(game: game, mods: mods) + Launcher.conflictLines(game: game, ini: modsIni)
   }
 
   func saveMods() {
-    let old = (try? String(contentsOf: Launcher.modsIniURL, encoding: .utf8)) ?? ""
-    try? FileManager.default.createDirectory(at: Launcher.settingsURL, withIntermediateDirectories: true)
-    do { try Launcher.withEnabledMods(ini: old, mods.filter(\.enabled).map(\.name)).write(to: Launcher.modsIniURL, atomically: true, encoding: .utf8) }
-    catch { self.error = "Could not save the mod list: \(error.localizedDescription)" }
+    let ini = modsIni
+    let old = (try? String(contentsOf: ini, encoding: .utf8)) ?? ""
+    try? FileManager.default.createDirectory(at: ini.deletingLastPathComponent(), withIntermediateDirectories: true)
+    do { try Launcher.withEnabledMods(ini: old, mods.filter(\.enabled).map(\.name)).write(to: ini, atomically: true, encoding: .utf8) }
+    catch { setupError("Could not save the mod list: \(error.localizedDescription)") }
     updateModsNotice()
     updateStartMaps()
   }
@@ -1069,6 +1178,12 @@ extension Launcher {
   // The new Game.exe process the original starts, here HPEngine on the HP2 folder with the original's parameters.
   func hp2Play(_ root: String, _ cmdline: String) {
     guard !playing, unquarantine() else { return }
+    loadMods()   // the folders as they are now; an enabled mod whose folder is gone stops the engine (exit code 5)
+    if let gone = Launcher.missingText(mods) { hp2Error = gone; return }
+    let game = URL(fileURLWithPath: root)
+    if let line = mods.filter({ $0.enabled && !$0.missing }).lazy.compactMap({ Launcher.newerEngineLine(game: game, mod: $0.name) }).first {
+      hp2Error = line + ". Turn it off in Mods."; return
+    }
     let fm = FileManager.default, logURL = Launcher.launchLog(hp2: true)
     try? fm.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
     fm.createFile(atPath: logURL.path, contents: nil)
@@ -1083,8 +1198,9 @@ extension Launcher {
       DispatchQueue.main.async {
         MainActor.assumeIsolated {
           self.playing = false
+          let said = ((try? String(contentsOf: logURL, encoding: .utf8)) ?? "").components(separatedBy: "\n")
+          self.warning = Launcher.overrideWarning(said)
           if status != 0 {
-            let said = ((try? String(contentsOf: logURL, encoding: .utf8)) ?? "").components(separatedBy: "\n")
             self.hp2Error = Launcher.errorBanner(said, code: status)
             self.hp2RunError = self.hp2Error
           }
@@ -1358,8 +1474,9 @@ extension Launcher {
   // The setup state (chosen files, steps, warning, edition) is the selected tab's game: a switch starts the other's afresh.
   func switchTo(hp2: Bool) {
     guard hp2Tab != hp2 else { return }
-    hp2Tab = hp2; inputs = []; step = -1; warning = nil; report = nil
+    hp2Tab = hp2; inputs = []; step = -1; warning = nil
     edition = Launcher.installedEdition(hp2 ? Launcher.hp2GameURL : Launcher.gameURL)
+    loadMods()   // the selected tab's mods
   }
 
   func menuItems() -> [PopItem] {
@@ -1375,7 +1492,7 @@ extension Launcher {
             PopItem(title: "Open Logs Folder") { self.open(Launcher.logsURL) },
             PopItem(title: "Install Again from Other Files…", enabled: !running && !playing) { self.choose() },
             PopItem(title: "Reset Settings…", enabled: installed) { self.resetSettings() },
-            PopItem(title: "Reset Gamepad Bindings…", enabled: installed && !playing && Launcher.padRebound(game: Launcher.gameURL) > 0) { self.resetPad() },
+            PopItem(title: "Reset Gamepad Bindings…", enabled: installed && !playing) { self.resetPad() },
             PopItem(title: "Remove Game…", enabled: installed && !running && !playing, destructive: true) { self.removeGame() }]
     }
     m += [PopItem(title: "Launcher", header: true),
@@ -1782,7 +1899,6 @@ struct ListItemStyle: ButtonStyle {
 
 struct Banner: View {
   let icon: String, color: Color, text: String
-  var link: URL? = nil                // "Report…": opens the prefilled new-issue page
   var openLog: (() -> Void)? = nil    // "Open log": a failed game run's log (Launcher.openRunLog)
   var dismiss: (() -> Void)? = nil    // the × at the top right: clears the error it shows (Launcher.dismissError)
   @Environment(\.palette) var p
@@ -1792,10 +1908,9 @@ struct Banner: View {
       VStack(alignment: .leading, spacing: 8) {
         Text(text).foregroundStyle(p.text).textSelection(.enabled)
           .fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading)
-        if openLog != nil || link != nil {
+        if openLog != nil {
           HStack(spacing: 8) {
             if let openLog { Button("Open log", action: openLog).buttonStyle(SecondaryButtonStyle(small: true)).padTarget("openlog", openLog) }
-            if let link { Button("Report…") { NSWorkspace.shared.open(link) }.buttonStyle(SecondaryButtonStyle(small: true)).padTarget("report") { NSWorkspace.shared.open(link) } }
           }
         }
       }
@@ -1809,27 +1924,6 @@ struct Banner: View {
     .background(RoundedRectangle(cornerRadius: 10).fill(.black.opacity(0.30)))
     .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(color))
     .accessibilityElement(children: .contain)
-  }
-}
-
-// "US 1.53: exact" (HP1Setup EDITION line) -> a chip with the name and the tier; exact = verified against, others shown as they are.
-struct EditionChip: View {
-  let ed: String
-  @Environment(\.palette) var p
-  var body: some View {
-    let parts = ed.components(separatedBy: ": ")
-    let name = parts.dropLast().joined(separator: ": "), tier = parts.count > 1 ? parts.last! : ""
-    // Author 2026-11-20: every copy runs; the chip only warns (a modified or unknown copy). Tested editions and the
-    // genuine Nordic disc's manifest difference show nothing (launcher/Desktop/Logic.cs EditionLabel.Quiet).
-    let quiet = ["exact", "supported", "different data"].contains(tier)
-    if !quiet {
-    HStack(spacing: 8) {
-      Text(name.isEmpty ? ed : name).font(.system(size: 12, weight: .semibold)).foregroundStyle(p.text)
-        .padding(.horizontal, 8).padding(.vertical, 2)
-        .background(Capsule().fill(p.surface)).overlay(Capsule().strokeBorder(p.stroke))
-      Text(tier.isEmpty ? "unknown" : tier).font(.system(size: 13)).foregroundStyle(p.warn)
-    }
-    }
   }
 }
 
@@ -1868,9 +1962,9 @@ struct MainView: View {
       if let n = b.newer { updateBar(n) }
       ScrollView {   // the window's height is fixed: a crowded state (update + error + every row) scrolls, never clips
         VStack(alignment: .leading, spacing: 0) {
-          if b.hp2Tab { if hp2Setup { setupView } else { hp2View } } else if setup { setupView } else if b.modsOpen { modsView } else { installedView }
+          if b.hp2Tab { if hp2Setup { setupView } else if b.modsOpen { modsView } else { hp2View } } else if setup { setupView } else if b.modsOpen { modsView } else { installedView }
           VStack(spacing: 8) {
-            if let w = b.warning { Banner(icon: "exclamationmark.triangle.fill", color: p.warn, text: w, link: b.report).transition(banner) }   // HP1Setup's: the selected tab's (reset on a switch)
+            if let w = b.warning { Banner(icon: "exclamationmark.triangle.fill", color: p.warn, text: w).transition(banner) }   // HP1Setup's: the selected tab's (reset on a switch)
             if let e = GameScope.error(hp2Tab: b.hp2Tab, hp1: b.error, hp2: b.hp2Error, launcher: b.launcherError) {
               let hp2 = b.hp2Tab
               Banner(icon: "xmark.octagon.fill", color: p.err, text: e, openLog: e == (hp2 ? b.hp2RunError : b.runError) ? { b.openRunLog(hp2: hp2) } : nil,
@@ -1914,7 +2008,7 @@ struct MainView: View {
     .onDrop(of: [.fileURL], isTargeted: $dropping) { items in
       for item in items {
         _ = item.loadObject(ofClass: URL.self) { url, _ in
-          if let url { Task { @MainActor in b.add([url]) } }
+          if let url { Task { @MainActor in if b.modsOpen && b.modsGame != nil { b.addMods([url]) } else { b.add([url]) } } }
         }
       }
       return true
@@ -2114,10 +2208,6 @@ struct MainView: View {
     return VStack(alignment: .leading, spacing: 0) {
       hero(Launcher.gameTitle(b.edition), note: d?.detail) {
         if b.playing { status("Playing", "play.fill", p.ok) } else { status("Ready to play", "checkmark", p.ok) }
-        if let d {
-          EditionChip(ed: d.name + (d.tier.isEmpty ? "" : ": " + d.tier))
-            .help(d.tier == "different data" ? "These files differ from the engine family's reference manifest. This alone does not establish that your disc was modified." : "")
-        }
       }
       HStack(spacing: 12) {
         Button { b.play() } label: { if b.playing { Text("Playing…") } else { Label("Play", systemImage: "play.fill") } }
@@ -2148,27 +2238,32 @@ struct MainView: View {
           .font(.system(size: 14)).padding(.leading, 16).padding(.trailing, 8).frame(minHeight: 52)
           Divider().overlay(p.stroke)
         }
-        Button { b.modsOpen = true } label: {
-          HStack(spacing: 8) {
-            Text("Mods")
-            Spacer()
-            if !b.modsNotice.isEmpty { Image(systemName: "exclamationmark.circle").foregroundStyle(p.warn).accessibilityLabel("Notes") }
-            Text(b.mods.isEmpty ? "None" : "\(b.mods.filter(\.enabled).count) of \(b.mods.count) on").foregroundStyle(p.dim).font(.system(size: 13))
-            Image(systemName: "chevron.right").foregroundStyle(p.dim)
-          }
-        }.buttonStyle(RowButtonStyle()).padTarget("mods", radius: 0) { b.modsOpen = true }
+        modsRow
       }
       .panel(p).padding(.horizontal, 24).padding(.top, 24)
     }
   }
 
-  // ── HP1: the Mods panel (list, order, notes, Mods folder)
+  // The Mods row of a game page (HP1 installedView, HP2 hp2Main): a summary that opens the Mods panel.
+  var modsRow: some View {
+    Button { b.modsOpen = true } label: {
+      HStack(spacing: 8) {
+        Text("Mods")
+        Spacer()
+        if !b.modsNotice.isEmpty { Image(systemName: "exclamationmark.circle").foregroundStyle(p.warn).accessibilityLabel("Notes") }
+        Text(b.mods.isEmpty ? "None" : "\(b.mods.filter(\.enabled).count) of \(b.mods.count) on").foregroundStyle(p.dim).font(.system(size: 13))
+        Image(systemName: "chevron.right").foregroundStyle(p.dim)
+      }
+    }.buttonStyle(RowButtonStyle()).padTarget("mods", radius: 0) { b.modsOpen = true }
+  }
+
+  // ── The Mods panel of the selected tab (list, order, notes, add, remove, Mods folder)
   var modsView: some View {
     VStack(alignment: .leading, spacing: 12) {
       pageHeader("Mods", primary: true) { b.modsOpen = false }
       VStack(alignment: .leading, spacing: 8) {
         if b.mods.isEmpty {
-          Text("No mods yet. Put a mod's folder into the Mods folder; it shows up here to switch on and off.")
+          Text(Launcher.noModsText)
             .font(.system(size: 13)).foregroundStyle(p.dim).fixedSize(horizontal: false, vertical: true).padding(16)
         } else {
           ScrollView { VStack(spacing: 0) { ForEach(b.mods) { m in modRow(m) } } }.frame(maxHeight: 176).panel(p)
@@ -2181,8 +2276,10 @@ struct MainView: View {
         }
         if b.mods.contains(where: \.enabled) { Text(Launcher.orderHint).font(.system(size: 12)).foregroundStyle(p.dim) }
         HStack(spacing: 12) {
-          Button { b.open(Launcher.modsURL) } label: { Label("Open Mods Folder", systemImage: "folder.badge.plus") }.buttonStyle(SecondaryButtonStyle())
-            .padTarget("openmods") { b.open(Launcher.modsURL) }
+          Button { b.chooseMods() } label: { Label("Add Mod…", systemImage: "plus") }.buttonStyle(SecondaryButtonStyle())
+            .padTarget("addmod") { b.chooseMods() }.disabled(b.playing || b.addingMod)
+          Button { b.openModsFolder() } label: { Label("Open Mods Folder", systemImage: "folder.badge.plus") }.buttonStyle(SecondaryButtonStyle())
+            .padTarget("openmods") { b.openModsFolder() }
           Button { b.loadMods() } label: { Label("Refresh", systemImage: "arrow.clockwise") }.buttonStyle(SecondaryButtonStyle())
             .padTarget("refresh") { b.loadMods() }
         }
@@ -2199,8 +2296,16 @@ struct MainView: View {
       Toggle(m.name, isOn: Binding(get: { m.enabled }, set: { b.setMod(m.name, $0) })).toggleStyle(.switch).labelsHidden()
         .tint(p.accent).padTarget("mod:" + name, radius: 8, flip).disabled(b.playing)
       if let n = Launcher.orderNumber(b.mods, m) { Text("\(n)").font(.system(size: 12)).foregroundStyle(p.dim).frame(minWidth: 14) }
-      Text(m.name).foregroundStyle(m.enabled ? p.text : p.dim).lineLimit(1)
-      if m.missing { Text("folder missing").font(.system(size: 12)).foregroundStyle(p.warn) }
+      VStack(alignment: .leading, spacing: 2) {
+        HStack(spacing: 10) {
+          Text(m.name).foregroundStyle(m.enabled ? p.text : p.dim).lineLimit(1)
+          if m.missing { Text("folder missing").font(.system(size: 12)).foregroundStyle(p.warn) }
+        }
+        // HP2: the line Play refuses with, under the mod
+        if b.hp2Tab, let game = b.modsGame, let line = Launcher.newerEngineLine(game: game, mod: m.name) {
+          Text(line).font(.system(size: 12)).foregroundStyle(p.warn).fixedSize(horizontal: false, vertical: true)
+        }
+      }
       Spacer()
       if let i {
         Button { b.moveMod(m.name, by: -1) } label: { Image(systemName: "chevron.up").frame(width: 44, height: 44).contentShape(Rectangle()) }
@@ -2209,6 +2314,11 @@ struct MainView: View {
         Button { b.moveMod(m.name, by: 1) } label: { Image(systemName: "chevron.down").frame(width: 44, height: 44).contentShape(Rectangle()) }
           .buttonStyle(FlatButtonStyle()).foregroundStyle(i < on.count - 1 ? p.text : p.dim.opacity(0.4)).padTarget("down:" + name, radius: 8) { b.moveMod(name, by: 1) }
           .disabled(i == on.count - 1 || b.playing).accessibilityLabel("Move \(m.name) down")
+      }
+      if !m.missing {
+        Button { b.removeMod(name) } label: { Image(systemName: "xmark").frame(width: 44, height: 44).contentShape(Rectangle()) }
+          .buttonStyle(FlatButtonStyle()).foregroundStyle(p.dim).padTarget("remove:" + name, radius: 8) { b.removeMod(name) }
+          .disabled(b.playing).accessibilityLabel("Remove \(m.name)").help("Remove \(m.name)")
       }
     }
     .font(.system(size: 14)).padding(.horizontal, 12).frame(minHeight: 44)
@@ -2222,7 +2332,6 @@ struct MainView: View {
         else if b.playing { status("Playing", "play.fill", p.ok) }
         else if setupInstalled { status("Ready to play", "checkmark", p.ok) }
         else { status("Not installed", "circle", p.dim) }
-        if b.running || b.step >= 0, let ed = b.edition { EditionChip(ed: ed) }
       }
       if b.running || b.step >= 0 { stepsPanel } else { dropZone }
       HStack(spacing: 12) {
@@ -2310,7 +2419,6 @@ struct MainView: View {
     return VStack(alignment: .leading, spacing: 0) {
       hero(Launcher.hp2Title) {
         if b.playing { status("Playing", "play.fill", p.ok) } else { status("Ready to play", "checkmark", p.ok) }
-        if let ed = b.edition { EditionChip(ed: ed) }   // an installed copy's edition (HP1Setup --game hp2)
         Text(used == 1 ? "1 saved game" : "\(used) saved games")
       }
       // The original's IDC_Instructions is not shown here (both launchers): it sends the player to an Options button the launcher has not.
@@ -2319,6 +2427,7 @@ struct MainView: View {
         hp2Choice("loadgame", L("IDC_LoadGame"), primary: loadFirst) { b.hp2Page = "LoadGame" }
       }
       .padding(.horizontal, 24).padding(.top, 20)
+      modsRow.panel(p).padding(.horizontal, 24).padding(.top, 20)   // as HP1's (installedView)
     }
   }
 
@@ -2484,8 +2593,7 @@ struct MainView: View {
     b.edition = "UK 1.1: modified"
     b.languageList = [Launcher.LanguageChoice(code: "eng", label: "English", folder: nil), Launcher.LanguageChoice(code: "rus", label: "Russian", folder: "1")]
     b.mods = mods; b.startMaps = [Launcher.StartMap(mod: "Map Pack", map: "Hogsmeade")]
-    b.warning = "This release is not one HPEngine was checked against; it is installed as it is."
-    b.report = URL(string: "https://example.invalid/issue")
+    b.warning = Launcher.overrideWarning(["[Overrides] WARNING: FEOptionsPage.IsSupportedResolution is not in the loaded scripts: the port's override of it does not apply"])
     b.error = Launcher.errorBanner(["[Crash] Missing package \"HP_Menu\"."], code: 1)
     b.runError = b.error
   }
@@ -2643,13 +2751,20 @@ struct MainView: View {
       print(zip(maps, Launcher.startMapLabels(maps)).map { "\($0.map)@\($0.mod)=\($1)" }.joined(separator: "|"))
       print(Launcher.playArguments(game: URL(fileURLWithPath: "/g"), map: Launcher.keptStartMap(a.count == 4 ? a[3] : nil, maps)).joined(separator: " "))
       exit(0)
-    case "--mods-order" where a.count == 3:
-      // <game dir>: each listed mod as "<name>=<order number or ->", "|"-separated (launcher/test_update.sh).
-      let mods = Launcher.modList(game: URL(fileURLWithPath: a[2]))
+    case "--newer-package" where a.count == 4:
+      // <mod dir> <max version>: newerPackage, or "-" (launcher/test_update.sh, against ModOverlay.NewerPackage).
+      print(Launcher.newerPackage(modDir: URL(fileURLWithPath: a[2]), max: Int(a[3]) ?? 0) ?? "-"); exit(0)
+    case "--add-mod" where a.count == 5:
+      // <HP1Setup> <install> <source>: the Mods page's Add (runAddMod), its error or "OK" (launcher/test_update.sh).
+      print(Launcher.runAddMod(tool: URL(fileURLWithPath: a[2]), install: a[3], source: a[4]) ?? "OK"); exit(0)
+    case "--mods-order" where a.count == 3 || a.count == 4:
+      // <game dir> [Mods.ini]: each listed mod as "<name>=<order number or ->", "|"-separated (launcher/test_update.sh);
+      // the Mods.ini given: HP2's layout (modsIni).
+      let mods = Launcher.modList(game: URL(fileURLWithPath: a[2]), ini: a.count == 4 ? URL(fileURLWithPath: a[3]) : nil)
       print(mods.map { "\($0.name)=" + (Launcher.orderNumber(mods, $0).map(String.init) ?? "-") }.joined(separator: "|")); exit(0)
-    case "--mods-conflicts" where a.count == 3:
-      // <game dir>: the conflict lines of the Mods card, one per output line (launcher/test_update.sh).
-      for l in Launcher.conflictLines(game: URL(fileURLWithPath: a[2])) { print(l) }
+    case "--mods-conflicts" where a.count == 3 || a.count == 4:
+      // <game dir> [Mods.ini]: the conflict lines of the Mods card, one per output line (launcher/test_update.sh).
+      for l in Launcher.conflictLines(game: URL(fileURLWithPath: a[2]), ini: a.count == 4 ? URL(fileURLWithPath: a[3]) : nil) { print(l) }
       exit(0)
     case "--language-list" where a.count == 3:
       // <game dir>: "<code>|<label>|<folder or ->" per language, then "selected=<code or ->" (launcher/test_update.sh, against
@@ -2663,9 +2778,9 @@ struct MainView: View {
       catch let e as Launcher.LanguageError { print("FAIL " + e.text); exit(1) }
       catch { print("FAIL \(error)"); exit(1) }
     case "--edition-label" where a.count == 4:
-      // <edition text> <game dir>: the Game card's "name|tier|detail" with that game's languages.
+      // <edition text> <game dir>: the Game card's "name|detail" with that game's languages.
       let d = Launcher.editionDisplay(a[2], Launcher.languages(game: URL(fileURLWithPath: a[3])))
-      print("\(d.name)|\(d.tier)|\(d.detail ?? "-")"); exit(0)
+      print("\(d.name)|\(d.detail ?? "-")"); exit(0)
     case "--pad-reset" where a.count == 3 || (a.count == 4 && a[3] == "reset"):
       // <game dir> [reset]: how many lines "Reset Gamepad Bindings" removes; with "reset" it removes them (launcher/test_update.sh).
       print(Launcher.padRebound(game: URL(fileURLWithPath: a[2]), reset: a.count == 4)); exit(0)
@@ -2686,6 +2801,9 @@ struct MainView: View {
       let click = a.count == 7 ? (a[4] == "new" ? Hp2FrontEnd.Launch.newGame : .loadGame, Int(a[5]) ?? 1, a[6] == "1") : nil
       for l in Hp2FrontEnd.menuReport(hp1Data: a[2], root: a[3], click: click) { print(l) }
       exit(0)
+    case "--override-warning" where a.count == 3:
+      // <log file>: the warning banner the launcher shows after a run (launcher/test_update.sh compares with Desktop.Tests).
+      print(Launcher.overrideWarning(((try? String(contentsOfFile: a[2], encoding: .utf8)) ?? "").components(separatedBy: "\n")) ?? "-"); exit(0)
     case "--pad-map" where a.count == 2:
       // The gamepad table, as launcher/Desktop.Tests --pad-map prints it from Logic.cs PadMap (launcher/test_update.sh compares).
       for l in PadMap.table() { print(l) }

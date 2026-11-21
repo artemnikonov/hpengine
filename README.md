@@ -288,6 +288,7 @@ missing and exits with code 4.
 | HP1 saves | `<game folder>/Save/` | same | same |
 | HP1 settings and logs | `<game folder>/HPEngineData/` (logs in `logs/`) | same | same |
 | HP1 mods | `<game folder>/Mods/` | same | same |
+| HP2 mods | `HP2Data/game/Mods/` (list: `HP2Data/HPEngineData/Mods.ini`) | same | same |
 | HP2 (launcher) | `~/Library/Application Support/HPEngine/HP2Data/` | `%LOCALAPPDATA%\HPEngine\HP2Data\` | `~/.local/share/HPEngine/HP2Data/` |
 
 Harry Potter 2 is installed into `HP2Data/game` beside the first game's folder; its saves and settings are in
@@ -332,15 +333,17 @@ The full layout, interface size, the original-look mode and the other HPEngine s
 
 ## Mods
 
-Existing HP1 mods can be switched on and off without changing your game copy (Chamber of Secrets: mods are not tested
-yet, and the launcher cannot switch them on and off yet):
+Existing mods can be switched on and off without changing your game copy, for both games in the same way. Each game
+tab has a **Mods** row that opens its Mods page:
 
-1. Put the mod's files, as it ships them, into a folder `Mods/<mod name>/` inside the game folder (the launcher's
-   **Open Mods Folder** opens it). Loose packages such as `HPBase.u` are fine: each file goes where the game itself
-   looks for that kind of file.
-2. Switch the mod on in the launcher (or add `Enabled=<mod name>` under `[Mods]` in `HPEngineData/Mods.ini`). When two
-   mods change the same file, the launcher numbers the enabled mods in apply order and the higher number wins; the
-   Mods page names two enabled mods with the same file.
+1. **Add Mod…** (or drop the mod onto the Mods page) takes the mod's folder, its `.zip`, `.7z` or `.rar` archive, or a
+   single game file such as a map (`.unr`). The launcher copies it into `Mods/<mod name>/` in that game's folder; one
+   wrapper folder around the mod (as in `Mod-v1.zip/Mod-v1/System/...`) is dropped. A mod's installer (`.exe`) is
+   never run: unpack the mod first. You can also put the files into the folder yourself (**Open Mods Folder**). Loose
+   packages such as `HPBase.u` are fine: each file goes where the game itself looks for that kind of file.
+2. Switch the mod on (or add `Enabled=<mod name>` under `[Mods]` in `Mods.ini`; see [Where things are](#where-things-are)).
+   When two mods change the same file, the launcher numbers the enabled mods in apply order and the higher number wins;
+   the Mods page names two enabled mods with the same file. **×** on a mod's row removes it (to the Trash / Recycle Bin).
 
 A mod that adds its own maps: choose the map in **Start map** next to **Play** (without the launcher:
 `--map <map name>`).
@@ -354,6 +357,10 @@ expect to work. Checked on 0.3.0: every map of 11 popular mods, including Restor
 named `Entry` (they have no player start; the original stops on them too) and Sofas and Armchairs, which needs a class
 from Harry Potter 2. Mods made for the fan 1.55 may misbehave on 1.53. If a mod fails, the launcher shows the reason:
 please report it with the mod's name. Check any other bug without mods before reporting it.
+
+Chamber of Secrets: the mods published so far (maps, cutscene and script mods) are made for Metallicafan212's later HP2
+engine and editor; their packages have a newer format than the retail game's, and HPEngine cannot open them yet. The
+Mods page says so under such a mod, and Play refuses while it is on. A mod for the retail game is expected to load.
 
 ## Known issues
 
@@ -377,7 +384,7 @@ Harry Potter 2 (first beta):
 
 - Its campaign has not yet been played through to the end on HPEngine; please report anything that stops you.
 - Rebinding keys or buttons on its Controls page is not available yet.
-- Mods are not tested yet, and the launcher cannot switch them on and off yet.
+- Mods made for Metallicafan212's HP2 engine (all published HP2 map and script mods checked) do not load yet: see [Mods](#mods).
 
 ## Reporting a bug
 

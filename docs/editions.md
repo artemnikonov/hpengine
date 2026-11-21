@@ -2,8 +2,11 @@
 
 Harry Potter and the Philosopher's Stone (PC, 2001) shipped in several releases whose DLLs and scripts are not identical.
 HPEngine treats **US 1.53** as the reference and identifies the install it is given from SHA-1 hashes, so that Core can select
-the matching native behaviour and the launcher can name what it found and warn when it is not verified. UK 1.1 and the Russian EA release
-are supported but not yet proven exact; the European English release is unknown; the fan "1.55" patch and other modified copies run with a warning.
+the matching native behaviour. UK 1.1 and the Russian EA release
+are supported but not yet proven exact; the European English release is unknown; the fan "1.55" patch and other modified copies are classified as modified.
+The tiers below are the engine's own bookkeeping and the list of releases the port was checked against: the launcher does not
+show them. Any other release installs and runs without a label; if something does not work, it shows up in the log (and a
+port fix that finds no target in the copy's scripts is reported after the run).
 
 ## Support tiers
 
@@ -13,7 +16,7 @@ are supported but not yet proven exact; the European English release is unknown;
 | UK English 1.1 | supported | plays through; not proven exact (no journal of the running original for this build) |
 | Russian EA release | supported | plays through; menu text in a substitute font (not original); several native bodies not yet judged |
 | European English | unknown | no reference copy; a player is asked to send hashes (below) |
-| fan "1.55" patch, modded re-releases | modified | installed and run with a warning (author decision 2026-11-10) |
+| fan "1.55" patch, modded re-releases | modified | installed and run; the log names the differing files (author 2026-11-20: no warning in the launcher) |
 
 (`../README.md`, `../launcher/HP1Setup/Program.cs`.)
 
@@ -28,7 +31,7 @@ are supported but not yet proven exact; the European English release is unknown;
   the port uses. An executable outside the table leaves the data set's plain id.
 - The launcher (`HP1Setup`) links this same class, so setup and Core cannot disagree. A recognised supported edition must
   then match its full manifest (`us153.sha1`, `uk11.sha1`, `ru_ea.sha1`: size and SHA-1 of every file the port loads by
-  package name); any difference is reported as "modified". Hashes only: no game bytes are in the repository.
+  package name); any difference is written to the setup log as "modified" (not shown in the launcher). Hashes only: no game bytes are in the repository.
 - Core asks the one owner for the Render.dll build (US, UK or Russian) and for the float-evaluation order of a few bodies;
   an unknown render build runs the US bodies.
 

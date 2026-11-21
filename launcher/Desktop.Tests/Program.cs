@@ -36,19 +36,26 @@ static partial class T
             Console.WriteLine("selected=" + (HPEngine.Packaging.GameLanguage.Selected(args[1]) ?? "-"));
             return 0;
         }
+        if (args.Length == 2 && args[0] == "--override-warning")
+        {
+            Console.WriteLine(EngineError.OverrideWarning(File.ReadAllLines(args[1])) ?? "-");
+            return 0;
+        }
         if (args.Length == 3 && args[0] == "--edition-label")
         {
             var d = EditionLabel.Describe(args[1], HPEngine.Packaging.GameLanguage.Available(args[2]));
-            Console.WriteLine($"{d.Name}|{d.Tier}|{d.Detail ?? "-"}");
+            Console.WriteLine($"{d.Name}|{d.Detail ?? "-"}");
             return 0;
         }
         if (args.Length == 3 && args[0] == "--hp2-frontend") return Hp2FrontEndCases(args[1], args[2]);
         if ((args.Length == 3 || args.Length == 6) && args[0] == "--hp2-menu") return Hp2Menu(args);
-        if (args.Length == 2 && args[0] == "--mods-conflicts")
+        if (args.Length is 2 or 3 && args[0] == "--mods-conflicts")   // [data dir]: HP2's layout
         {
-            foreach (var l in ModsIni.Conflicts(args[1])) Console.WriteLine(l);
+            foreach (var l in ModsIni.Conflicts(args[1], args.Length == 3 ? args[2] : null)) Console.WriteLine(l);
             return 0;
         }
+        if (args.Length == 3 && args[0] == "--newer-package")   // the owner of launcher/Launcher.swift newerPackage
+        { Console.WriteLine(HPEngine.Packaging.ModOverlay.NewerPackage(args[1], int.Parse(args[2])) ?? "-"); return 0; }
         if (args.Length == 3 && args[0] == "--language-shot")
         { LanguageShot(args[1], args[2]); return 0; }
         if (args.Length == 2 && args[0] == "--shots") { Shots(args[1]); return 0; }
@@ -75,7 +82,7 @@ static partial class T
         }
         // The checks below run the preview build's HP2 tab; Hp2Off checks the release switch off.
         bool releaseDefault = Hp2Release.Available; Hp2Release.Available = true;
-        Protocol(); Ini(); Dirs(); Releases(); Removal(); Smoke(); Hp2Off(releaseDefault); Notice(); Errors(); ModProblems(); ModConflicts(); StartMaps(); OwnGame(); PadResetRule(); PadCases(); ScopeCases(); SelfUpdateCases(); SteamCases(); TitleCases(); Languages(); Hp2Tab(); Hp2Install(); ErrorBannerWindow();
+        Protocol(); Ini(); Dirs(); Releases(); Removal(); Smoke(); Hp2Off(releaseDefault); Notice(); Errors(); ModProblems(); ModConflicts(); StartMaps(); OwnGame(); PadResetRule(); PadCases(); ScopeCases(); SelfUpdateCases(); SteamCases(); TitleCases(); Languages(); Hp2Tab(); Hp2Install(); ErrorBannerWindow(); ModAdd(); Hp2Mods();
         Console.WriteLine("branches: " + string.Join(" ", fired.OrderBy(x => x)));
         if (fails > 0) return 1;
         foreach (var b in new[] { "language:overlay", "language:window", "language:missing", "language:stale", "language:default", "language:edition" })
@@ -85,7 +92,7 @@ static partial class T
         foreach (var b in new[] { "upd:signed-good", "upd:refused", "upd:zip", "upd:apply", "upd:rollback", "upd:rollback-backup", "upd:rollback-incomplete", "upd:marker-shown", "upd:log-denied", "upd:helper-cleanup", "upd:helper", "upd:helper-waits", "upd:helper-timeout", "upd:install-error", "upd:pick" })
             if (!fired.Contains(b)) { Console.WriteLine("NOVERDICT: branch did not execute: " + b); return 3; }
         if (!OperatingSystem.IsWindows() && !Environment.IsPrivilegedProcess && !fired.Contains("upd:cleanup-denied")) { Console.WriteLine("NOVERDICT: branch did not execute: upd:cleanup-denied"); return 3; }
-        foreach (var b in new[] { "hp2:tab", "hp2:hp1-unchanged" })
+        foreach (var b in new[] { "hp2:tab", "hp2:hp1-unchanged", "hp2:mods", "mods:add", "hp2:newer-engine" })
             if (!fired.Contains(b)) { Console.WriteLine("NOVERDICT: branch did not execute: " + b); return 3; }
         foreach (var b in new[] { "hp2:play-args", "hp2:install" })
             if (!OperatingSystem.IsWindows() && !fired.Contains(b)) { Console.WriteLine("NOVERDICT: branch did not execute: " + b); return 3; }
@@ -108,6 +115,9 @@ static partial class T
         Eq("WARNING", (SetupKind.Warning, "modified", "Modified scripts."), (k("WARNING modified Modified scripts.").Kind, k("WARNING modified Modified scripts.").Key, k("WARNING modified Modified scripts.").Text));
         var ed = k("EDITION us153 US 1.53: exact");
         Eq("EDITION", ("us153", "US 1.53: exact"), (ed.Key, ed.Text));
+        var miss = "[Overrides] WARNING: FEOptionsPage.IsSupportedResolution is not in the loaded scripts: the port's override of it does not apply";
+        Eq("override miss -> a warning naming it", true, EngineError.OverrideWarning(new[] { "x", miss }) is string ow && ow.Contains("FEOptionsPage.IsSupportedResolution") && ow.StartsWith("1 of"));
+        Eq("a changed override or other log lines -> no warning", null, EngineError.OverrideWarning(new[] { "[Overrides] WARNING: A.B differs from the original", "core boot 5 ms" }));
         Eq("DONE", (SetupKind.Done, "/x/game"), (k("DONE /x/game").Kind, k("DONE /x/game").Text));
         fired.Add("proto:all-kinds");
         foreach (var bad in new[] { "", "HELLO", "STEP", "STEP bogus", "PROGRESS", "PROGRESS x", "PROGRESS 101", "PROGRESS -1", "ERROR", "ERROR keyonly", "WARNING k ", "EDITION", "DONE", "REPORT", "REPORT http://x" })
@@ -751,7 +761,7 @@ static partial class T
             File.WriteAllText(ini, "[Mods]\n; order matters\nEnabled=Beta\nEnabled=Alpha\n");
             w = new MainWindow(game, tmp, "0.1.0-beta", false); w.Show(); Dispatcher.UIThread.RunJobs();
             Check("installed: ready, Play shown", Find<StackPanel>(w, "ReadyPanel").IsVisible && Find<Button>(w, "PlayButton").IsVisible && !Find<StackPanel>(w, "SetupPanel").IsVisible);
-            Check("installed: no edition chip for a tested edition (US 1.53 exact)", !Find<TextBlock>(w, "EditionText").IsEffectivelyVisible && !Find<TextBlock>(w, "EditionChip").IsEffectivelyVisible);
+            Check("installed: no edition chip (US 1.53)", !Find<TextBlock>(w, "EditionText").IsEffectivelyVisible);
             string Rows() => string.Join("|", Find<StackPanel>(w, "ModsList").GetLogicalDescendants().OfType<ToggleSwitch>().Select(c => c.Name[4..] + (c.IsChecked == true ? "+" : "-")));
             Eq("mods list reflects Mods.ini", "Beta+|Alpha+|Gamma-", Rows());
             // the bundled Cormorant Garamond where a renderer loads it (the Skia screenshots print it), else the system serif
@@ -771,11 +781,12 @@ static partial class T
             fired.Add("smoke:reorder");
             // HP1Setup lines drive the same window
             var odd = new List<string>();
-            w.Handle("WARNING unverified Odd edition.", odd); w.Handle("garbage", odd);
+            // Author 2026-11-20 lock: WARNING (modified / localized / unverified) and REPORT lines never reach the player
+            foreach (var quiet in new[] { "WARNING modified 3 game file(s) differ from UK 1.1", "WARNING localized 3 localized game file(s) are for the language of this copy", "WARNING unverified Odd edition.", "REPORT https://github.com/artemnikonov/hpengine/issues/new?title=x" })
+                w.Handle(quiet, odd);
+            Check("WARNING modified/localized/unverified and REPORT are not shown", !Find<TextBlock>(w, "WarningText").IsEffectivelyVisible && odd.Count == 0, Find<TextBlock>(w, "WarningText").Text);
+            w.Handle("garbage", odd);
             Check("malformed setup line shown", Find<TextBlock>(w, "WarningText").Text.Contains("garbage") && odd.Count == 1);
-            Check("no Report button without a REPORT line", !Find<Button>(w, "ReportButton").IsVisible);
-            w.Handle("REPORT https://github.com/artemnikonov/hpengine/issues/new?title=x", odd);
-            Check("REPORT line shows the Report button in the warning banner", Find<Button>(w, "ReportButton").IsVisible && odd.Count == 1);
             fired.Add("smoke:report");
             // Gamepad (proposal §6): focus starts on the primary, A presses it, RB/LB switch the game, B leaves a sub-page
             Check("pad: focus starts on Play", w.FocusManager?.GetFocusedElement() == Find<Button>(w, "PlayButton"));

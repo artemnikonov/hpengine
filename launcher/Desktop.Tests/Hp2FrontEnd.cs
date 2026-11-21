@@ -174,7 +174,7 @@ static partial class T
             }
             Click("Hp2Back");   // Windows: still on the New Game page (no stand-in engine run)
             Check("hp2 tab: New Game and Load Game only (Options are the game's own menu, author 2026-11-16)", Find<Button>(w, "Hp2Options") == null
-                && Find<StackPanel>(w, "Hp2Panel").GetLogicalDescendants().OfType<Button>().Select(b => b.Name).Where(n => n != null).SequenceEqual(new[] { "Hp2NewGame", "Hp2LoadGame" }));
+                && Find<StackPanel>(w, "Hp2Panel").GetLogicalDescendants().OfType<Button>().Select(b => b.Name).Where(n => n != null).SequenceEqual(new[] { "Hp2NewGame", "Hp2LoadGame", "Hp2ModsRow" }));
             Eq("hp2 tab: nothing in the install touched (its Save folder: the player's real saves)", before, Tree(h2));
             Click("TabHp1");
             Check("hp1 tab: the ready panel and Play back, the HP2 menu hidden", Find<StackPanel>(w, "ReadyPanel").IsVisible && Find<Button>(w, "PlayButton").IsVisible && !Find<StackPanel>(w, "Hp2Panel").IsVisible);
@@ -218,12 +218,12 @@ static partial class T
             Eq("hp2 install: HP1Setup --game hp2 into <HP2Data>/game", $"--game|hp2|--dest|{Path.Combine(tmp, "HP2Data", "game")}|{Path.Combine(tmp, "HP2 CD")}",
                 File.Exists(setup + ".args") ? string.Join("|", File.ReadAllLines(setup + ".args")) : "-");
             Check("hp2 install: done -> the HP2 menu, no edition chip for a tested edition (RU EA supported)", Find<Button>(w, "Hp2NewGame") != null && !Find<StackPanel>(w, "SetupPanel").IsVisible
-                && !Find<TextBlock>(w, "EditionText").IsEffectivelyVisible && !Find<TextBlock>(w, "EditionChip").IsEffectivelyVisible);
+                && !Find<TextBlock>(w, "EditionText").IsEffectivelyVisible);
             w.Add(Path.Combine(tmp, "other"));
             Check("hp2 install: files chosen again -> the setup view, Install Again", Find<StackPanel>(w, "SetupPanel").IsVisible && Find<Button>(w, "InstallButton").IsVisible
                 && ((StackPanel)Find<Button>(w, "InstallButton").Content).Children.OfType<TextBlock>().Any(t => t.Text == "Install Again"));
             w.Handle("WARNING modified This copy of the game is modified.", new List<string>());
-            Check("hp2 install: a WARNING shows on the HP2 tab", Find<TextBlock>(w, "WarningText") is { IsEffectivelyVisible: true, Text: "This copy of the game is modified." });
+            Check("hp2 install: WARNING modified is not shown (author 2026-11-20)", Find<TextBlock>(w, "WarningText").Text?.Contains("modified") != true, "text=" + Find<TextBlock>(w, "WarningText").Text);
             Click("TabHp1");
             Check("hp2 install: HP1's tab afresh (its ready panel, no HP2 warning or files)", Find<StackPanel>(w, "ReadyPanel").IsVisible && !Find<TextBlock>(w, "WarningText").IsEffectivelyVisible
                 && Find<TextBlock>(w, "Title").Text != MainWindow.Hp2Title);

@@ -7,33 +7,25 @@ using System.Text.Json;
 
 namespace HPEngine.Launcher;
 
-// The installed edition's name and tier as the Game card shows them. A matching engine family does not identify a disc's
+// The installed edition's name (never its support tier: author 2026-11-20, every copy runs, the log has the tier) as the Game card shows them. A matching engine family does not identify a disc's
 // region: the Nordic multilingual CD uses the same native/script hashes as the family called UK 1.1, and its language
 // files differ from that reference manifest. The title stays GameTitle.For(edition) (by the DLL set). Mirrored by the
 // macOS Launcher (Launcher.swift editionDisplay).
 public static class EditionLabel
 {
-    public sealed record Display(string Name, string Tier, string Detail);
+    public sealed record Display(string Name, string Detail);
 
     public static Display Describe(string edition, IReadOnlyList<HPEngine.Packaging.LanguageChoice> languages)
     {
         var parts = (edition ?? "").Split(": ");
         string name = parts.Length > 1 ? string.Join(": ", parts[..^1]) : edition;
-        string tier = parts.Length > 1 ? parts[^1] : "";
-        if (languages.Count < 2) return new(name, tier, null);
+        if (languages.Count < 2) return new(name, null);
         var codes = languages.Select(l => l.Code).ToHashSet(StringComparer.OrdinalIgnoreCase);
         bool nordic = codes.SetEquals(new[] { "dan", "eng", "fin", "nor", "swe" });
         string detail = (string.IsNullOrEmpty(name) ? "" : "Engine family: " + name + ". ")
             + "Languages: " + string.Join(", ", languages.Select(l => l.Label)) + ".";
-        // The engine's identity/support decisions stay intact. The UI reports the manifest difference without
-        // implying that a genuine multilingual disc was patched. This does not authenticate an exact disc image.
-        return new(nordic ? "Nordic multilingual data" : "Multilingual game data",
-            nordic && name == "UK 1.1" && tier == "modified" ? "different data" : tier, detail);
+        return new(nordic ? "Nordic multilingual data" : "Multilingual game data", detail);
     }
-
-    // Author 2026-11-20: HPEngine runs every copy; the launcher names the edition only to warn (a modified or unknown
-    // copy). A tested edition, and the genuine Nordic disc's manifest difference, show nothing.
-    public static bool Quiet(string tier) => tier is "exact" or "supported" or "different data";
 }
 
 public enum SetupKind { Step, Progress, Error, Warning, Edition, Report, Done, Malformed }
@@ -103,6 +95,8 @@ public static class ModsIni
 {
     // Under the list while a mod is on; the numbers are the apply order (Launcher.swift orderHint).
     public const string OrderHint = "Enabled mods apply in number order: a higher number wins";
+    // The empty Mods page (Launcher.swift noModsText).
+    public const string NoMods = "No mods yet. Drop a mod's folder or archive (.zip, .7z, .rar) here, or use Add Mod; it shows up here to switch on and off.";
 
     static bool IsEnabledLine(string l, bool inMods, out string name)
     {
@@ -158,12 +152,14 @@ public static class ModsIni
         return string.Join(nl, outp) + nl;
     }
 
-    public static string IniPath(string gameDir) => Path.Combine(gameDir, "HPEngineData", "Mods.ini");
+    // dataDir: the folder HPEngine runs the game with (GameScope.DataDir): HP1 <game>/HPEngineData (the default), HP2
+    // <HP2Data>/HPEngineData beside its game folder. The mods themselves are in <game>/Mods for both (ModOverlay).
+    public static string IniPath(string gameDir, string dataDir = null) => Path.Combine(dataDir ?? Path.Combine(gameDir, "HPEngineData"), "Mods.ini");
 
     // Enabled mods in file order (also those whose folder is gone: Present=false, kept), then the other folders by name.
-    public static List<ModEntry> Load(string gameDir)
+    public static List<ModEntry> Load(string gameDir, string dataDir = null)
     {
-        var ini = IniPath(gameDir);
+        var ini = IniPath(gameDir, dataDir);
         var enabled = File.Exists(ini) ? ReadEnabled(File.ReadAllText(ini)) : new List<string>();
         var modsDir = Path.Combine(gameDir, "Mods");
         var found = Directory.Exists(modsDir)
@@ -184,6 +180,20 @@ public static class ModsIni
             ? $"The mod {gone[0]} is on, but its folder is gone. Turn off {gone[0]} or put its folder back into Mods."
             : $"The mods {And(gone)} are on, but their folders are gone. Turn off {And(gone)} or put their folders back into Mods.";
     }
+
+    // HP2 only: the line of a mod made for a newer HP2 engine (a package newer than HP2's retail format,
+    // ModOverlay.NewerPackage; the engine refuses it, exit code 5); null: none or no folder. Under the mod on the Mods page.
+    public static string NewerEngine(string gameDir, ModEntry m)
+    {
+        var dir = HPEngine.Packaging.ModOverlay.FindDir(Path.Combine(gameDir, "Mods"), m.Name);
+        return dir != null && HPEngine.Packaging.ModOverlay.NewerPackage(dir, HPEngine.Packaging.ModOverlay.Hp2PackageVersion) != null
+            ? HPEngine.Packaging.ModOverlay.NewerHp2Engine(m.Name) : null;
+    }
+
+    // Why HP2's Play cannot start: the first enabled such mod (as Missing); null: none.
+    public static string NewerEngine(string gameDir, IEnumerable<ModEntry> mods) =>
+        mods.Where(m => m.Enabled && m.Present).Select(m => NewerEngine(gameDir, m)).FirstOrDefault(t => t != null) is string t
+            ? t + ". Turn it off in Mods." : null;
 
     public static string And(IReadOnlyList<string> n) => n.Count == 1 ? n[0] : string.Join(", ", n.Take(n.Count - 1)) + " and " + n[^1];
 
@@ -213,21 +223,39 @@ public static class ModsIni
     // One line per pair of enabled mods that both carry a file at the same game path (the engine's placement,
     // ModOverlay.Conflicts): the later mod's file is used. None while the mods cannot be placed (Play reports that).
     // Same texts in Launcher.swift conflictLines.
-    public static List<string> Conflicts(string gameDir)
+    public static List<string> Conflicts(string gameDir, string dataDir = null)
     {
         List<(string Earlier, string Later, List<string> Files)> pairs;
-        try { pairs = HPEngine.Packaging.ModOverlay.Conflicts(gameDir, Path.Combine(gameDir, "HPEngineData")); }
+        try { pairs = HPEngine.Packaging.ModOverlay.Conflicts(gameDir, dataDir ?? Path.Combine(gameDir, "HPEngineData")); }
         catch (Exception e) when (e is HPEngine.Packaging.ModOverlayException or IOException or UnauthorizedAccessException) { return new(); }
         return pairs.Select(p => $"{p.Later} and {p.Earlier} both have " + (p.Files.Count == 1 ? p.Files[0] : $"{p.Files[0]} and {p.Files.Count - 1} more file" + (p.Files.Count == 2 ? "" : "s"))
             + $": the game uses {p.Later}'s (later in the order)").ToList();
     }
 
-    public static void Save(string gameDir, IEnumerable<ModEntry> mods)
+    public static void Save(string gameDir, IEnumerable<ModEntry> mods, string dataDir = null)
     {
-        var ini = IniPath(gameDir);
+        var ini = IniPath(gameDir, dataDir);
         Directory.CreateDirectory(Path.GetDirectoryName(ini));
         var old = File.Exists(ini) ? File.ReadAllText(ini) : "";
         File.WriteAllText(ini, WriteEnabled(old, mods.Where(m => m.Enabled).Select(m => m.Name).ToList()), new UTF8Encoding(false));
+    }
+
+    // The Mods page's "Add": a mod folder or archive into <game>/Mods (hpengine/packaging/ModInstall.cs, the rule both
+    // Launchers use). It is added switched off. Returns the error text for the page; null: added.
+    public static string Add(string gameDir, string source)
+    {
+        try { HPEngine.Packaging.ModInstall.Add(gameDir, source); return null; }
+        catch (Exception e) when (e is InvalidDataException or IOException or UnauthorizedAccessException) { return "Could not add the mod: " + e.Message; }
+    }
+
+    // The Mods page's "Remove": the mod is switched off in Mods.ini first, then its folder goes (dispose: the Recycle Bin on
+    // Windows; null: deleted, ModInstall.Remove). Same order in Launcher.swift removeMod.
+    public static void Remove(string gameDir, string dataDir, IEnumerable<ModEntry> mods, string name, Action<string> dispose = null)
+    {
+        Save(gameDir, mods.Where(m => !m.Name.Equals(name, StringComparison.OrdinalIgnoreCase)), dataDir);
+        var dir = HPEngine.Packaging.ModOverlay.FindDir(Path.Combine(gameDir, "Mods"), name);
+        if (dir == null) return;
+        if (dispose != null) dispose(dir); else HPEngine.Packaging.ModInstall.Remove(gameDir, name);
     }
 }
 
@@ -278,6 +306,17 @@ public static class EngineError
 
     // The banner (author 2026-11-17): what happened in plain words, then the engine's line on its own line when there is one.
     // No file path: "Open log" opens the right log (GameScope.LogToOpen).
+    // Author 2026-11-20: the only thing the launcher warns about besides a missing file. The game logs "[Overrides] WARNING:
+    // <Class.Function> is not in the loaded scripts: ..." when a port script fix finds no target in this copy's scripts.
+    // Mirrored by Launcher.overrideWarning (launcher/Launcher.swift).
+    public static string OverrideWarning(IEnumerable<string> lines)
+    {
+        const string prefix = "[Overrides] WARNING: ";
+        var miss = lines.Where(l => l.StartsWith(prefix, StringComparison.Ordinal) && l.Contains(" is not in the loaded scripts"))
+            .Select(l => l[prefix.Length..].Split(' ')[0]).ToList();
+        return miss.Count == 0 ? null : $"{miss.Count} of the port's fixes do not apply to this copy of the game ({string.Join(", ", miss)}), so those parts may not work as intended. The log has the details.";
+    }
+
     public static string Banner(IEnumerable<string> lines, int code) =>
         $"The game stopped with an error (code {code})." + (Pick(lines, code) is string l ? "\n" + l.Trim() : "");
 }
@@ -392,7 +431,7 @@ public static class PadReset
         return string.Join('\n', kept);
     }
 
-    // Lines a reset would remove (0 = nothing was rebound: the menu item is off). reset: also write the files back.
+    // Lines a reset would remove (0 = nothing was rebound; the menu item stays enabled, author 2026-11-20). reset: also write the files back.
     public static int Rebound(string gameDir, bool reset = false)
     {
         var n = 0;

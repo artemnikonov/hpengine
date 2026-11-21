@@ -140,7 +140,7 @@ namespace HPEngine
                 };
             }
             // An edition UEEdition does not recognise runs, with its warning in the console and the run log.
-            if (UEEdition.Of(root).Warning is string editionWarning) Console.Error.WriteLine("[Edition] WARNING: " + editionWarning);
+            if (UEEdition.Of(root).Warning is string editionWarning) Console.Error.WriteLine("[Edition] " + editionWarning);
             // A game Core recognises but cannot play yet (HP2): refused before Boot, which would run it to its first STOP.
             // NOT ORIGINAL: the launcher's HP2 tab (--hp2-cmdline) starts the partial port anyway; it runs to its first STOP.
             if (hp2CmdLine is null && UEGameProfile.Of(UEEdition.Of(root).Game).NotPorted is string notPorted)
@@ -157,6 +157,12 @@ namespace HPEngine
             {
                 try
                 {
+                    // HP2: a mod with a package newer than the retail format does not run (Core's profile; ModOverlay.NewerPackage)
+                    if (UEGameProfile.Of(UEEdition.Of(install).Game).MaxPackageVersion is int maxVersion)
+                        foreach (string mod in HPEngine.Packaging.ModOverlay.Enabled(DataDir(install)))
+                            if (HPEngine.Packaging.ModOverlay.FindDir(Path.Combine(install, HPEngine.Packaging.ModOverlay.ModsDirName), mod) is string modDir
+                                && HPEngine.Packaging.ModOverlay.NewerPackage(modDir, maxVersion) is string newer)
+                                throw new HPEngine.Packaging.ModOverlayException($"{HPEngine.Packaging.ModOverlay.NewerHp2Engine(mod)} ({newer}; this game reads up to version {maxVersion}). Turn it off in the launcher's Mods page.");
                     var mods = HPEngine.Packaging.ModOverlay.Prepare(install, DataDir(install));
                     root = mods.GameRoot;
                     activeMods = mods.Active;
@@ -168,6 +174,9 @@ namespace HPEngine
                     if (mods.Misplaced.Count > 0)
                         Console.Error.WriteLine($"[Mods] WARNING: {mods.Misplaced.Count} files are not in a game folder (System, Maps, ...), the game does not open them: "
                             + string.Join(", ", mods.Misplaced) + ". Unpack the mod so these folders are directly inside Mods/<name>.");
+                    if (mods.Newer?.Count > 0)
+                        Console.Error.WriteLine($"[Mods] WARNING: {mods.Newer.Count} packages were saved by a newer engine than this game's (package version): "
+                            + string.Join(", ", mods.Newer.Take(8)) + (mods.Newer.Count > 8 ? ", ..." : "") + ". If the game stops loading them, the mod needs that engine.");
                 }
                 catch (Exception e) when (e is HPEngine.Packaging.ModOverlayException or IOException or UnauthorizedAccessException)
                 {
@@ -375,6 +384,7 @@ namespace HPEngine
                 host.Natives.UseViewportDevice(vp);
                 WindowViewport = vp;
                 SdlViewportDevice.OpenStartup(vp, host.Runtime.Config, Environment.CommandLine, sizeFromArgs || OffscreenWindow ? (w, h) : null);
+                if (!OffscreenWindow) SDL_ShowWindow(r.Window);   // created hidden (SdlRenderer.Create); a fullscreen startup shows it inside Resize
                 Console.WriteLine($"[Viewport] {vp.SizeX}x{vp.SizeY}{(vp.Fullscreen ? " fullscreen" : " window")}");
                 // Warm-up ticks step Core at the window's real pixel size, not the 1280x720 default: the shipped viewport
                 // has its final size before the first frame, and HP2 HPConsole creates the UWindow root once, at the first

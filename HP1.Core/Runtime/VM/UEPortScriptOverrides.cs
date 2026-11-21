@@ -89,6 +89,7 @@ namespace HP1.UEScript
             ("FEOptionsPage", "LoadAvailableSettings", OptionsLoadSettings),
             ("FEOptionsPage", "SettingsChanged", OptionsSettingsChanged),
             ("FEOptionsPage", "ObjectDetailChanged", OptionsInterfaceSizeChanged),
+            ("FEOptionsPage", "SensitivityChanged", SensitivitySaved),
             ("FEOptionsPage", "LocalizeStrings", OptionsLocalizeKeyNames),
             ("FEOptionsPage", "BeforePaint", OptionsBeforePaint),
             ("FEOptionsPage", "LoadExistingKeys", OptionsLoadKeys),
@@ -332,6 +333,7 @@ namespace HP1.UEScript
             ("US153", "FEOptionsPage.LoadExistingKeys", "abf07bb1b46e42b5"),
             ("US153", "FEOptionsPage.SettingsChanged", "7004e9f5fc323487"),
             ("US153", "FEOptionsPage.ObjectDetailChanged", "80b85efbe1882f29"),
+            ("US153", "FEOptionsPage.SensitivityChanged", "559d0e814283eb7b"),
             ("US153", "FEOptionsPage.ProcessKey", "c3c6be9e2d597dfe"),
             ("US153", "killbean.Tick", "7705e1c7b0f236c0"),
             ("US153", "stateJump.HitWall", "2658214266400307"),
@@ -348,6 +350,7 @@ namespace HP1.UEScript
             ("UK11", "FEOptionsPage.LoadExistingKeys", "abf07bb1b46e42b5"),
             ("UK11", "FEOptionsPage.SettingsChanged", "7004e9f5fc323487"),
             ("UK11", "FEOptionsPage.ObjectDetailChanged", "80b85efbe1882f29"),
+            ("UK11", "FEOptionsPage.SensitivityChanged", "559d0e814283eb7b"),
             ("UK11", "FEOptionsPage.ProcessKey", "c3c6be9e2d597dfe"),
             ("UK11", "HPMenuOptionCheckBox.BeforePaint", "640ad1d86e3e9c29"),
             ("UK11", "killbean.Tick", "7705e1c7b0f236c0"),
@@ -367,6 +370,7 @@ namespace HP1.UEScript
             ("RU_EA", "FEOptionsPage.LoadExistingKeys", "abf07bb1b46e42b5"),
             ("RU_EA", "FEOptionsPage.SettingsChanged", "7004e9f5fc323487"),
             ("RU_EA", "FEOptionsPage.ObjectDetailChanged", "80b85efbe1882f29"),
+            ("RU_EA", "FEOptionsPage.SensitivityChanged", "559d0e814283eb7b"),
             ("RU_EA", "FEOptionsPage.ProcessKey", "c3c6be9e2d597dfe"),
             ("RU_EA", "killbean.Tick", "7705e1c7b0f236c0"),
             ("RU_EA", "stateJump.HitWall", "2658214266400307"),
@@ -387,6 +391,7 @@ namespace HP1.UEScript
             ("MODDED_EN", "FEOptionsPage.LoadExistingKeys", "abf07bb1b46e42b5"),
             ("MODDED_EN", "FEOptionsPage.SettingsChanged", "7004e9f5fc323487"),
             ("MODDED_EN", "FEOptionsPage.ObjectDetailChanged", "80b85efbe1882f29"),
+            ("MODDED_EN", "FEOptionsPage.SensitivityChanged", "559d0e814283eb7b"),
             ("MODDED_EN", "FEOptionsPage.ProcessKey", "c3c6be9e2d597dfe"),
             ("MODDED_EN", "killbean.Tick", "7705e1c7b0f236c0"),
             ("MODDED_EN", "stateJump.HitWall", "2658214266400307"),
@@ -880,6 +885,19 @@ namespace HP1.UEScript
         }
 
         public const int ComboVisible = 4;
+
+        // HP1 FEOptionsPage.SensitivityChanged (NOT ORIGINAL, improvement; author 2026-11-20): the shipped body sets the player's
+        // MouseSensitivity and never saves it (no SaveConfig in FEOptionsPage), so the slider reverted at every start. The
+        // player's config is saved after the shipped body, as HP2's FEInputPage.HideWindow does.
+        static object SensitivitySaved(UEInterpreter interp, UEObject self, object[] args, Func<object> original)
+        {
+            UEObject player = Call(interp, self, "GetPlayerOwner") as UEObject ?? throw new InvalidOperationException("FEOptionsPage: no player owner");
+            float before = UEInterpreter.AsFloat(player.GetProp("MouseSensitivity"));
+            object r = original();
+            // Only a real change: the page's own refill (LoadAvailableSettings -> Notify) sets the value it just read.
+            if (UEInterpreter.AsFloat(player.GetProp("MouseSensitivity")) != before) Call(interp, player, "SaveConfig");
+            return r;
+        }
 
         static object Call(UEInterpreter interp, UEObject o, string fn, params object[] a)
             => interp.Invoke(o, interp.FindGlobalFunction(o, fn)

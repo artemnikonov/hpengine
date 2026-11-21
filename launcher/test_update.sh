@@ -321,8 +321,17 @@ for e in "UK 1.1: modified" "US 1.53: exact"; do for g in "$G3" "$G1"; do
     a=$("$L" --edition-label "$e" "$g"); b=$(DT --edition-label "$e" "$g")
     [ "$a" = "$b" ] && ok "edition_label_as_owner: $a" || bad "edition_label_as_owner: launcher '$a', owner '$b'"; done; done
 got=$("$L" --edition-label "UK 1.1: modified" "$G3")
-[ "$got" = "Nordic multilingual data|different data|Engine family: UK 1.1. Languages: Danish, English, Finnish, Norwegian, Swedish." ] && ok "edition_label_nordic" || bad "edition_label_nordic: '$got'"
+[ "$got" = "Nordic multilingual data|Engine family: UK 1.1. Languages: Danish, English, Finnish, Norwegian, Swedish." ] && ok "edition_label_nordic" || bad "edition_label_nordic: '$got'"
 
+# Author 2026-11-20: after a run the launcher warns only about a port script fix that found no target in this copy's scripts.
+printf 'core boot 5 ms\n[Overrides] WARNING: FEOptionsPage.IsSupportedResolution is not in the loaded scripts: the port override of it does not apply\n[Overrides] WARNING: A.B differs from the original\n' > "$T/ovr.log"
+a=$("$L" --override-warning "$T/ovr.log"); b=$(DT --override-warning "$T/ovr.log")
+[ "$a" = "$b" ] && case "$a" in "1 of the port's fixes"*FEOptionsPage.IsSupportedResolution*) ok "override_warning_as_owner";; *) bad "override_warning_as_owner: '$a'";; esac || bad "override_warning_as_owner: launcher '$a', owner '$b'"
+printf '[Overrides] WARNING: A.B differs from the original\n' > "$T/ovr2.log"
+[ "$("$L" --override-warning "$T/ovr2.log")" = "-" ] && [ "$(DT --override-warning "$T/ovr2.log")" = "-" ] && ok "override_warning_none" || bad "override_warning_none"
+# Lock: neither launcher shows HP1Setup's WARNING lines (modified / localized / unverified) or an edition tier.
+hits=$({ grep -n 'case "WARNING"' "$HERE/Launcher.swift"; grep -nE '_warning = l\.Text|"verified"|"supported"|different data' "$HERE"/Desktop/*.cs "$HERE/Launcher.swift"; } | grep -vE ':[0-9]+: *//')
+[ -z "$hits" ] && ok "no_setup_warning_banner_lock" || bad "no_setup_warning_banner_lock: $hits"
 
 # HP2 tab: the Launcher's mirror of Hp2FrontEnd (launcher/Desktop/Logic.cs, judged against HP2 Game.exe by
 # tools/hp2/frontend_judge.sh) answers the judge's own cases byte for byte as the owner does (--hp2-frontend), and runs
@@ -421,6 +430,33 @@ starts = s.count('runtimeURL.appendingPathComponent("HPEngine")')
 hands = len(re.findall(r'try p\.run\(\); playing = true;[^\n]*\n    Launcher\.handFocus\(to: p\.processIdentifier, log: [^)]+\)', s))
 sys.exit(0 if starts >= 2 and hands == starts and 'app.activate(from: .current)' in s and 'range(of: "core warm")' in s and 'contains("[Focus] gained")' in s and 'timeIntervalSince(activeSince!) >= settle' in s else 1)
 PY
+
+# Mods of HP2 (and the Add both games use): the Mods page's Add (--add-mod: runAddMod -> the bundled HP1Setup --add-mod, i.e.
+# hpengine/packaging/ModInstall.cs) into an HP2-shaped data dir (<HP2Data>/game/Mods, <HP2Data>/HPEngineData/Mods.ini),
+# then the list, the switch and the conflicts there, the conflicts against the owner (ModOverlay through Desktop.Tests).
+dotnet build "$HERE/HP1Setup" -c Release -o "$T/setup" > "$T/setup.log" 2>&1 || { tail -20 "$T/setup.log"; echo "build of HP1Setup failed"; exit 2; }
+H="$T/HP2Data"; G="$H/game"; INI="$H/HPEngineData/Mods.ini"; mkdir -p "$G/System" "$G/Maps" "$G/Textures" "$H/HPEngineData" "$T/msrc/Wrap/Inner/Textures" "$T/msrc/Flat"
+printf '[Core.System]\nPaths=../System/*.u\nPaths=../Maps/*.unr\nPaths=../Textures/*.utx\n' > "$G/System/default.ini"
+echo t > "$T/msrc/Wrap/Inner/Textures/Shared.utx"; echo u > "$T/msrc/Flat/HGame.u"; echo t2 > "$T/msrc/Flat/Shared.utx"
+(cd "$T/msrc" && ditto -c -k --keepParent Wrap Wrap.zip && tar --format 7zip -cf Flat.7z Flat) || { echo "could not make the test archives"; exit 2; }
+got=$("$L" --add-mod "$T/setup/HP1Setup" "$G" "$T/msrc/Wrap.zip")$("$L" --add-mod "$T/setup/HP1Setup" "$G" "$T/msrc/Flat.7z")
+[ "$got" = OKOK ] && [ -f "$G/Mods/Wrap/Textures/Shared.utx" ] && [ -f "$G/Mods/Flat/HGame.u" ] && ok "hp2_mod_add_zip_and_7z_wrapper_dropped" || bad "hp2_mod_add_zip_and_7z_wrapper_dropped: '$got' $(cd "$G" && find Mods -type f | paste -sd' ' -)"
+got=$("$L" --add-mod "$T/setup/HP1Setup" "$G" "$T/msrc/Wrap.zip"); [ "$got" = "Could not add the mod: There is already a mod named Wrap. Remove it first to add this one." ] && ok "hp2_mod_add_twice_refused" || bad "hp2_mod_add_twice_refused: '$got'"
+echo MZ > "$T/msrc/Setup.exe"; got=$("$L" --add-mod "$T/setup/HP1Setup" "$G" "$T/msrc/Setup.exe")
+case "$got" in "Could not add the mod: Setup.exe is not a mod folder"*"never runs a mod's installer"*) ok "hp2_mod_add_installer_refused" ;; *) bad "hp2_mod_add_installer_refused: '$got'" ;; esac
+got=$("$L" --mods-order "$G" "$INI"); [ "$got" = "Flat=-|Wrap=-" ] && ok "hp2_mods_listed_off: $got" || bad "hp2_mods_listed_off: '$got'"
+inis Wrap Flat > "$INI"; got=$("$L" --mods-order "$G" "$INI"); [ "$got" = "Wrap=1|Flat=2" ] && ok "hp2_mods_switched_on_in_hp2_ini: $got" || bad "hp2_mods_switched_on_in_hp2_ini: '$got'"
+got=$("$L" --mods-conflicts "$G" "$INI" | paste -sd/ -); own=$(DT --mods-conflicts "$G" "$H/HPEngineData" | paste -sd/ -)
+[ "$got" = "Flat and Wrap both have Textures/Shared.utx: the game uses Flat's (later in the order)" ] && [ "$got" = "$own" ] && ok "hp2_mods_conflicts_as_owner" || bad "hp2_mods_conflicts_as_owner: launcher '$got', owner '$own'"
+[ ! -e "$G/HPEngineData" ] && ok "hp2_mods_hp1_layout_untouched" || bad "hp2_mods_hp1_layout_untouched: $G/HPEngineData exists"
+# A mod made for a newer HP2 engine (--newer-package <mod dir> <max>): the first package above the version, path order,
+# hidden files skipped; the same answer as the owner (ModOverlay.NewerPackage through Desktop.Tests).
+N="$T/newer"; mkdir -p "$N/Maps" "$N/System/.cache" "$N/Textures"
+printf '\301\203\052\236\117\000' > "$N/Maps/A.unr"; printf '\301\203\052\236\135\000' > "$N/Maps/B.unr"; printf '\301\203\052\236\156\000' > "$N/Textures/C.utx"
+printf '\301\203\052\236\377\000' > "$N/System/.cache/X.u"; echo text > "$N/readme.txt"
+for mx in 79 93 126; do got=$("$L" --newer-package "$N" $mx); own=$(DT --newer-package "$N" $mx)
+  case $mx in 79) want="Maps/B.unr (version 93)" ;; 93) want="Textures/C.utx (version 110)" ;; *) want="-" ;; esac
+  [ "$got" = "$want" ] && [ "$got" = "$own" ] && ok "newer_package_$mx: $got" || bad "newer_package_$mx: launcher '$got', owner '$own', want '$want'"; done
 
 [ $fails -eq 0 ] || exit 1
 echo "all passed"

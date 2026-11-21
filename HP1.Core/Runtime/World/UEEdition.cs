@@ -55,8 +55,7 @@ namespace HP1.UEScript
             // For an Unverified or Modified root: the warning HP1Setup and HPEngine print (the root is run anyway, loudly).
             public string Warning => Tier switch
             {
-                Support.Unverified => "This release of the game is not recognised by HPEngine and has not been verified: the "
-                    + "game may not work correctly. Please report it with these hashes: " + Hashes,
+                Support.Unverified => "release not in the port's table: " + Hashes,
                 Support.Modified => ModifiedWarning,
                 _ => null,
             };

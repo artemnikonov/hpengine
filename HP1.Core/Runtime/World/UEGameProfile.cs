@@ -84,6 +84,14 @@ namespace HP1.UEScript
 
         public static UEGameProfile Of(UEEdition.Game game) => game == UEEdition.Game.HP2 ? HP2 : HP1;
 
+        // The newest package file version the port's readers read for this game; a newer package is refused by name
+        // (UEPackageOpen.RefuseNewer) before a reader parses it. NOT ORIGINAL (coordinator 2026-11-21, author to confirm;
+        // DECISIONS 2026-11-21). HP2: 79 — the version of its token map (PackageBuild HP2) and the newest in the retail
+        // data (en and ru_ea ship 61, 68, 69, 76, 79); the published HP2 mods of Metallicafan212's later engine (86..110)
+        // made the surface/model readers throw mid-load. HP1: none, unchanged (HP1 mods carrying 79 and 126 load).
+        // MIRROR: hpengine/packaging/ModOverlay.cs Hp2PackageVersion (selftest game_profile_selected_from_install).
+        public int? MaxPackageVersion => Game == UEEdition.Game.HP2 ? 79 : null;
+
         // The profile of this process's install (set by UELevelRuntime.AppInit; HP1 until then, as before HP2 existed).
         public static UEGameProfile Current { get; internal set; } = HP1;
 
