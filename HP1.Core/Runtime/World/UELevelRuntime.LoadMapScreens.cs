@@ -69,7 +69,7 @@ namespace HP1.UEScript
             LoadMapFailed(interp, urlMap, UELocalization.Localize("Errors", "Aborted", "Core"));
         }
 
-        void LoadMapFailed(UEInterpreter interp, string urlMap, string error)
+        public void LoadMapFailed(UEInterpreter interp, string urlMap, string error)
         {
             SetProgress(interp, UELocalization.Localize("Errors", "UrlFailed", "Core"), error, 6f);
             if (Viewport?.GetProp(PK.Actor) is UEObject player)

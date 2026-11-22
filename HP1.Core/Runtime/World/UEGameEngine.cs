@@ -130,6 +130,8 @@ namespace HP1.UEScript
             stops?.NativesCreated?.Invoke(n);
             string mapPath = Path.Combine(gameRoot, "Maps", mapName + ".unr");
             mapPath = UEInstallPath.File(mapPath) ?? mapPath;
+            if (File.Exists(mapPath) && UEPackageVerify.FirstMissingPackage(gameRoot, mapPath) is string missingPackage)
+                throw new UEFailedBrowseException(mapName, missingPackage);   // UGameEngine::Init's FailedBrowse GError
             HeadlessBspModel bsp = HeadlessBspModel.Load(mapPath);
             journal.Add($"bsp nodes={bsp.NodeCount} leafHullValues={bsp.LeafHullValueCount}");
             n.SetBsp(bsp);

@@ -226,6 +226,12 @@ namespace HP1.UEScript
             => proxy is not null && _proxyPaths.TryGetValue(proxy, out string p) ? p : null;
         internal UEObject ClassDefaultsBag(UClass cls)
         {
+            // A class reached through another package's import (`Class'HPParticle.Cauldron_Neutral'` in HGame bytecode) is
+            // the import stub; the linker hands script the real export (ULinkerLoad::CreateImport), so `X.default.Y` reads
+            // the export's Defaults. Without this the stub's empty bag answered None: CauldronMixing.CreateAttachedParticleFX
+            // SetRotation(attachedParticleClass.default.Rotation) set (0,0,0) instead of Cauldron_Neutral's Pitch 16323.
+            if (UEClassRegistry.IsImportStub(cls) && UEClassRegistry.Shared.FindForStub(cls) is { } real
+                && !UEClassRegistry.IsImportStub(real)) cls = real;
             if (!_classDefaults.TryGetValue(cls, out var d))
             {
                 d = new UEObject { Class = cls, Interp = this };

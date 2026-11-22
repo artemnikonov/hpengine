@@ -652,7 +652,7 @@ namespace HP1.UEScript
                     if (g < 0) groups.Add((lv, d.Pose.Points, new List<int> { d.View })); else groups[g].Views.Add(d.View);
                 }
                 int pi = _meshPoses.Count;
-                _meshPoses.Add(new MeshPose(k.Id, k.Weapon, ds[0].Pose.MeshPath, basePts));
+                _meshPoses.Add(new MeshPose(k.Id, k.Weapon, ds[0].Pose.MeshPath, basePts, latePass: ds[0].Pose.LatePass));
                 if (groups.Count == 1 && groups[0].Verts < 0) continue;
                 foreach (var g in groups) parts.Add((pi, g.Verts, SamePoints(g.Points, basePts) ? null : g.Points, g.Views));
             }
@@ -663,7 +663,7 @@ namespace HP1.UEScript
                 var list = new List<MeshLodPart>();
                 for (; j < parts.Count && parts[j].Pose == pose; j++) list.Add(new MeshLodPart(parts[j].Verts, setIdx[j], parts[j].Points));
                 MeshPose p = _meshPoses[pose];
-                _meshPoses[pose] = new MeshPose(p.ObjectId, p.Weapon, p.MeshPath, p.Points, list);
+                _meshPoses[pose] = new MeshPose(p.ObjectId, p.Weapon, p.MeshPath, p.Points, list, p.LatePass);
             }
             return sets;
         }

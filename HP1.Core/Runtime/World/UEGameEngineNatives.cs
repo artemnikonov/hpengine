@@ -1570,6 +1570,13 @@ namespace HP1.UEScript
                         Runtime.LoadMapMissingFile(interp, map);
                         _journal.Add($"loadmap_failed url_map={map} file={Path.GetFileName(targetPath)}");
                     }
+                    else if (!isSave && UEPackageVerify.FirstMissingPackage(_gameRoot, targetPath) is string missingPackage)
+                    {
+                        // LoadMap's verify pass (UEPackageVerify): its catch, the old level plays on.
+                        Runtime.LoadMapFailed(interp, map, missingPackage);
+                        _journal.Add($"loadmap_failed url_map={map} file={Path.GetFileName(targetPath)} error={missingPackage}");
+                        UETrace.Info($"[Map] {map} not loaded: {missingPackage}");   // the original's GLog line (SafeLoadError)
+                    }
                     else if (isSave && !TryReadSave(interp, targetPath, out data, out savedMap, out savedMapPath, out badReason,
                                  out bool otherScripts))
                     {

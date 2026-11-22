@@ -23,6 +23,23 @@ namespace HP1.UEScript
         // the world — `Render->DrawWorld(Frame)`, and with it SetupDynamics (shadows), particles
         // and the weapon point; the event order and RNG use depend on this split.
         // Returns the frame size after the console border (for FSceneNode).
+        // The viewport's canvas is an object of package Transient named by MakeUniqueObjectName (Core.dll.c:41313), on the
+        // same ClassUnique counter as the console (UELevelRuntime.CreateLocalViewport): the original's VendorManager0.
+        // VendorCanvas (set from PostRender's canvas) reads Transient.Canvas0 (HP2 SwARc host, Grounds_hub vendor Tick740).
+        static UEObject NewViewportCanvas(UEInterpreter interp, UELib.Core.UClass canvasClass)
+        {
+            var c = new UEObject { Class = canvasClass, Interp = interp };
+            c.LoadDefaults();
+            c.OuterPath = "Transient";
+            c.Props["Name"] = new UEName(UELevelRuntime.MintObjectName(canvasClass.Name, () =>
+            {
+                int number = interp.ClassUnique.TryGetValue(canvasClass, out int old) ? old : 0;
+                interp.ClassUnique[canvasClass] = number + 1;
+                return number;
+            }, interp.TransientObjectNames));
+            return c;
+        }
+
         (int X, int Y) HudPreRender(UEInterpreter interp, UEObject player)
         {
             _hud.Clear(); _hudDepthZ = null; _canvasFrameAtOrigin = false; _canvasActorsDrawn = false;
@@ -32,9 +49,7 @@ namespace HP1.UEScript
             {
                 var canvasClass = HP1.Core.UEClassRegistry.Shared.Find("Canvas")
                     ?? throw new InvalidDataException("shipped Engine.Canvas class missing");
-                _canvas = new UEObject { Class = canvasClass, Interp = interp };
-                _canvas.LoadDefaults();
-                _canvas.Props["Name"] = new UEName("HeadlessCanvas");
+                _canvas = NewViewportCanvas(interp, canvasClass);
             }
             BindCanvasViewport();
             // FSceneNode frame: X/Y — viewport size (+0xa8/+0xac), XB/YB — origin
@@ -84,9 +99,7 @@ namespace HP1.UEScript
                 {
                     var canvasClass = HP1.Core.UEClassRegistry.Shared.Find("Canvas")
                         ?? throw new InvalidDataException("shipped Engine.Canvas class missing");
-                    _canvas = new UEObject { Class = canvasClass, Interp = interp };
-                    _canvas.LoadDefaults();
-                    _canvas.Props["Name"] = new UEName("HeadlessCanvas");
+                    _canvas = NewViewportCanvas(interp, canvasClass);
                     BindCanvasViewport();
                     _canvas.Props["SizeX"] = _viewportX; _canvas.Props["SizeY"] = _viewportY;
                     _canvas.Props["ClipX"] = (float)_viewportX; _canvas.Props["ClipY"] = (float)_viewportY;

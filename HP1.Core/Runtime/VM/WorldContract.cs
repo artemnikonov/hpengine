@@ -147,7 +147,9 @@ namespace HP1.UEScript
         //        use of the frame incl. UCanvas::DrawTile); the frontend no longer steps a chain, it looks the frame up.
         //        Added at 33 without a bump: DrawnWorld.Lumos (HP2 DrawFrame's Lumos DrawComplexSurface arguments; empty for HP1);
         //        ParticleInstance.Serial (presentation identity of a Core particle for the display-frame interpolation).
-        public const int Version = 33;
+        //   34 — MeshPose.LatePass: the DrawFrame pass of the sprite that drew the pose is Core's; a third-person weapon is
+        //        drawn in its pawn's pass (it is drawn inside the pawn's DrawActorSprite), not by its own Style/Opacity.
+        public const int Version = 34;
 
         // Contract types. The order is fixed — it is also the print order.
         public static readonly Type[] Types =
@@ -934,6 +936,9 @@ namespace HP1.UEScript
             { "MeshPose.LodParts", new ContractField(ContractFieldKind.Presentation,
                 "UEWorldFrameProducer.MeshDrawParts (DirectRenderStep)", "LOD level and pose per draw of URender::DrawLodMesh (Render.dll 0x10b0ffcd-0x10b1011d, UEMeshLod.VertsRequested, then GetFrame vtable +0xa4 0x10b10270); null = full mesh, one pose (always in Enhanced unless poses differ, D-62 improvement)", "hpengine ActorBuilder",
                 ContractFieldStatus.Consumed, "hpengine ActorBuilder.AddPosed (one job per part)") },
+            { "MeshPose.LatePass", new ContractField(ContractFieldKind.Presentation,
+                "UELevelRuntime.DrawMeshActor (UESpriteSort.Pass of the drawing sprite's actor)", "URender::DrawFrame pass split (0x10b2666a..0x10b26734) of the FDynamicSprite whose DrawActorSprite drew the pose; the weapon branch (0x10b32f85-0x10b330ba) runs inside the pawn's", "hpengine ActorBuilder",
+                ContractFieldStatus.Consumed, "hpengine ActorBuilder.AddWeapon (the weapon's draw group)") },
             { "MeshLodPart.Verts", new ContractField(ContractFieldKind.Presentation,
                 "UEWorldFrameProducer.MeshDrawParts", "drawn vertex count after the GetFrame clamp / tween cap (-1 = no LOD); faces UEMeshLod.CollapsedFaces (Render.dll.c:14590-14640)", "hpengine ActorBuilder",
                 ContractFieldStatus.Consumed, "hpengine ActorBuilder.AddPosed (UEMeshSource.LodVariant)") },

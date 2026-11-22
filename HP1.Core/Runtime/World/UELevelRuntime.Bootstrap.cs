@@ -625,8 +625,12 @@ namespace HP1.UEScript
         // edge count: at step n conn is reachability within 2^(n-1) edges (conn∘conn),
         // and dist is written from it, as in shipped. Row = i (source zone),
         // column = j: index i*64 + j, like `i<<6 + j` at 0x1039d75d.
-        // No readers in the port (shipped readers 0x1034d12c, 0x1034da58 are not
-        // identified; Galaxy — needs disasm): the write is ported, not a consumer.
+        // NO CONSUMER IN EITHER GAME (2026-11-21, disasm sweep of every [reg+0x11c] operand): HP1 Engine.dll indexes
+        // ULevel+0x11c only in this build (0x1039d...); 0x1034d12c is ULevel's copy constructor (rep movsd 0x400) and
+        // 0x1034da58 its operator= (a 0x1000-byte loop); Galaxy/Render/Fire/WinDrv have no indexed byte read of it.
+        // HP2's one reader is ULevel::CalculateRadiusMultiplier [HP2 0x103bf120] (pow(0.85, d*d)), a virtual (ULevel
+        // vtable slot +0xf0) that no HP2 module calls (no call to it or its thunk 0x10301929, no `call [reg+0xf0]` in
+        // Engine/ALAudio/Render/Fire/D3DDrv/WinDrv/Core; Window.dll's are WWindow's). The table is ported, nothing reads it.
         public byte[] ZoneDist { get; private set; }
 
         public static byte[] BuildZoneDist(ulong[] zoneConnectivity)
@@ -677,13 +681,12 @@ namespace HP1.UEScript
             int bad = ZoneConnectivityReferencesUnloadedZone(connectivity);
             if (bad >= 0)
             {
-                // The result would depend on unloaded Zones[] entries — no value is
-                // substituted: ZoneDist is not built, loudly.
+                // The result would depend on unloaded Zones[] entries — no value is substituted: ZoneDist is not built.
+                // Journal only: nothing in either game reads ZoneDist (above), so this has no effect on play. Mod maps hit
+                // it (bit 63 set by the modders' editor, mods_retail 2026-11-21).
                 ZoneDist = null;
-                string msg = $"zone_dist STOP: Zones[{bad}].Connectivity=0x{connectivity[bad]:x16} "
-                    + $"references a zone >= NumZones ({connectivity.Length})";
-                Log(msg);
-                HP1.Core.UETrace.Warn("[Core] " + msg);
+                Log($"zone_dist not_built: Zones[{bad}].Connectivity=0x{connectivity[bad]:x16} "
+                    + $"references a zone >= NumZones ({connectivity.Length})");
                 return;
             }
             ZoneDist = BuildZoneDist(connectivity);

@@ -36,8 +36,8 @@
 // (RootParentChain, ParentPoint).
 // CHANNELS: overlaying them onto the OWNER's pose is ported (OverlayChannel; a channel at bone 0 runs the full
 // body on the channel and copies every place to the owner). The pose of a CHANNEL actor itself (AnimBone ≠ 0 &&
-// Physics ≠ Trailer) stays a LOUD STOP: the original reads bone 0 of the channel's own cache, which the
-// channel-mode body never writes (FMemCache leftovers; skelanim_oracle scenario channel_direct).
+// Physics ≠ Trailer) runs the channel body into its own cache; the bones it never writes are FMemCache leftovers in
+// the original (skelanim_oracle scenario channel_direct) and the mesh reference pose here (NOT ORIGINAL, ApplyAnim).
 // bAnimByOwner: GetFrame takes the pose of the OWNER (AnimSourceOf).
 // GetFrame of a drawn mesh is ported (RenderMeshFrame): a full ApplyAnim of every DT_Mesh actor drawn by
 // DrawActorSprite, in DrawFrame order (RenderLevelPass.DrawMeshSprite).
@@ -154,6 +154,15 @@ namespace HP1.UEScript
                 dot > 0 ? path.Substring(0, dot) + "." + mesh.AnimObject : mesh.AnimObject);
         }
 
+        // A channel-mode actor's new cache (ApplyAnim on the channel itself, OverlayChannel): the bones its body never writes
+        // are FMemCache leftovers in the original — here the reference pose (NOT ORIGINAL, issue #7; see ApplyAnim).
+        static SkelCache NewChannelCache(Hp1SkeletalMesh mesh)
+        {
+            var c = new SkelCache { Mesh = mesh.Name, Places = new BonePlace[mesh.Bones.Length] };
+            for (int i = 0; i < c.Places.Length; i++) c.Places[i] = RefPlace(mesh.Bones[i]);
+            return c;
+        }
+
         static BonePlace RefPlace(Hp1Bone b)
             => new BonePlace { QX = b.OrientX, QY = b.OrientY, QZ = b.OrientZ, QW = b.OrientW, Pos = b.Position };
 
@@ -202,17 +211,19 @@ namespace HP1.UEScript
                 || !meshRef.Class.Equals("SkeletalMesh", StringComparison.OrdinalIgnoreCase))
                 throw new NotSupportedException(
                     $"skeletal pose requires a SkeletalMesh actor={actor.GetProp(PK.Name)}");
-            // ApplyAnim on a CHANNEL actor itself (AnimBone on a non-trailer: the cStack_1d branch, 0x1041ba9a): the body
-            // writes only the channel's bone range into the channel's own cache, never bone 0, so every consumer
-            // (GetFrame, GetBoneCoords, GetRenderBoundingBox with a sequence box) reads FMemCache leftovers there — the
-            // original's result is undefined (skelanim_oracle channel_direct: the NaN fill of bone 0 survives every call).
-            // The owner's pose takes the channel through OverlayChannel. Campaign channels are AnimChannel (DrawType=0),
-            // cHarryAnimChannel and fluffyHead* without DrawType/Physics/BonePos in scripts.
-            if (UEInterpreter.ToInt(actor.GetProp(PK.AnimBone)) != 0
-                && UEInterpreter.ToInt(actor.GetProp(PK.Physics)) != 11)
-                throw new NotSupportedException(
-                    $"skeletal pose of a channel actor itself (AnimBone={actor.GetProp(PK.AnimBone)}): the original reads bone 0 of the "
-                    + $"channel's cache, never written in channel mode — undefined (STOP) actor={actor.GetProp(PK.Name)}");
+            // ApplyAnim on a CHANNEL actor itself (AnimBone on a non-trailer: the cStack_1d branch, HP1 0x1041ba9a, HP2
+            // 0x1042a54a..0x1042a560 [ebp-0x21]): the same body as a channel overlay, but into the actor's own cache — only
+            // the bones [AnimBone, AnimBone + NumChildren] with a track are written, never bone 0 (none at all when AnimBone
+            // is not a bone of the mesh: the range test short-circuits, HP2 0x1042a81d..0x1042a83b). Shipped
+            // trigger (issue #7, HP2): a Jellybean a GNOME held ('GNOME R Hand' = AnimBone 26, PHYS_Trailer) when the player
+            // left Grounds_hub comes back from <Map>_pa.usa with AnimBone 26 and no Owner (object values do not travel), and
+            // its BounceIntoPlace.BeginState sets PHYS_Falling. Bones the body never wrote hold FMemCache leftovers in the
+            // original (skelanim_oracle channel_direct: the NaN fill survives) — undefined.
+            // NOT ORIGINAL (author 2026-11-22, DECISIONS 2026-11-22, issue #7; improvement): a new cache of a channel-mode actor
+            // starts in the mesh reference pose instead of the leftovers (NewChannelCache), so GetFrame / GetBoneCoords /
+            // the render box read defined places; everything the body writes is the original's.
+            bool channelMode = UEInterpreter.ToInt(actor.GetProp(PK.AnimBone)) != 0
+                && UEInterpreter.ToInt(actor.GetProp(PK.Physics)) != 11;
 
             Hp1SkeletalMesh skel = MeshCatalog.Get(meshRef);
             int n = skel.Bones.Length;
@@ -221,7 +232,7 @@ namespace HP1.UEScript
             // A cache of another mesh is dropped and recreated (FMemCache::Flush).
             if (!_skelCache.TryGetValue(actor, out SkelCache cache)
                 || !string.Equals(cache.Mesh, skel.Name, StringComparison.OrdinalIgnoreCase))
-                _skelCache[actor] = cache = new SkelCache { Mesh = skel.Name, Places = new BonePlace[n] };
+                _skelCache[actor] = cache = channelMode ? NewChannelCache(skel) : new SkelCache { Mesh = skel.Name, Places = new BonePlace[n] };
 
             string seq = SequenceNameOf(actor);
             if (!SameName(cache.Seq, seq) && !rootOnly)
@@ -230,6 +241,13 @@ namespace HP1.UEScript
                 cache.RootFrame = 0f;
             }
             cache.MeshCoords = MeshCoordsMemo(actor, cache, meshRef);
+            // Channel mode: no memo; a full call runs the channel body on the actor's own header (OverlayChannel with the
+            // actor as its own owner), a root-only call writes nothing (bone 0 is outside every channel range).
+            if (channelMode)
+            {
+                if (!rootOnly) OverlayChannel(actor, meshRef, skel, cache.Places);
+                return cache;
+            }
 
             float frame = UEInterpreter.AsFloat(actor.GetProp(PK.AnimFrame));
             float alpha = UEInterpreter.AsFloat(actor.GetProp(PK.TweenAlpha));
@@ -606,14 +624,16 @@ namespace HP1.UEScript
 
             int n = ownerLocal.Length;
             if (!_skelCache.TryGetValue(channel, out SkelCache cache) || cache.Places.Length != n)
-                _skelCache[channel] = cache = new SkelCache { Mesh = mesh.Name, Places = new BonePlace[n] };
+                _skelCache[channel] = cache = NewChannelCache(mesh);
             float tweenRate = UEInterpreter.AsFloat(channel.GetProp(PK.TweenRate));
             float tweenAlpha = UEInterpreter.AsFloat(channel.GetProp(PK.TweenAlpha));
             float wOld = cache.HasPose && tweenRate != 0f ? 1f - tweenAlpha : 0f;   // 0x1041bf0c..0x1041bf1a
             BonePlace[] written = cache.Places;
 
             float t = Math.Min(UEInterpreter.AsFloat(channel.GetProp(PK.AnimFrame)), 1f);
-            int last = Math.Min(n - 1, root + mesh.Bones[root].NumChildren);
+            // `AnimBone <= i && i <= Bones[AnimBone].NumChildren + AnimBone` [HP2 0x1042a81d..0x1042a83b]: Bones[AnimBone] is read only
+            // for a bone index i >= AnimBone, so an AnimBone past the mesh's bones writes nothing.
+            int last = root < n ? Math.Min(n - 1, root + mesh.Bones[root].NumChildren) : -1;
             Hp1AnimBone[] refBones = sequence.Movement.RefBones;
             for (int i = root; i <= last; i++)
             {
@@ -1142,9 +1162,10 @@ namespace HP1.UEScript
         {
             drawn.Add(o);
             bool weapon = RenderMeshFrame(o, identity, request(o), out SkelCache cache, out Vector3[] lodPoints, out int level);
+            bool latePass = UESpriteSort.Pass(o) == 2;
             if (poses is not null)
                 poses.Add(new MeshPose(o.ObjectId, false, WorldFrameProjector.AssetPath(o.GetProp(PK.Mesh)),
-                    lodPoints ?? PosePointsFromCache(SkeletalMeshOf(o), cache), new[] { new MeshLodPart(level, -1) }));
+                    lodPoints ?? PosePointsFromCache(SkeletalMeshOf(o), cache), new[] { new MeshLodPart(level, -1) }, latePass));
             if (!weapon || !UEInterpreter.ClassIsA(o.Class, "Pawn")) return;
             RenderWeaponCoords(o, cache, frame, out Vector3 wloc, out UERotator wrot);
             o.Props["WeaponRot"] = wrot;
@@ -1176,7 +1197,7 @@ namespace HP1.UEScript
                                              wloc.y + dx * ax.X.y + dy * ax.Y.y + dz * ax.Z.y,
                                              wloc.z + dx * ax.X.z + dy * ax.Y.z + dz * ax.Z.z);
                     }
-                    poses.Add(new MeshPose(w.ObjectId, true, WorldFrameProjector.AssetPath(w.GetProp(PK.Mesh)), pts, new[] { new MeshLodPart(wLevel, -1) }));
+                    poses.Add(new MeshPose(w.ObjectId, true, WorldFrameProjector.AssetPath(w.GetProp(PK.Mesh)), pts, new[] { new MeshLodPart(wLevel, -1) }, latePass));
                 }
                 mesh = w.GetProp(PK.Mesh); tpMesh = w.GetProp(PK.ThirdPersonMesh);
                 scale = w.GetProp(PK.DrawScale); tpScale = w.GetProp(PK.ThirdPersonScale);

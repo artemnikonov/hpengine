@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.2-beta — 2026-11-22
+
+Fixed (Chamber of Secrets):
+
+- **A save could crash on load** (issue #7): a jellybean a gnome held when you left Grounds is re-created without its
+  holder, and the game stopped on the first frame. The save now loads; such a bean is drawn in its rest pose (the
+  original reads undefined memory there).
+- A card or item falling onto a moving platform lands on it instead of bouncing (e.g. the Ch6 card on the elevator).
+- Touching a box-shaped brush actor uses its box, as in the original.
+- A property default read through another package (e.g. a cauldron's starting rotation) had the wrong value.
+
+Fixed (both games):
+
+- Moving platforms glide at the original's precision.
+- Box collision (traces and touches) matches the original bit for bit.
+- Two differences from the original in key and console command handling.
+- A map whose package is missing fails to load the way the original does.
+
 ## 0.5.1-beta — 2026-11-21
 
 Fixed (Philosopher's Stone):

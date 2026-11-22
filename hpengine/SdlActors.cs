@@ -183,21 +183,22 @@ namespace HPEngine
             foreach (ActorSnapshot x in frame.Actors) if (x.ObjectId == mp.ObjectId) { ws = x; break; }
             if (ws is null) { Stats.Problems.Add($"weapon {mp.ObjectId} is not in the frame"); return; }
             if (Skeletal(mp.MeshPath) is not { } sk) { Stats.Problems.Add($"weapon {ws.Value.Name}: {mp.MeshPath} is not a skeletal mesh"); return; }
-            AddPosed(ws.Value, mp, sk.raw, sk.slots, ref Stats.Weapons);
+            AddPosed(ws.Value, mp, sk.raw, sk.slots, ref Stats.Weapons, mp.LatePass);   // drawn in its pawn's DrawFrame pass
         }
 
         // LOD (Original visuals, D-62): Core's MeshPose.LodParts — per part the faces DrawLodMesh draws at that level
         // (UEMeshSource.LodVariant) in that part's frames, with the part's own GetFrame pose when Core gives one (drawn as
         // is, not interpolated: the pose history is per actor); no parts — the full mesh in the actor's frames.
-        void AddPosed(in ActorSnapshot a, in MeshPose mp, UERawSkeletalMesh raw, string[] slots, ref int drawnCounter)
+        // latePass: the pass of the sprite that drew the pose when it is not the actor's own (a weapon: MeshPose.LatePass).
+        void AddPosed(in ActorSnapshot a, in MeshPose mp, UERawSkeletalMesh raw, string[] slots, ref int drawnCounter, bool? latePass = null)
         {
-            if (mp.LodParts is not { Count: > 0 } parts) { AddMesh(a, raw, slots, mp.Points, ref drawnCounter, -1); return; }
+            if (mp.LodParts is not { Count: > 0 } parts) { AddMesh(a, raw, slots, mp.Points, ref drawnCounter, -1, latePass: latePass); return; }
             int extra = 0;
             for (int i = 0; i < parts.Count; i++)
             {
                 UERawSkeletalMesh lod = parts[i].Verts < 0 ? raw : _meshes.LodVariant(mp.MeshPath, raw, parts[i].Verts);
-                if (i == 0) AddMesh(a, lod, slots, mp.Points, ref drawnCounter, parts[i].ViewSet, own: parts[i].Points);
-                else AddMesh(a, lod, slots, mp.Points, ref extra, parts[i].ViewSet, copyPoints: true, own: parts[i].Points);
+                if (i == 0) AddMesh(a, lod, slots, mp.Points, ref drawnCounter, parts[i].ViewSet, own: parts[i].Points, latePass: latePass);
+                else AddMesh(a, lod, slots, mp.Points, ref extra, parts[i].ViewSet, copyPoints: true, own: parts[i].Points, latePass: latePass);
             }
         }
 
@@ -247,7 +248,7 @@ namespace HPEngine
         }
 
         void AddMesh(in ActorSnapshot a, UERawSkeletalMesh raw, string[] slotTable, UEVector[] pts, ref int drawnCounter, int viewSet,
-            bool copyPoints = false, UEVector[] own = null)
+            bool copyPoints = false, UEVector[] own = null, bool? latePass = null)
         {
             if (pts.Length != raw.numPoints)
             { Stats.PoseFailed++; Stats.Problems.Add($"pose {a.Name}: {pts.Length} points, the mesh has {raw.numPoints}"); return; }
@@ -258,6 +259,7 @@ namespace HPEngine
             Job job = Prepare(a, raw, slotTable, copyPoints ? (UEVector[])posed.Clone() : posed);   // a second part: Fatness shifts its own copy
             job.Tick = own ?? pts;   // the tick pose: Core's triangle order is decided on it (UEActorLights.TriangleOrder)
             job.Own = own;
+            job.LatePass = latePass ?? a.LatePass;
             // The frames this part is drawn in: the LOD part's set (MeshLodPart.ViewSet, WorldFrame.ActorViews.Sets index),
             // otherwise the actor's own frames; one output per frame (per-view eye, see Job.Out).
             if (viewSet >= 0) job.ViewIds = _frame.ActorViews.Sets[viewSet];
@@ -269,6 +271,7 @@ namespace HPEngine
         {
             public ActorSnapshot A; public UERawSkeletalMesh Raw; public string[] Slots; public UEVector[] Pts, Tick;
             public UEVector[] Own;   // the LOD part's own Core pose (MeshLodPart.Points), drawn without interpolation
+            public bool LatePass;    // the DrawFrame pass of the drawing sprite (Core's; the pawn's for a weapon)
             public UEVector[] Norm = Array.Empty<UEVector>();
             // One output per frame that drew the actor (WorldFrame.ActorViews): DrawMesh runs with that Frame, so the
             // specular eye, the PF_Environment reflection and the vertex fog are the frame's (SpriteMath.ViewCamera).
@@ -394,8 +397,8 @@ namespace HPEngine
             if ((flags & ~RenderUnhandled.MeshMaterialHandled) != 0) RenderUnhandled.MeshMaterial(flags, $"{a.MeshPath} mat{matIdx}");
             bool opacityMasked = fx.Mode == HPEngine.ActorFx.ActorFxBlendMode.AlphaBlend && fx.MaskedPalette;
             ActorDraw d = shared
-                ? DrawFor(a.ObjectId, tex, BlendOf(fx.Mode), a.Unlit, (flags & PF_TwoSided) != 0, opacityMasked, RenderRules.ActorGroup(a.LatePass), a.NoSmooth, fx.AlphaTest, o.View)
-                : NewDraw(a.ObjectId, tex, BlendOf(fx.Mode), a.Unlit, (flags & PF_TwoSided) != 0, opacityMasked, RenderRules.ActorGroup(a.LatePass), a.NoSmooth, fx.AlphaTest, o.View);
+                ? DrawFor(a.ObjectId, tex, BlendOf(fx.Mode), a.Unlit, (flags & PF_TwoSided) != 0, opacityMasked, RenderRules.ActorGroup(j.LatePass), a.NoSmooth, fx.AlphaTest, o.View)
+                : NewDraw(a.ObjectId, tex, BlendOf(fx.Mode), a.Unlit, (flags & PF_TwoSided) != 0, opacityMasked, RenderRules.ActorGroup(j.LatePass), a.NoSmooth, fx.AlphaTest, o.View);
             if (DrawLog.Path != null && (d.LogOwner is null || !d.LogOwner.Split(',').Contains(a.Name))) d.LogOwner = d.LogOwner is null ? a.Name : d.LogOwner + "," + a.Name;
             return d;
         }

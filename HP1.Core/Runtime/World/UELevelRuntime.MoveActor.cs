@@ -1026,13 +1026,20 @@ namespace HP1.UEScript
         }
 
         // UPrimitive::GetCollisionExtent (Owner) [HP2 0x10406600]: (R, R, H); UBox's [HP2 0x1040bb50]: (R, W != 0 ? W : R, H);
-        // a mesh its own (UMesh::GetCollisionExtent, the CollideType 3 path of GetCylinderExtent); a brush model (UModel)
-        // inherits UPrimitive's.
+        // a mesh its own (UMesh::GetCollisionExtent, the CollideType 3 path of GetCylinderExtent); a brush model (UModel):
+        // its vtable +0x64 is UBoxPrim's (??_7UModel@@6B@ slot 0x64 -> 0x1040c150, read from the HP2 Engine.dll), the
+        // model's serialized BoundingBox per axis max(-Min, Max), no ToWorld. Ch3Diffindo Mover3 x CutScene1 at frame 141:
+        // the original touches and untouches in one move (HP2_LEVEL_MOVE), (R, R, H) kept the touch.
+        // Original: Engine.dll ?GetCollisionExtent@UBoxPrim@@UBE?AVFVector@@PBVAActor@@@Z [HP2 0x1040C150] [HP1 0x103FEA90]
         Vector3 PrimitiveCollisionExtent(UEObject a)
         {
             float r = UEInterpreter.AsFloat(a.GetProp(PK.CollisionRadius)), h = UEInterpreter.AsFloat(a.GetProp(PK.CollisionHeight));
             switch (UEPrimitive.Resolve(a))
             {
+                case UEPrimitiveKind.Brush:
+                    if (a.GetProp(PK.Brush) is not UEModelRef model || !BrushBoundsByExport.TryGetValue(model.ExportIndex, out BrushBounds bb))
+                        throw new NotSupportedException($"IsOverlapping: brush without model bounds actor={a.GetProp(PK.Name)}");
+                    return CylinderExtent.FromLocalBox(bb.BoxMin, bb.BoxMax);
                 case UEPrimitiveKind.Box:
                     float w = UEInterpreter.AsFloat(a.GetProp(PK.CollisionWidth));
                     return new Vector3(r, w != 0f ? w : r, h);

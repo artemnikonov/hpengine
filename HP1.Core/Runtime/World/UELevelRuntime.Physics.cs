@@ -753,6 +753,13 @@ namespace HP1.UEScript
         }
 
         // HP2's bCollideWorld mover fall: KeyPos / OldPos add Location − before as the register holds it.
+        static float GlideAlphaX87(float a)
+        {
+            X87Ext x = X87Ext.From(a), a2 = X87Ext.Round64(x * x);
+            X87Ext three = X87Ext.Round64(a2 * X87Ext.From(3f)), a3 = X87Ext.Round64(a2 * x);
+            return X87Ext.Round64(three - X87Ext.Round64(a3 + a3)).ToFloat();
+        }
+
         // Original: Engine.dll ?physMovingBrush@AActor@@QAEXM@Z [HP2 0x104137a0] (the fall's key update [HP2 0x10413a48..0x10413aae])
         internal static float Hp2MoverFallAdd(float after, float before, float v) => R64(R64(X87(after) - X87(before)) + X87(v)).ToFloat();
 
@@ -906,7 +913,10 @@ namespace HP1.UEScript
                     else if (prevKey > key && key != 0) glideType = 0;
                 }
                 bool glide = glideType == 1;
-                float t = glide ? 3f * newAlpha * newAlpha - 2f * newAlpha * newAlpha * newAlpha
+                // MV_GlideByTime: 3a² − 2a³ in the x87 register (PC64), one float store [HP1 0x10406630..0x10406646]
+                // [HP2 0x10413b6c..0x10413b83]: `fld a; fmul a; fld st0; fmul 3.0; fxch; fmul a; fadd st0,st0; fsubp; fstp`.
+                // Five float roundings put Ch3Diffindo Mover3 one ulp off the original at frame 157.
+                float t = glide ? GlideAlphaX87(newAlpha)
                     : hp2 && glideType == 2 ? Hp2SpringAlpha(newAlpha, UEInterpreter.AsFloat(actor.GetProp("MoveTime")),
                         UEInterpreter.AsFloat(actor.GetProp("MoverSpringTime")), UEInterpreter.AsFloat(actor.GetProp("MoverMaxAmplitude")),
                         (byte)(UEInterpreter.ToInt(actor.GetProp("MoverFluctuations")) & 0xff))

@@ -245,7 +245,11 @@ namespace HP1.UEScript
                     && UEInterpreter.ClassIsA(actor.Class, "Decoration"))
                     actor.Props["numLandings"] = Math.Max(UEInterpreter.ToInt(actor.GetProp(PK.numLandings)) - 1, 0);
 
-                if (hitFraction < 1f && UEInterpreter.ToBool(actor.GetProp(PK.bBounce)))
+                // HP2 [0x103fc8b0..0x103fc8e1]: the bBounce fork also requires the hit actor not to be a Mover (its class
+                // chain walked against AMover::PrivateStaticClass 0x105ec028); a bouncing actor hitting a mover lands.
+                // Ch6WizardCard WCGriffindor0 on ElevatorMover0 at frame 26: the original lands, Physics 1.
+                if (hitFraction < 1f && UEInterpreter.ToBool(actor.GetProp(PK.bBounce))
+                    && !(UEGameProfile.Current.Game == UEEdition.Game.HP2 && hitActor is not null && UEInterpreter.ClassIsA(hitActor.Class, "Mover")))
                 {
                     // ── bBounce BRANCH (85370-85379) ─────────────────────────
                     //

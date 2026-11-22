@@ -158,6 +158,7 @@ namespace HP1.UEScript
         // 0x4, filtered by comparison against one property class and dereferenced as `float*`. Byte and bool inputs
         // (bAltFire, bRun, bPressedJump) are NOT touched at all (zeroing them would drop a held BUTTON between
         // frames, since BUTTON reacts only to Press/Release). Example scale: dt=0.02, Speed=300 -> 20*300 = 6000.
+        // Original: Engine.dll ?ReadInput@UInput@@UAEXMAAVFOutputDevice@@@Z [HP1 0x103A5BA0] [HP2 0x103AF600]
         public void ReadInput(UEInterpreter interp, UEObject pawn, float delta)
         {
             if (pawn?.Class is null) return;
@@ -168,12 +169,14 @@ namespace HP1.UEScript
                     if (_down.Contains(key) && TryGetDispatchBinding(key, out string command))
                         ExecInputCommands(interp, pawn, command, InputAction.Hold, delta);
             }
-            float scale = delta != -1f ? 20f / delta : 0f;
+            // fld 20.0f; fdiv dword [dt] (or fld 0.0f): the quotient stays in st(0) at PC64; per property fld st(0);
+            // fmul dword [prop]; fstp dword [prop] (0x103a5de7..0x103a5e3d): the scale is never rounded to float.
+            X87Ext scale = delta != -1f ? X87Ext.Div64(X87Ext.From(20f), X87Ext.From(delta)) : X87Ext.From(0f);
             foreach (UProperty p in InputFloatProps(pawn.Class))
             {
                 string name = p.Name?.ToString();
                 if (name is null) continue;
-                pawn.Props[name] = UEInterpreter.AsFloat(pawn.GetProp(name)) * scale;
+                pawn.Props[name] = X87Ext.Round64(scale * X87Ext.From(UEInterpreter.AsFloat(pawn.GetProp(name)))).ToFloat();
             }
         }
 
@@ -521,11 +524,7 @@ namespace HP1.UEScript
         public void ExecInputCommands(UEInterpreter interp, UEObject pawn, string commands,
             InputAction action, float delta)
         {
-            foreach (string part in ParseLines(commands))
-            {
-                string command = part.Trim();
-                if (command.Length != 0) Exec(interp, pawn, command, action, delta, depth: 0);
-            }
+            foreach (string part in ParseLines(commands)) Exec(interp, pawn, part, action, delta, depth: 0);
         }
 
         // ParseLine(Stream, Result, MaxLen, Exact = 0) (Core.dll.c:62190), repeatedly to the end of the string:
@@ -568,28 +567,25 @@ namespace HP1.UEScript
         // alias and goes out as an exec command.
         bool _inAlias;
 
+        // Original: Engine.dll ?Exec@UInput@@UAEHPBGAAVFOutputDevice@@@Z [HP1 0x103A5200] [HP2 0x103AEC60]
+        // Original: Engine.dll ?ExecInputCommands@UInput@@MAEXPBGAAVFOutputDevice@@@Z [HP1 0x103A4FF0] [HP2 0x103AEA50]
         void Exec(UEInterpreter interp, UEObject pawn, string command,
             InputAction action, float delta, int depth)
         {
-            string[] token = command.Split((char[])null, 2, StringSplitOptions.RemoveEmptyEntries);
-            if (token.Length == 0) return;
-            string head = token[0];
-            string rest = token.Length > 1 ? token[1] : "";
             // UInput::ExecInputCommands (Engine.dll.c:144880-144897): the line goes to the WHOLE Viewport->Exec chain
-            // (exec functions included) only on Press, or on Release with the OnRelease prefix (which is stripped);
-            // on Hold/Axis and plain Release only to UInput::Exec (BUTTON/PULSE/TOGGLE/AXIS/alias), where a bare
-            // function name executes nothing.
+            // (exec functions included) only on Press, or on Release with the OnRelease prefix (ParseCommand: the word and
+            // the blanks after it are skipped); on Hold/Axis and plain Release only to UInput::Exec
+            // (BUTTON/PULSE/TOGGLE/AXIS/alias), where a bare function name executes nothing. The line is ParseLine's segment
+            // as is (blanks kept): what UViewport::Exec and the stages after it receive (tools/swarc_oracle/uinput_judge.py).
             bool viewportExec = action == InputAction.Press;
-            if (action == InputAction.Release
-                && string.Equals(head, "OnRelease", StringComparison.OrdinalIgnoreCase))
+            if (action == InputAction.Release && UEConsoleCommand.ParseCommand(command, "OnRelease", out string afterOnRelease))
             {
-                token = rest.Split((char[])null, 2, StringSplitOptions.RemoveEmptyEntries);
-                if (token.Length == 0) return;
-                head = token[0];
-                rest = token.Length > 1 ? token[1] : "";
-                command = rest.Length > 0 ? head + " " + rest : head;
+                command = afterOnRelease;
                 viewportExec = true;
             }
+            string[] token = command.Split((char[])null, 2, StringSplitOptions.RemoveEmptyEntries);
+            string head = token.Length > 0 ? token[0] : "";
+            string rest = token.Length > 1 ? token[1] : "";
 
             if (string.Equals(head, "BUTTON", StringComparison.OrdinalIgnoreCase))
             {
@@ -631,31 +627,32 @@ namespace HP1.UEScript
 
             // Not BUTTON/PULSE/TOGGLE/AXIS — the alias table first (shipped compares FName over 40 slots), and only
             // then does it go out as an ordinary console command, i.e. a pawn exec function.
-            if (!_inAlias && _aliases.TryGetValue(head, out string aliased))
+            if (!_inAlias && head.Length != 0 && _aliases.TryGetValue(head, out string aliased))
             {
                 _inAlias = true;
                 try
                 {
-                    foreach (string part in ParseLines(aliased))
-                    {
-                        string inner = part.Trim();
-                        if (inner.Length != 0) Exec(interp, pawn, inner, action, delta, depth + 1);
-                    }
+                    foreach (string part in ParseLines(aliased)) Exec(interp, pawn, part, action, delta, depth + 1);
                 }
                 finally { _inAlias = false; }
                 return;
             }
             if (!viewportExec) return;
-            DispatchExec(interp, pawn, head, rest, action);
+            DispatchExec(interp, pawn, head, command, action);
         }
+
+        // The UInput judge's boundary (tools/swarc_oracle/uinput_judge.py, runtime_poc --uinput-case): when set, a line
+        // UInput passes on goes here instead of the rest of the Viewport->Exec chain (the judged original's RenDev->Exec
+        // there is a recording stub). Never set by the product.
+        internal Action<string> ChainTap;
 
         // Bare command: shipped UInput does not handle it and returns 0 — next the UViewport::Exec/UPlayer::Exec
         // chain looks for it (console, level, GameInfo, HUD, pawn, inventory, engine; boot A5) — UEExecChain.
         // Arguments are the rest of the line: ScriptConsoleExec parses them itself.
-        void DispatchExec(UEInterpreter interp, UEObject pawn, string name, string args,
+        void DispatchExec(UEInterpreter interp, UEObject pawn, string name, string command,
             InputAction action)
         {
-            string command = args.Length > 0 ? name + " " + args : name;
+            if (ChainTap is not null) { ChainTap(command); return; }
             UEObject taker = UEExecChain.ExecAfterInput(interp, pawn, command, Log);
             if (taker is not null)
                 Log($"input_exec name={name} action={action} object={taker.GetProp(PK.Name)}");

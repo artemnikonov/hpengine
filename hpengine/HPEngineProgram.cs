@@ -218,12 +218,23 @@ namespace HPEngine
                     long t = Stopwatch.GetTimestamp(), f = Stopwatch.Frequency;
                     return ((t / f) << 32) + ((t % f) << 32) / f;   // FTime: seconds, 32.32 fixed point
                 };
-            UEGameEngine host = UEGameEngine.Boot(root, map, selectHardwareRenderDevice: true,
-                configStore: windowedGame ? new UEConfig.FileStore(DataDir(install))
-                    : visual is null ? null : UEConfig.SeededMemory((UEConfig.ScopeSystem, UEConfig.HPEngineSection, UEConfig.VisualModeKey, visual)),
-                // HP2 (DECISIONS 2026-11-16, save dir (b)): only the launcher's --hp2-savedir, never the install's Save.
-                saveDir: hp2CmdLine is not null ? hp2SaveDir : root == install ? null : Path.Combine(install, "Save"),
-                mods: activeMods, saveSlot: hp2Cmd.SaveSlot);
+            UEGameEngine host;
+            try
+            {
+                host = UEGameEngine.Boot(root, map, selectHardwareRenderDevice: true,
+                    configStore: windowedGame ? new UEConfig.FileStore(DataDir(install))
+                        : visual is null ? null : UEConfig.SeededMemory((UEConfig.ScopeSystem, UEConfig.HPEngineSection, UEConfig.VisualModeKey, visual)),
+                    // HP2 (DECISIONS 2026-11-16, save dir (b)): only the launcher's --hp2-savedir, never the install's Save.
+                    saveDir: hp2CmdLine is not null ? hp2SaveDir : root == install ? null : Path.Combine(install, "Save"),
+                    mods: activeMods, saveSlot: hp2Cmd.SaveSlot);
+            }
+            catch (UEFailedBrowseException e)
+            {
+                // The original's GError (a critical-error box naming the package); here the [Map] line and exit code 6.
+                Console.Error.WriteLine("[Map] " + e.Message);
+                if (dialog) FatalBox(e.Message);
+                return NoMapExitCode;
+            }
             Host = host;
             if (hp2Cmd.LoadGame is int loadSlot) host.LoadGameAtInit(loadSlot);   // UGameEngine::Init's LOADGAME=
             // A port override whose function the loaded scripts (a mod's) no longer have does not run: say so in the log.
@@ -1588,7 +1599,7 @@ namespace HPEngine
                         WorldFrame sf = cur;
                         var (spw, sph) = r.PixelSize();
                         string block = SpotReport.Build(sf, fly, $"{sf.Camera.Location} rot {sf.Camera.Rotation.Pitch},{sf.Camera.Rotation.Yaw},{sf.Camera.Rotation.Roll} fov {sf.Camera.FovAngle}", sf.Camera.ViewActorId, spw, sph, r.EnhancedVisuals,
-                            Path.GetFileNameWithoutExtension(host.Runtime.LoadedMapPath ?? "?"), tickIndex, levelTime, Movers, Cur?.Actors?.Draws ?? new List<ActorDraw>(),
+                            Path.GetFileNameWithoutExtension(host.Runtime.LoadedMapPath ?? "?"), tickIndex, levelTime, Movers, _dyn,
                             id => host.Runtime.Actors.FirstOrDefault(a => a is not null && a.ObjectId == id));
                         Console.WriteLine(block);
                         Console.Out.Flush();

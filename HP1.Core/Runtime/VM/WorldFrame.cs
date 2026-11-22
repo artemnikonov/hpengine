@@ -1164,6 +1164,8 @@ namespace HP1.UEScript
     // Weapon - a pawn's third-person weapon (ThirdPersonMesh in the weapon bone frame), ObjectId - the
     // weapon actor itself. The frontend does not compute vertices or call ApplyAnim.
     // MeshPath - the mesh GetFrame ran with (for a weapon - ThirdPersonMesh during the swap).
+    // LatePass - the DrawFrame pass (UESpriteSort.Pass == 2) of the FDynamicSprite whose DrawActorSprite drew the pose: the
+    // weapon is drawn inside its pawn's DrawActorSprite (Render.dll 0x10b32f85-0x10b330ba), so it takes the pawn's pass.
     // URender::DrawFrame draws each frame's own Frame->Sprite list (children before the parent, Render.dll.c:1011-1014):
     // an actor seen by a mirror but not by the master frame is drawn only in the mirror, and vice versa. Sets[i] lists the
     // view indices (WorldFrame.Views index, -1 = master) of one membership; SetOf maps ObjectId -> index into Sets.
@@ -1211,8 +1213,9 @@ namespace HP1.UEScript
         public readonly string MeshPath;
         public readonly UEVector[] Points;
         public readonly IReadOnlyList<MeshLodPart> LodParts;
-        public MeshPose(int objectId, bool weapon, string meshPath, UEVector[] points, IReadOnlyList<MeshLodPart> lodParts = null)
-        { ObjectId = objectId; Weapon = weapon; MeshPath = meshPath; Points = points; LodParts = lodParts; }
+        public readonly bool LatePass;
+        public MeshPose(int objectId, bool weapon, string meshPath, UEVector[] points, IReadOnlyList<MeshLodPart> lodParts = null, bool latePass = false)
+        { ObjectId = objectId; Weapon = weapon; MeshPath = meshPath; Points = points; LodParts = lodParts; LatePass = latePass; }
     }
 
     public readonly struct MeshLodPart

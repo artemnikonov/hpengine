@@ -217,108 +217,112 @@ namespace HP1.UEScript
             return LineCheck(start, end, extent, centre, -half, half, rotation);
         }
 
+        // The worker's owner branch [HP1 0x103fc980..0x103fcd8e]: C = Owner->ToLocal() (vtable +0x98, AActor::ToLocal
+        // 0x1031bac0: the inverse rotator coords, Origin = Location); the extent box FBox(−Extent, Extent).TransformBy(C)
+        // (Core, x outer / z inner corners through the inline TransformPointBy), local Extent = (Max − Min)·0.5 (Core
+        // FVector operator− and operator*(float), each component stored); End and Start through the inline
+        // TransformPointBy (0x103fca63..0x103fcac3, 0x103fcaf0..0x103fcb50); then the worker again on the local line with
+        // no owner, and the hit back to the world (MakeHit). The worker's two branches are one function in both games:
+        // HP2's body runs the same x87 operations (it inlines one 0.001·N product the HP1 body calls; fadd operands commuted).
+        // Original: Engine.dll ?LineCheck@UBox@@UAEHAAUFCheckResult@@PAVAActor@@VFVector@@22K@Z [HP1 0x103FE620] [HP2 0x1040BCE0]
+        // Original: not exported: FUN_103fc980 [HP1 0x103FC980] [HP2 0x1040A170] (UBox::LineCheck's worker: its only call, HP1 0x103fe68b via thunk 0x10303166, HP2 0x1040bd4b via 0x10303152)
         public static ActorHit LineCheck(Vector3 start, Vector3 end, Vector3 extent,
             Vector3 centre, Vector3 boxLo, Vector3 boxHi, UERotator rotation)
         {
-            BrushCoords local = BrushCoords.Identity;
-            // AActor::ToLocal (Engine.dll 0x1031bac0), which FUN_103fc980 calls
-            // through vtable +0x98, composes the inverse rotator coordinates.
-            local.DivRotator(rotation.Pitch, rotation.Yaw, rotation.Roll);
-            local.Origin = centre;
-            // FVector::TransformPointBy inlined (0x103fca63-0x103fcac3, 0x103fcaf0-0x103fcb50): Start/End − Origin stay in
-            // the register (no float store of the difference).
-            Vector3 localStart = PointBy64(start, local);
+            BrushCoords local = ToLocal(centre, rotation);
+            Vector3 localExtent = LocalExtent(extent, local);
             Vector3 localEnd = PointBy64(end, local);
-            Vector3 localExtent = new(
-                Math.Abs(local.X.x) * extent.x + Math.Abs(local.X.y) * extent.y + Math.Abs(local.X.z) * extent.z,
-                Math.Abs(local.Y.x) * extent.x + Math.Abs(local.Y.y) * extent.y + Math.Abs(local.Y.z) * extent.z,
-                Math.Abs(local.Z.x) * extent.x + Math.Abs(local.Z.y) * extent.y + Math.Abs(local.Z.z) * extent.z);
-
-            // FUN_103fc980 first runs FUN_103fc1d0 at Start. A trace which begins
-            // overlapped blocks only while moving deeper (the End penetration is
-            // strictly greater); moving out is allowed. This also supplies the
-            // closest-face normal for Time=0 contacts instead of a zero slab
-            // normal. The 0.003 separations are the shipped helper's six guards.
-            if (OverlapPenetration(localStart, localExtent, boxLo, boxHi,
-                    out float startPenetration, out Vector3 startNormal))
-            {
-                if (OverlapPenetration(localEnd, localExtent, boxLo, boxHi,
-                        out float endPenetration, out _)
-                    && startPenetration < endPenetration)
-                {
-                    Vector3 clamped = new(
-                        Math.Clamp(localStart.x, boxLo.x, boxHi.x),
-                        Math.Clamp(localStart.y, boxLo.y, boxHi.y),
-                        Math.Clamp(localStart.z, boxLo.z, boxHi.z));
-                    return MakeHit(0f, clamped, startNormal, local);
-                }
+            Vector3 localStart = PointBy64(start, local);
+            if (!LocalLineCheck(localStart, localEnd, localExtent, boxLo, boxHi,
+                    out float time, out Vector3 localLocation, out Vector3 localNormal))
                 return default;
-            }
-
-            // No start overlap: six-face boundary test (FUN_103fc980, disasm 0x103fce44-0x103fdbad;
-            // Engine.dll.c 300152-300400). Expanded box Min' = Min − Extent, Max' = Max + Extent
-            // (0x103fce51-0x103fceca, each component rounded to float). Time starts at 1.0 (0x103fce4a);
-            // faces go in order −X, +X, −Y, +Y, −Z, +Z, and each passing face OVERWRITES
-            // Time/Location/Normal, later faces comparing against the new Time. Hit means Time != 1.0
-            // bitwise (0x103fdba6).
-            Vector3 boxMax = new(boxHi.x + localExtent.x, boxHi.y + localExtent.y, boxHi.z + localExtent.z);
-            Vector3 boxMin = new(boxLo.x - localExtent.x, boxLo.y - localExtent.y, boxLo.z - localExtent.z);
-            float time = 1f;
-            Vector3 localLocation = Vector3.zero, localNormal = Vector3.zero;
-            // Face arguments: (a, b) are the operands of distance dist = a − b, (c, d) the operands of
-            // Δ = c − d, then the face's outward normal.
-            BoxFace(boxMin.x, localStart.x, localEnd.x, localStart.x, new Vector3(-1f, 0f, 0f),
-                localStart, localEnd, localExtent, boxMin, boxMax, ref time, ref localLocation, ref localNormal);
-            BoxFace(localStart.x, boxMax.x, localStart.x, localEnd.x, new Vector3(1f, 0f, 0f),
-                localStart, localEnd, localExtent, boxMin, boxMax, ref time, ref localLocation, ref localNormal);
-            BoxFace(boxMin.y, localStart.y, localEnd.y, localStart.y, new Vector3(0f, -1f, 0f),
-                localStart, localEnd, localExtent, boxMin, boxMax, ref time, ref localLocation, ref localNormal);
-            BoxFace(localStart.y, boxMax.y, localStart.y, localEnd.y, new Vector3(0f, 1f, 0f),
-                localStart, localEnd, localExtent, boxMin, boxMax, ref time, ref localLocation, ref localNormal);
-            BoxFace(boxMin.z, localStart.z, localEnd.z, localStart.z, new Vector3(0f, 0f, -1f),
-                localStart, localEnd, localExtent, boxMin, boxMax, ref time, ref localLocation, ref localNormal);
-            BoxFace(localStart.z, boxMax.z, localStart.z, localEnd.z, new Vector3(0f, 0f, 1f),
-                localStart, localEnd, localExtent, boxMin, boxMax, ref time, ref localLocation, ref localNormal);
-            if (time == 1f) return default;
             return MakeHit(time, localLocation, localNormal, local);
         }
 
-        // One face of the FUN_103fc980 boundary test (block −X: 0x103fceb9-0x103fd0c7; the other
-        // five are the same sequence with other fields).
-        // dist = Min' − Start for "−" faces, Start − Max' for "+" faces; delta is the same axis, Δ
-        // pointing into the face, stored as float (fstp [ebp+0xc]). Comparisons run in x87 on
-        // UNrounded values: a product of two floats is always exact in double, a difference of two
-        // floats when their exponents are close (coordinates of one scale); otherwise double (53 bits)
-        // and x87 (64 bits) may differ in the last bit of the comparison.
+        // AActor::ToLocal [HP1 0x1031bac0]: GMath.UnitCoords / Rotation, Origin = Location.
+        static BrushCoords ToLocal(Vector3 centre, UERotator rotation)
+        {
+            BrushCoords local = BrushCoords.Identity;
+            local.DivRotator(rotation.Pitch, rotation.Yaw, rotation.Roll);
+            local.Origin = centre;
+            return local;
+        }
+
+        // FBox(−Extent, Extent).TransformBy(C), then (Max − Min)·0.5 [HP1 0x103fc9bb..0x103fca2c, the same in FUN_103fc1d0
+        // 0x103fc20b..0x103fc279]. The corners go through C WITH its origin (the actor's world Location), so the box sides
+        // carry the float rounding at world scale: not the |axis|·Extent sum.
+        static Vector3 LocalExtent(Vector3 extent, in BrushCoords local)
+        {
+            (Vector3 min, Vector3 max) = HashBoxes.TransformedBox(new Vector3(-extent.x, -extent.y, -extent.z), extent, local);
+            return new Vector3((max.x - min.x) * 0.5f, (max.y - min.y) * 0.5f, (max.z - min.z) * 0.5f);
+        }
+
+        // The worker's no-owner branch [HP1 0x103fcd8f..0x103fdbbe], on the local line. FUN_103fc1d0 at Start: a trace
+        // which begins overlapped blocks (Time 0, the Start check's Location and Normal) only when End overlaps too and its
+        // penetration is strictly greater (fld End's; fcomp Start's; test ah,0x41). Otherwise the six-face test: expanded
+        // box Max' = Max + Extent, Min' = Min − Extent (FVector ctors: each stored), Time = 1.0; faces −X, +X, −Y, +Y, −Z, +Z,
+        // each passing face OVERWRITING Time/Location/Normal, later faces comparing against the new Time; a hit is
+        // Time != 1.0 bitwise (0x103fdba6).
+        static bool LocalLineCheck(Vector3 start, Vector3 end, Vector3 extent, Vector3 boxLo, Vector3 boxHi,
+            out float time, out Vector3 location, out Vector3 normal)
+        {
+            if (LocalPointCheck(start, extent, boxLo, boxHi, out float startPenetration, out location, out normal))
+            {
+                time = 0f;
+                return LocalPointCheck(end, extent, boxLo, boxHi, out float endPenetration, out _, out _)
+                       && endPenetration > startPenetration;
+            }
+            Vector3 boxMax = new(extent.x + boxHi.x, extent.y + boxHi.y, extent.z + boxHi.z);
+            Vector3 boxMin = new(boxLo.x - extent.x, boxLo.y - extent.y, boxLo.z - extent.z);
+            time = 1f;
+            location = normal = Vector3.zero;
+            // Face arguments: (a, b) are the operands of distance dist = a − b, (c, d) the operands of
+            // Δ = c − d, then the face's outward normal.
+            BoxFace(boxMin.x, start.x, end.x, start.x, new Vector3(-1f, 0f, 0f), start, end, extent, boxMin, boxMax, ref time, ref location, ref normal);
+            BoxFace(start.x, boxMax.x, start.x, end.x, new Vector3(1f, 0f, 0f), start, end, extent, boxMin, boxMax, ref time, ref location, ref normal);
+            BoxFace(boxMin.y, start.y, end.y, start.y, new Vector3(0f, -1f, 0f), start, end, extent, boxMin, boxMax, ref time, ref location, ref normal);
+            BoxFace(start.y, boxMax.y, start.y, end.y, new Vector3(0f, 1f, 0f), start, end, extent, boxMin, boxMax, ref time, ref location, ref normal);
+            BoxFace(boxMin.z, start.z, end.z, start.z, new Vector3(0f, 0f, -1f), start, end, extent, boxMin, boxMax, ref time, ref location, ref normal);
+            BoxFace(start.z, boxMax.z, start.z, end.z, new Vector3(0f, 0f, 1f), start, end, extent, boxMin, boxMax, ref time, ref location, ref normal);
+            return time != 1f;
+        }
+
+        static X87Ext F(float v) => X87Ext.From(v);
+        static X87Ext R(X87Ext v) => X87Ext.Round64(v);
+        static bool Less(int fcom) => (fcom & X87Ext.C0) != 0;                          // test ah,1: below or unordered
+        static bool Above(int fcom) => (fcom & (X87Ext.C0 | X87Ext.C3)) == 0;           // test ah,0x41 clear: above
+
+        // One face of the boundary test (block −X: 0x103fceb9-0x103fd0c7; the other five are the same sequence with other
+        // fields). dist = Min' − Start for "−" faces, Start − Max' for "+" faces, in the register (fst float, fcomp on the
+        // register); Δ the same axis pointing into the face, stored (fstp [ebp+0xc]).
         private static void BoxFace(float distA, float distB, float deltaA, float deltaB, Vector3 n,
             Vector3 start, Vector3 end, Vector3 extent, Vector3 boxMin, Vector3 boxMax,
             ref float time, ref Vector3 location, ref Vector3 hitNormal)
         {
-            float delta = deltaA - deltaB;                       // fstp [ebp+0xc]
-            double distX87 = (double)distA - distB;              // fsub, in register
-            float dist = (float)distX87;                         // fst [ebp+0x10]
-                                                                 // `fcomp -0.003f; test ah,0x41; jne`: continue only when dist > −0.003.
-            if (!(distX87 > (double)-0.003f)) return;
+            float delta = deltaA - deltaB;
+            X87Ext dist87 = R(F(distA) - F(distB));
+            float dist = dist87.ToFloat();
+            if (!Above(X87Ext.Fcom(dist87, F(-0.003f)))) return;                       // fcomp [0x1047a784]
             // max(dist, 0): `fld 0; fcomp dist; test ah,1`: takes dist when 0 < dist.
-            float clamped = 0f < dist ? dist : 0f;
+            float clamped = Less(X87Ext.Fcom(F(0f), F(dist))) ? dist : 0f;
             // `fld Δ; fmul Time; fxch; fcompp; test ah,1; je`: passes when clamped < Δ·Time.
-            if (!((double)clamped < (double)delta * time)) return;
-            float t = dist / delta;                              // fdiv, fst [ebp+0x10]
-            if (t < 0f) t = 0f;
+            if (!Less(X87Ext.Fcom(F(clamped), R(F(delta) * F(time))))) return;
+            X87Ext q = X87Ext.Div64(F(dist), F(delta));                                // fdiv, fst [ebp+0x10]
+            float t = Less(X87Ext.Fcom(q, F(0f))) ? 0f : q.ToFloat();
             // Point at t: End·t + Start·(1−t) (FVector::operator* ×2, operator+), shifted inward by
             // 0.001·N (FUN_103f2a40 with 0x3a83126f, operator-=).
             Vector3 p = PointAt(start, end, t);
             float px = p.x - 0.001f * n.x, py = p.y - 0.001f * n.y, pz = p.z - 0.001f * n.z;
-            // Strictly inside the expanded box on all three axes.
-            if (!(boxMin.x < px && px < boxMax.x && boxMin.y < py && py < boxMax.y
-                  && boxMin.z < pz && pz < boxMax.z))
+            // Strictly inside the expanded box on all three axes: `fcomp Min'; test ah,0x41` and `fcomp Max'; test ah,1`.
+            if (!(px > boxMin.x && !(px >= boxMax.x) && py > boxMin.y && !(py >= boxMax.y)
+                  && pz > boxMin.z && !(pz >= boxMax.z)))
                 return;
-            t -= 0.001f;                                         // fsub [0x10473814]
-            if (t < 0f) t = 0f;
-            time = t;                                            // [esi+0x24]
-                                                                 // Location = point at the new t − N·(N|Extent); the face normal always.
+            X87Ext t87 = R(F(t) - F(0.001f));                                          // fsub [0x10473814]; fst
+            t = Less(X87Ext.Fcom(t87, F(0f))) ? 0f : t87.ToFloat();
+            time = t;                                                                  // [esi+0x24]
+            // Location = point at the new t − N·(N|Extent); the face normal always.
             Vector3 loc = PointAt(start, end, t);
-            float support = n.x * extent.x + n.y * extent.y + n.z * extent.z;
+            float support = n.x * extent.x + n.y * extent.y + n.z * extent.z;          // axis normal: exact
             location = new Vector3(loc.x - n.x * support, loc.y - n.y * support, loc.z - n.z * support);
             hitNormal = n;
         }
@@ -329,15 +333,12 @@ namespace HP1.UEScript
             return new Vector3(start.x * s + end.x * t, start.y * s + end.y * t, start.z * s + end.z * t);
         }
 
-        // UBox::PointCheck (export thunk 0x1030466f -> body 0x103FE590, which reads
-        // the box through GetCollisionBoundingBox and delegates to the worker
-        // FUN_103fc1d0). Same LOCAL frame as LineCheck above: the point and the
-        // extent go through AActor::ToLocal (the extent as the rotated AABB of its
-        // own box), the overlap runs against the local half-extents, and the face
-        // normal comes back out through the coords. Established against the real
-        // body under the emulator — an earlier "world AABB" reading of it happened
-        // to match the boundary probes at yaw 90, where the two models coincide,
-        // but produced axis-aligned normals where shipped returns rotated ones.
+        // UBox::PointCheck: the box through GetCollisionBoundingBox, then the worker FUN_103fc1d0, whose owner branch is
+        // LineCheck's: C = ToLocal, the extent box through C, the point through the inline TransformPointBy
+        // (0x103fc2aa..0x103fc30a), the no-owner check on the local point, the hit back through MakeHit's inverse coords
+        // (0x103fc383..0x103fc502).
+        // Original: Engine.dll ?PointCheck@UBox@@UAEHAAUFCheckResult@@PAVAActor@@VFVector@@2K@Z [HP1 0x103FE590] [HP2 0x1040BC50]
+        // Original: not exported: FUN_103fc1d0 [HP1 0x103FC1D0] [HP2 0x10409A00] (UBox::PointCheck's worker: its call HP1 0x103fe5f0 via thunk 0x10302d6f, HP2 0x1040bcb0 via 0x10302d6a; also FUN_103fc980's start/end overlap checks)
         public static (bool Hit, Vector3 Location, Vector3 Normal) PointCheck(
             Vector3 point, Vector3 extent, Vector3 centre, float radius, float width,
             float height, UERotator rotation)
@@ -350,60 +351,54 @@ namespace HP1.UEScript
             Vector3 point, Vector3 extent, Vector3 centre, Vector3 boxLo, Vector3 boxHi,
             UERotator rotation)
         {
-            BrushCoords local = BrushCoords.Identity;
-            local.DivRotator(rotation.Pitch, rotation.Yaw, rotation.Roll);
-            Vector3 localPoint = local.TransformVector(point - centre);
-            Vector3 localExtent = new(
-                Math.Abs(local.X.x) * extent.x + Math.Abs(local.X.y) * extent.y + Math.Abs(local.X.z) * extent.z,
-                Math.Abs(local.Y.x) * extent.x + Math.Abs(local.Y.y) * extent.y + Math.Abs(local.Y.z) * extent.z,
-                Math.Abs(local.Z.x) * extent.x + Math.Abs(local.Z.y) * extent.y + Math.Abs(local.Z.z) * extent.z);
-            if (!OverlapPenetration(localPoint, localExtent, boxLo, boxHi, out _, out Vector3 localNormal))
+            BrushCoords local = ToLocal(centre, rotation);
+            Vector3 localExtent = LocalExtent(extent, local);
+            Vector3 localPoint = PointBy64(point, local);
+            if (!LocalPointCheck(localPoint, localExtent, boxLo, boxHi, out _, out Vector3 location, out Vector3 normal))
                 return (false, Vector3.zero, Vector3.zero);
-            // The reported location is the point CLAMPED into the box, like the
-            // overlap branch of LineCheck above — shipped's differs from the raw
-            // point exactly along the hit normal for points outside a face.
-            Vector3 clamped = new(
-                Math.Clamp(localPoint.x, boxLo.x, boxHi.x),
-                Math.Clamp(localPoint.y, boxLo.y, boxHi.y),
-                Math.Clamp(localPoint.z, boxLo.z, boxHi.z));
-            return (true, centre + ToWorldVector(clamped, local),
-                ToWorldVector(localNormal, local));
+            ActorHit hit = MakeHit(0f, location, normal, local);
+            return (true, hit.Location, hit.Normal);
         }
 
-        private static bool OverlapPenetration(Vector3 point, Vector3 extent, Vector3 lo, Vector3 hi,
-            out float penetration, out Vector3 normal)
+        // FUN_103fc1d0's no-owner branch [HP1 0x103fc525..0x103fc7ee]: P ± Extent stored; overlap unless a side is within
+        // 0.003 — the sums Min + 0.003 / Max − 0.003 stay in the register (fadd/fsub [0x1047a5e8], fcomp). Location = P
+        // clamped into the box (P < Min, unordered included -> Min; else P < Max -> P; else Max). Penetration starts at
+        // Max.z − Pmin.z (stored, Normal +Z); each later candidate is compared in the register against the stored value
+        // (fcom; test ah,1) and stored when below: −Z, +Y, −Y, +X, −X.
+        static bool LocalPointCheck(Vector3 p, Vector3 e, Vector3 lo, Vector3 hi,
+            out float penetration, out Vector3 location, out Vector3 normal)
         {
-            float minX = point.x - extent.x, maxX = point.x + extent.x;
-            float minY = point.y - extent.y, maxY = point.y + extent.y;
-            float minZ = point.z - extent.z, maxZ = point.z + extent.z;
-            if (maxX <= lo.x + 0.003f || hi.x - 0.003f <= minX
-                || maxY <= lo.y + 0.003f || hi.y - 0.003f <= minY
-                || maxZ <= lo.z + 0.003f || hi.z - 0.003f <= minZ)
-            {
-                penetration = 0f;
-                normal = Vector3.zero;
+            penetration = 0f;
+            location = normal = Vector3.zero;
+            Vector3 pMax = new(e.x + p.x, e.y + p.y, e.z + p.z);
+            Vector3 pMin = new(p.x - e.x, p.y - e.y, p.z - e.z);
+            X87Ext gap = F(0.003f);
+            if (!Less(X87Ext.Fcom(R(F(lo.x) + gap), F(pMax.x))) || !Above(X87Ext.Fcom(R(F(hi.x) - gap), F(pMin.x)))
+                || !Less(X87Ext.Fcom(R(F(lo.y) + gap), F(pMax.y))) || !Above(X87Ext.Fcom(R(F(hi.y) - gap), F(pMin.y)))
+                || !Less(X87Ext.Fcom(R(F(lo.z) + gap), F(pMax.z))) || !Above(X87Ext.Fcom(R(F(hi.z) - gap), F(pMin.z))))
                 return false;
-            }
-
-            penetration = hi.z - minZ;
+            location = new Vector3(Clamp(p.x, lo.x, hi.x), Clamp(p.y, lo.y, hi.y), Clamp(p.z, lo.z, hi.z));
+            penetration = hi.z - pMin.z;
             normal = new Vector3(0f, 0f, 1f);
-            Choose(maxZ - lo.z, new Vector3(0f, 0f, -1f), ref penetration, ref normal);
-            Choose(hi.y - minY, new Vector3(0f, 1f, 0f), ref penetration, ref normal);
-            Choose(maxY - lo.y, new Vector3(0f, -1f, 0f), ref penetration, ref normal);
-            Choose(hi.x - minX, new Vector3(1f, 0f, 0f), ref penetration, ref normal);
-            Choose(maxX - lo.x, new Vector3(-1f, 0f, 0f), ref penetration, ref normal);
+            Choose(R(F(pMax.z) - F(lo.z)), new Vector3(0f, 0f, -1f), ref penetration, ref normal);
+            Choose(R(F(hi.y) - F(pMin.y)), new Vector3(0f, 1f, 0f), ref penetration, ref normal);
+            Choose(R(F(pMax.y) - F(lo.y)), new Vector3(0f, -1f, 0f), ref penetration, ref normal);
+            Choose(R(F(hi.x) - F(pMin.x)), new Vector3(1f, 0f, 0f), ref penetration, ref normal);
+            Choose(R(F(pMax.x) - F(lo.x)), new Vector3(-1f, 0f, 0f), ref penetration, ref normal);
             return true;
         }
 
-        private static void Choose(float candidate, Vector3 candidateNormal,
+        static float Clamp(float v, float min, float max) => !(v >= min) ? min : !(v >= max) ? v : max;
+
+        private static void Choose(X87Ext candidate, Vector3 candidateNormal,
             ref float penetration, ref Vector3 normal)
         {
-            if (candidate >= penetration) return;
-            penetration = candidate;
+            if (!Less(X87Ext.Fcom(candidate, F(penetration)))) return;
+            penetration = candidate.ToFloat();
             normal = candidateNormal;
         }
 
-        // The worker's hit back to the world, both branches (0x103fcbc9-0x103fcd5d, Engine.dll.c 300101-300146): shipped
+        // The worker's hit back to the world, both workers (0x103fcbc9-0x103fcd5d, Engine.dll.c 300101-300146): shipped
         // builds the inverse FCoords — axes transposed (FVector ctors), Origin = −(Origin.TransformVectorBy(local)) (Core
         // TransformVectorBy, unary operator-) — then Location = TransformPointBy(inverse) and Normal = TransformVectorBy(inverse),
         // both inlined. Not centre + Rᵀ·v: that is the same algebra with other roundings (1 ulp on rotated boxes, E1).
@@ -421,32 +416,20 @@ namespace HP1.UEScript
             return new ActorHit(true, time, PointBy64(localLocation, inv), VectorBy64(localNormal, inv));
         }
 
-        private static Vector3 ToWorldVector(Vector3 v, in BrushCoords local)
-        {
-            return new Vector3(
-                v.x * local.X.x + v.y * local.Y.x + v.z * local.Z.x,
-                v.x * local.X.y + v.y * local.Y.y + v.z * local.Z.y,
-                v.x * local.X.z + v.y * local.Y.z + v.z * local.Z.z);
-        }
-
         // PC64 register chains of TransformPointBy / TransformVectorBy (game logic: appEnableFastMath(0)): each difference,
         // product and sum rounds at 64 bits, ((x·A.x + y·A.y) + z·A.z), one fstp dword per component.
-        static HP1.Core.X87Ext X87(float v) => HP1.Core.X87Ext.From(v);
-        static float Dot64(HP1.Core.X87Ext x, HP1.Core.X87Ext y, HP1.Core.X87Ext z, Vector3 a)
-        {
-            static HP1.Core.X87Ext R(HP1.Core.X87Ext v) => HP1.Core.X87Ext.Round64(v);
-            return R(R(R(x * X87(a.x)) + R(y * X87(a.y))) + R(z * X87(a.z))).ToFloat();
-        }
+        static float Dot64(X87Ext x, X87Ext y, X87Ext z, Vector3 a)
+            => R(R(R(x * F(a.x)) + R(y * F(a.y))) + R(z * F(a.z))).ToFloat();
         static Vector3 PointBy64(Vector3 p, in BrushCoords c)
         {
-            var dx = HP1.Core.X87Ext.Round64(X87(p.x) - X87(c.Origin.x));
-            var dy = HP1.Core.X87Ext.Round64(X87(p.y) - X87(c.Origin.y));
-            var dz = HP1.Core.X87Ext.Round64(X87(p.z) - X87(c.Origin.z));
+            var dx = R(F(p.x) - F(c.Origin.x));
+            var dy = R(F(p.y) - F(c.Origin.y));
+            var dz = R(F(p.z) - F(c.Origin.z));
             return new Vector3(Dot64(dx, dy, dz, c.X), Dot64(dx, dy, dz, c.Y), Dot64(dx, dy, dz, c.Z));
         }
         static Vector3 VectorBy64(Vector3 v, in BrushCoords c)
-            => new(Dot64(X87(v.x), X87(v.y), X87(v.z), c.X), Dot64(X87(v.x), X87(v.y), X87(v.z), c.Y),
-                   Dot64(X87(v.x), X87(v.y), X87(v.z), c.Z));
+            => new(Dot64(F(v.x), F(v.y), F(v.z), c.X), Dot64(F(v.x), F(v.y), F(v.z), c.Y),
+                   Dot64(F(v.x), F(v.y), F(v.z), c.Z));
     }
 
     // FCollisionHash replica (Engine.dll FCollisionHash, UnActCol.cpp): the exact

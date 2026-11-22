@@ -7,7 +7,8 @@
 //            fragments drawn: frustum, zone/portal and span-buffer decisions are all inside OccludeBsp), the coplanar-cut
 //            pieces, and how many triangles the frontend emitted for it (MoverScene.Draws);
 //   actors — every actor within Radius of the camera or based on a mover: hidden flag, DrawType, whether Core's DrawFrame
-//            drew it (WorldFrame.ActorViews / SpriteActors) and whether the frontend emitted a batch for it.
+//            drew it (WorldFrame.ActorViews / SpriteActors) and whether the frontend emitted a batch for it (the frame's
+//            whole actor batch list: meshes, sprites, particles, decals; an emitter with no live particle has none).
 using System.Globalization;
 using System.Text;
 using HP1.UEScript;

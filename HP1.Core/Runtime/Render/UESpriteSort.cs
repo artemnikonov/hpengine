@@ -82,6 +82,34 @@ namespace HP1.UEScript
             }
         }
 
+        // JUDGE ONLY (audit/hp2_frame_judge.sh): HP1_SPRITESORT_LIVE_KEYS = a file "<actor name>\t<hex UClass address>" from
+        // the live capture's SORT records. The sort then runs on the original's own keys, so the frame judge compares the
+        // ported body and the Frame->Sprite list order exactly and leaves out only the key (author decision A: the heap
+        // address is not modelled). An actor the capture never sorted takes its class's live key when another actor of
+        // that class had one, else the port's class key (stderr names it once). Never set in a product run.
+        static readonly string LiveKeyFile = Environment.GetEnvironmentVariable("HP1_SPRITESORT_LIVE_KEYS") is { Length: > 0 } lk ? lk : null;
+        static Dictionary<string, int> _liveByActor;
+        static readonly Dictionary<string, int> _liveByClass = new(StringComparer.OrdinalIgnoreCase);
+        static readonly HashSet<string> _liveMissing = new(StringComparer.OrdinalIgnoreCase);
+        static int? LiveKey(UEObject a)
+        {
+            if (LiveKeyFile is null) return null;
+            if (_liveByActor is null)
+            {
+                _liveByActor = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                foreach (string l in System.IO.File.ReadAllLines(LiveKeyFile))
+                {
+                    string[] x = l.Split('\t');
+                    if (x.Length == 2) _liveByActor[x[0]] = unchecked((int)Convert.ToUInt32(x[1], 16));
+                }
+            }
+            string n = a.GetProp(PK.Name)?.ToString(), c = a.Class?.Name;
+            if (n is not null && _liveByActor.TryGetValue(n, out int k)) { if (c is not null) _liveByClass[c] = k; return k; }
+            if (c is not null && _liveByClass.TryGetValue(c, out k)) return k;
+            if (_liveMissing.Add(n ?? "?")) Console.Error.WriteLine($"[SpriteSort] live key: {n} ({c}) not in the capture, port class key");
+            return null;
+        }
+
         // DrawFrame pass of a sprite's actor on a non-SpanBased device: 1 or 2 (bVar13 + 1). The one owner: the frame
         // carries it as ActorSnapshot.LatePass, the frontend's group.
         public static int Pass(UEObject actor)
@@ -108,7 +136,7 @@ namespace HP1.UEScript
             int Key(T s)
             {
                 UEObject a = actor(s) ?? throw new NotSupportedException("DrawFrame sprite sort: a sprite without a known actor (shipped dereferences Actor->Class)");
-                if (!keys.TryGetValue(a, out int k)) keys[a] = k = ClassKey(a);
+                if (!keys.TryGetValue(a, out int k)) keys[a] = k = LiveKey(a) ?? ClassKey(a);
                 return k;
             }
             Sort(arr, Key);
