@@ -22,6 +22,13 @@ mkdir -p "$app"
 rsync -a --delete --exclude=/embedded.mobileprovision --exclude=/Info.plist --exclude=/content-server.json \
     "$built_dir/HPEngine.app/" "$app/"
 xattr -cr "$app"
+# Development download server on this Mac (content-server.sh setup): the app fetches a missing game from it.
+server_config="$HOME/Library/Application Support/HPEngine Content Server/app-config.json"
+if [ -f "$server_config" ]; then
+    cp "$server_config" "$app/content-server.json"
+else
+    echo "warning: no content server configured (hpengine/ios/content-server.sh setup); the app will not download games"
+fi
 # The .NET Info.plist becomes the target's INFOPLIST_FILE; Xcode processes it into the bundle.
 mkdir -p "$DERIVED_FILE_DIR"
 cp "$built_dir/HPEngine.app/Info.plist" "$DERIVED_FILE_DIR/Info.plist"

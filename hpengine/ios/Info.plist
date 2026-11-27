@@ -44,5 +44,7 @@
     <true/>
     <key>LSSupportsOpeningDocumentsInPlace</key>
     <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>HPEngine downloads your game files from your Mac's content server when they are missing.</string>
 </dict>
 </plist>

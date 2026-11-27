@@ -40,6 +40,7 @@ namespace HPEngine
                 string hp1 = Path.Combine(documents, "game");
                 string hp2Data = Path.Combine(documents, "HP2Data");
                 string hp2 = Path.Combine(hp2Data, "game");
+                ContentDownload.EnsureGames(("hp1", hp1), ("hp2", hp2));
 
                 if (Packaging.InstallRoot.Missing(hp1) is null)
                     return Run(["--root", hp1, .. iosArgs]);
