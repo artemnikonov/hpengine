@@ -9,10 +9,19 @@ using static SDL.SDL3;
 
 namespace HPEngine
 {
-    static unsafe class Program
+    static unsafe partial class Program
     {
         const int NoMapExitCode = 6;   // the windowed game: no Maps/<start map>.unr (the Launchers read it: EngineError.Pick)
         static int Main(string[] args)
+        {
+#if IOS
+            return RunIos(args);
+#else
+            return Run(args);
+#endif
+        }
+
+        static int Run(string[] args)
         {
             HarnessEnv.WarnUnread();   // harness probes do not affect the engine: loud
             // macOS: a held key repeats its character (WM_CHAR repeat, as Windows gives the original) instead of opening the
@@ -195,7 +204,7 @@ namespace HPEngine
                 return NoMapExitCode;
             }
             // Startup splash (HP.exe WinMain): before the engine comes up, closed once the first map is loaded.
-            if (windowedGame && UELevelRuntime.ShowsSplash(string.Join(" ", args)))
+            if (!OperatingSystem.IsIOS() && windowedGame && UELevelRuntime.ShowsSplash(string.Join(" ", args)))
             {
                 var inis = UELevelRuntime.InstallInis(Path.Combine(root, "System"));
                 var splashConfig = new UEConfig(inis.System, inis.User);
@@ -687,6 +696,7 @@ namespace HPEngine
 
         static MoverScene Movers;
         static readonly List<HPEngine.Hud.HudQuad> _hud2 = new();
+        static bool _loggedControl;
         static readonly List<HPEngine.Hud.HudQuad> _coronaQuads = new();
         static float LastRealDt = 1f / 60f;
         static readonly List<ActorDraw> _spritePool = new();
@@ -880,6 +890,12 @@ namespace HPEngine
                     v0.R, v0.G, v0.B, cd.Texture, cd.NoSmooth));
             }
             HPEngine.Hud.ScreenEffects.Overlay(_hud2, _coronaQuads, HPEngine.Hud.ScreenEffects.FlashQuad(f.ViewFlash, pw, ph), quads);
+            if (f.PlayerControl != _loggedControl)   // run log: when the touch controls switch (WorldFrame.PlayerControl)
+            {
+                _loggedControl = f.PlayerControl;
+                Console.WriteLine($"[Control] {(f.PlayerControl ? "player controls Harry" : "no direct control")}{(f.PointerTracing ? " (spell lesson)" : "")}");
+            }
+            HPEngine.Input.TouchControls.AppendOverlay(_hud2, pw, ph, f.PointerTracing, f.PlayerControl);   // NOT ORIGINAL: iOS touch controls (none elsewhere)
             r.SetHud(_hud2);
             r.SetCanvasActors(f.Hud, f.CanvasFovAngle, f.CanvasFrameSize.X * f.CanvasScale, f.CanvasFrameSize.Y * f.CanvasScale);
             // Menu brightness (UClient.Brightness, FEOptionsPage.BrightnessChanged): D3DDrv gamma ramp over the whole frame.
@@ -1180,8 +1196,14 @@ namespace HPEngine
             // Input: hpengine/Input: SDL events -> InputStage -> CoreInputSink before the Core tick. Escape is a game key.
             // Free camera (F) only with --debug-cam.
             var input = new HPEngine.Input.InputStage { Warn = Console.Error.WriteLine };
+            HPEngine.Input.TouchControls.MouseMotion = input.OnMouseMotion;   // a drawing finger moves like the mouse (iOS)
+            HPEngine.Input.TouchControls.MenuPointer = input.OnMenuTouch;   // a finger on a menu taps there (iOS)
+            input.ToCanvas = ScaleCursor;
             var sink = new HPEngine.Input.CoreInputSink(host.Interp, host.Runtime) { Warn = Console.Error.WriteLine, Viewport = device };
-            SDL_StartTextInput(r.Window);
+            // iOS: UIKit shows its on-screen keyboard while text input is on, whatever SDL_ENABLE_SCREEN_KEYBOARD says, and it
+            // stayed over the game all session. Text input only with a hardware keyboard there (one connected later types keys
+            // but no characters until the next start).
+            if (!OperatingSystem.IsIOS() || SDL_HasKeyboard()) SDL_StartTextInput(r.Window);
             // Mouse capture: InputStage decides (SetMouseCapture events), the window carries it out; a mode switch re-applies.
             // On the Core thread both halves run on the window thread, Core waiting: the capture, then the cursor read right
             // after it (a release puts the cursor back); the cursor of a tick is otherwise read before the tick is posted,
@@ -1207,7 +1229,7 @@ namespace HPEngine
             // Gamepad: Core polls it in its tick. On the Core thread the first poll is read on the window thread (Core waiting);
             // from then on the window thread reads the pad before posting each tick and Core gets that state (SDL updates
             // the pad only in the event pump, so it is the state the single-thread loop reads inside the tick).
-            UEInput.GamepadRead padRead = Script is not null ? Script.ReadPad : HPEngine.Input.SdlGamepad.Read;
+            UEInput.GamepadRead padRead = Script is not null ? Script.ReadPad : HPEngine.Input.TouchControls.Read;   // = SdlGamepad.Read without touch controls
             bool padActive = false, padOk = false; UEInput.GamepadState padState = default;
             if (threaded)
                 input.Gamepad = (out UEInput.GamepadState s) =>
@@ -1387,6 +1409,7 @@ namespace HPEngine
                         while (SDL_PollEvent(&ev))
                         {
                             DisplayEvent((SDL_EventType)ev.type);
+                            if (!isolated) HPEngine.Input.TouchControls.Feed(ev);   // a finger lifted during the load is released
                             if (!isolated && !input.PumpLoadHold(ev, sink, audio.Focus)) running = false;
                         }
                         host.Runtime.PresentLoadMapScreenNow(loadScreen);
@@ -1477,6 +1500,7 @@ namespace HPEngine
                         if (stress && e.common.timestamp == WindowScript.OsStamp) { stressFed++; input.Feed(e); continue; }
                         DisplayEvent((SDL_EventType)e.type);
                         if (isolated) continue;   // judge/bench window: scripted input only
+                        HPEngine.Input.TouchControls.Feed(e);
                         var type = (SDL_EventType)e.type;
                         if (type == SDL_EventType.SDL_EVENT_WINDOW_FOCUS_GAINED) Console.WriteLine("[Focus] gained");
                         if (!input.OnWindowEvent(e, sink, audio.Focus)) { running = false; break; }

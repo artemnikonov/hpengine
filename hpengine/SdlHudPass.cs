@@ -19,7 +19,7 @@ namespace HPEngine
     {
         SDL_GPUGraphicsPipeline*[] _hudPipe;
         SDL_GPUSampler* _hudSampler, _hudLinear, _hudLinearClamp;
-        SDL_GPUTexture* _hudWhite;
+        SDL_GPUTexture* _hudWhite, _hudCircle;
         SDL_GPUBuffer* _hvb; uint _hvbCap;
         readonly Dictionary<string, nint> _hudTex = new(StringComparer.OrdinalIgnoreCase);
         readonly List<(int first, int count, HudBlend blend, bool clip, nint tex, nint sampler, int actor)> _hudRuns = new();   // actor ≥ 0: a canvas mesh draw
@@ -88,6 +88,19 @@ namespace HPEngine
             si.address_mode_u = si.address_mode_v = si.address_mode_w = SDL_GPUSamplerAddressMode.SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE; _hudLinearClamp = SDL_CreateGPUSampler(_dev, &si);
             _hudWhite = Tex(SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, 1, 1, 1, SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER);
             UploadLevels(_hudWhite, new[] { (1, 1, new byte[] { 255, 255, 255, 255 }) });
+            // NOT ORIGINAL: the touch controls' disc (Input/TouchControls.cs), white with an anti-aliased edge in alpha.
+            const int cs = 128;
+            var disc = new byte[cs * cs * 4];
+            for (int y = 0; y < cs; y++)
+                for (int x = 0; x < cs; x++)
+                {
+                    float dx = x + 0.5f - cs / 2f, dy = y + 0.5f - cs / 2f;
+                    float a = Math.Clamp(cs / 2f - MathF.Sqrt(dx * dx + dy * dy), 0f, 1f);
+                    int o = (y * cs + x) * 4;
+                    disc[o] = disc[o + 1] = disc[o + 2] = 255; disc[o + 3] = (byte)(a * 255);
+                }
+            _hudCircle = Tex(SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, cs, cs, 1, SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER);
+            UploadLevels(_hudCircle, new[] { (cs, cs, disc) });
             return true;
         }
 
@@ -124,6 +137,7 @@ namespace HPEngine
         nint HudTexture(string path, HudQuadSource source, float pagePixels)
         {
             if (string.IsNullOrEmpty(path)) return (nint)_hudWhite;
+            if (path == HPEngine.Input.TouchControls.CircleTexture) return (nint)_hudCircle;
             // Runtime texture (CreateTextureFromBMP, SavePics): pixels from the Core registry; version is in the key:
             // the script recreates the object under the same name (slot pictures on every UpdateSlots).
             // Glyph pages of native fonts (UENativeFonts) are runtime textures too: alpha by the glyph rule below.

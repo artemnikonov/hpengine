@@ -63,6 +63,10 @@ not have.
   ported yet (for keys either). The Launcher's More menu has "Reset Gamepad Bindings". In menus the
   d-pad moves the cursor between controls, changes sliders with Left/Right and steps through open drop-down lists
   (A picks, B closes).
+- iOS: on-screen touch controls act as a gamepad (movement and camera sticks, Jump, Cast, Menu) when no
+  gamepad is in use and only while the player controls Harry; menus take taps where the finger is, and a spell lesson's
+  pattern is traced by dragging a finger along it (the finger is the mouse with Cast held); the screen keyboard is not shown (typing needs a hardware keyboard). Development builds can
+  download a missing game folder from the developer's Mac (`hpengine/ios/content-server.sh`).
 - HP1: any key skips the start-up splash screens, and Space turns a story-book page, the first page and one-page
   stories included, once it has been shown for 2 seconds; the original allows both only in its hidden debug mode.
 - Alt+Enter does not toggle again on key repeat. In a window the mouse is captured without an

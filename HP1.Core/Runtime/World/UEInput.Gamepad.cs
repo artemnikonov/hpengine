@@ -332,7 +332,7 @@ namespace HP1.UEScript
             // Virtual keys in IK order (LeftMouse 1, Enter 13 — HP2's B in the game, Escape 27, Space 32): an edge of the pad state, not KeyDownTable (the
             // console consumes Escape, so the table would re-press it every poll); held -> slot handled, so the final loop
             // does not release it through the keyboard state.
-            Virtual(interp, console, pawn, "LeftMouse", 1, Latched("LeftMouse"));
+            Virtual(interp, console, pawn, "LeftMouse", 1, Latched("LeftMouse") | TapPoll());   // a menu tap (UEInput.MenuNav)
             Virtual(interp, console, pawn, "Enter", 13, Latched("Enter"));
             Virtual(interp, console, pawn, "Escape", 27, Latched("Escape"));
             Virtual(interp, console, pawn, "Space", 32, Latched("Space"));

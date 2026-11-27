@@ -1,0 +1,175 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXFileReference section */
+		A00000000000000000000008 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
+		A0000000000000000000000D /* HPEngine.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HPEngine.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A00000000000000000000010 /* hpengine/ios/Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = hpengine/ios/Signing.xcconfig; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		A00000000000000000000003 /* hpengine */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = hpengine;
+			sourceTree = "<group>";
+		};
+		A00000000000000000000004 /* HP1.Core */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = HP1.Core;
+			sourceTree = "<group>";
+		};
+		A00000000000000000000005 /* docs */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = docs;
+			sourceTree = "<group>";
+		};
+		A00000000000000000000009 /* launcher */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = launcher;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXGroup section */
+		A00000000000000000000002 = {
+			isa = PBXGroup;
+			children = (
+				A00000000000000000000003 /* hpengine */,
+				A00000000000000000000004 /* HP1.Core */,
+				A00000000000000000000005 /* docs */,
+				A00000000000000000000008 /* README.md */,
+				A00000000000000000000009 /* launcher */,
+				A00000000000000000000010 /* hpengine/ios/Signing.xcconfig */,
+				A0000000000000000000000F /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A0000000000000000000000F /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A0000000000000000000000D /* HPEngine.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A0000000000000000000000A /* HPEngine */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A0000000000000000000000B /* Build configuration list for PBXNativeTarget "HPEngine" */;
+			buildPhases = (
+				A0000000000000000000000E /* Build .NET app */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = HPEngine;
+			productName = HPEngine;
+			productReference = A0000000000000000000000D /* HPEngine.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A00000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastUpgradeCheck = 2720;
+			};
+			buildConfigurationList = A00000000000000000000006 /* Build configuration list for PBXProject "HPEngine" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A00000000000000000000002;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = A0000000000000000000000F /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A0000000000000000000000A /* HPEngine */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		A0000000000000000000000E /* Build .NET app */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Build .NET app";
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/Info.plist",
+				"$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "exec /bin/sh \"$SRCROOT/hpengine/ios/xcode-build-phase.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A00000000000000000000007 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				SDKROOT = iphoneos;
+			};
+			name = Release;
+		};
+		A0000000000000000000000C /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A00000000000000000000010 /* hpengine/ios/Signing.xcconfig */;
+			buildSettings = {
+				ARCHS = arm64;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "$(DERIVED_FILE_DIR)/Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				PRODUCT_NAME = HPEngine;
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A00000000000000000000006 /* Build configuration list for PBXProject "HPEngine" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A00000000000000000000007 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A0000000000000000000000B /* Build configuration list for PBXNativeTarget "HPEngine" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A0000000000000000000000C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A00000000000000000000001 /* Project object */;
+}

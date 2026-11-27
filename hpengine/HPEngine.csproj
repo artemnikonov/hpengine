@@ -2,7 +2,8 @@
   <PropertyGroup>
     <!-- Windows: a GUI program, no console window next to the game (the run journal is a file, HPEngineData/logs). -->
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework Condition="'$(BuildForIos)' != 'true'">net9.0</TargetFramework>
+    <TargetFramework Condition="'$(BuildForIos)' == 'true'">net11.0-ios</TargetFramework>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Nullable>disable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -13,9 +14,29 @@
     <!-- JIT ramp of a fresh process (audit/perf_core_ceiling_2026-11-03.md, "perf/jit"): precompiled code from the
          first tick (composite R2R with the framework, publish only) and call counting from process start instead of
          after 100 ms; dynamic PGO still tiers the hot code up. -->
-    <PublishReadyToRun>true</PublishReadyToRun>
-    <PublishReadyToRunComposite>true</PublishReadyToRunComposite>
+    <PublishReadyToRun Condition="'$(BuildForIos)' != 'true'">true</PublishReadyToRun>
+    <PublishReadyToRunComposite Condition="'$(BuildForIos)' != 'true'">true</PublishReadyToRunComposite>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(BuildForIos)' == 'true'">
+    <OutputType>Exe</OutputType>
+    <SupportedOSPlatformVersion>16.0</SupportedOSPlatformVersion>
+    <ApplicationId>org.hpengine.ios</ApplicationId>
+    <AppBundleManifest>ios/Info.plist</AppBundleManifest>
+    <!-- Preserve the runtime types and members inspected by the engine and its package reader. -->
+    <TrimMode>copy</TrimMode>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(BuildForIos)' == 'true'">
+    <!-- TrimMode=copy alone still trims these on iOS (UELib's UPackage lost the constructor UnrealPackage.CreateObject
+         activates); rooting keeps every type and member of the engine, Core and the package reader. -->
+    <TrimmerRootAssembly Include="Eliot.UELib;HP1.Core;HPEngine" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(BuildForIos)' == 'true' and Exists('$(SdlIosFramework)')">
+    <NativeReference Include="$(SdlIosFramework)" Kind="Framework" />
+  </ItemGroup>
+  <Target Name="CheckIosSdlFramework" BeforeTargets="PrepareForBuild"
+          Condition="'$(BuildForIos)' == 'true' and !Exists('$(SdlIosFramework)')">
+    <Error Text="Set SdlIosFramework to the absolute path to SDL3.xcframework. See docs/building.md." />
+  </Target>
   <ItemGroup>
     <RuntimeHostConfigurationOption Include="System.Runtime.TieredCompilation.CallCountingDelayMs" Value="0" />
   </ItemGroup>

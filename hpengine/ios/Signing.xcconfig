@@ -1,0 +1,7 @@
+// Signing defaults of the HPEngine Xcode target. Your own team and bundle identifier go in Signing.local.xcconfig next to
+// this file (git-ignored), for example:
+//   DEVELOPMENT_TEAM = ABCDE12345
+//   PRODUCT_BUNDLE_IDENTIFIER = com.example.hpengine
+DEVELOPMENT_TEAM =
+PRODUCT_BUNDLE_IDENTIFIER = org.hpengine.ios
+#include? "Signing.local.xcconfig"

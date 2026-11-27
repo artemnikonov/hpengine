@@ -147,6 +147,7 @@ namespace HPEngine
     //                                                       fade, HP2's loading screen) is also rendered offscreen and written
     //                                                       as PNG: the last one stays
     //   pad <lx> <ly> <rx> <ry> <lt> <rt> <buttons> | pad none — the gamepad state Core reads from that tick on
+    //   tap <x> <y> down|move|up                          — a finger on a menu at window pixels (InputStage.OnMenuTouch; iOS touch)
     //   probe                                             — after the tick, log the menu state (page, control under the
     //                                                       cursor, Brightness, Interface Size, an open combo list)
     //   kill                                              — baseHarry.KillHarry(true) on the Core thread before the tick's input
@@ -265,6 +266,7 @@ namespace HPEngine
                     case "key": if (!OsEvents) input.OnKey(Enum.Parse<SDL.SDL_Scancode>("SDL_SCANCODE_" + a[0], true), a[1] == "down"); break;
                     case "mouse": if (!OsEvents) input.OnMouseMotion(F(a[0]), F(a[1])); break;
                     case "text": input.OnTextInput(args); break;
+                    case "tap": input.OnMenuTouch(F(a[0]), F(a[1]), a[2] == "down" ? true : a[2] == "up" ? false : null); break;   // a finger on a menu (window pixels; iOS touch)
                     case "button": input.OnMouseButton(int.Parse(a[0], System.Globalization.CultureInfo.InvariantCulture), a[1] == "down"); break;   // SDL button (1 left, 3 right)
                     case "pad":
                         _padOk = a[0] != "none";
