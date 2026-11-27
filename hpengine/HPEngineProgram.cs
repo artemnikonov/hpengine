@@ -1190,7 +1190,10 @@ namespace HPEngine
             // Free camera (F) only with --debug-cam.
             var input = new HPEngine.Input.InputStage { Warn = Console.Error.WriteLine };
             var sink = new HPEngine.Input.CoreInputSink(host.Interp, host.Runtime) { Warn = Console.Error.WriteLine, Viewport = device };
-            SDL_StartTextInput(r.Window);
+            // iOS: UIKit shows its on-screen keyboard while text input is on, whatever SDL_ENABLE_SCREEN_KEYBOARD says, and it
+            // stayed over the game all session. Text input only with a hardware keyboard there (one connected later types keys
+            // but no characters until the next start).
+            if (!OperatingSystem.IsIOS() || SDL_HasKeyboard()) SDL_StartTextInput(r.Window);
             // Mouse capture: InputStage decides (SetMouseCapture events), the window carries it out; a mode switch re-applies.
             // On the Core thread both halves run on the window thread, Core waiting: the capture, then the cursor read right
             // after it (a release puts the cursor back); the cursor of a tick is otherwise read before the tick is posted,

@@ -15,7 +15,12 @@ namespace HPEngine
             nint sdl = NativeLibrary.Load(framework);
             NativeLibrary.SetDllImportResolver(typeof(SDL.SDL3).Assembly,
                 (name, _, _) => name == "SDL3" ? sdl : 0);
-            iosArgs = args;
+            // The .NET iOS host passes Main no arguments; the launch arguments (Xcode scheme, devicectl) are in NSProcessInfo.
+            iosArgs = args.Length > 0 ? args : NSProcessInfo.ProcessInfo.Arguments.Skip(1).ToArray();
+            // Landscape only, as Info.plist. Without it SDL (3.4.16 UIKit_ComputeViewFrame) judges the orientation by
+            // statusBarOrientation, which a scene-based app does not report, and swapped the landscape window to portrait
+            // (1640x2360 drawn into a 2360x1640 screen: shifted, black bars, edges cut off).
+            SDL.SDL3.SDL_SetHint("SDL_ORIENTATIONS", "LandscapeLeft LandscapeRight");
 
             // SDL owns UIApplicationMain and calls the engine on UIKit's main thread.
             var runApp = (delegate* unmanaged[Cdecl]<int, byte**, delegate* unmanaged[Cdecl]<int, byte**, int>, void*, int>)
@@ -28,6 +33,7 @@ namespace HPEngine
         {
             try
             {
+                Console.WriteLine($"[iOS] launch arguments: {(iosArgs.Length == 0 ? "none" : string.Join(' ', iosArgs))}");
                 if (iosArgs.Contains("--root") || iosArgs.Contains("--selftest-gpu")) return Run(iosArgs);
 
                 string documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
