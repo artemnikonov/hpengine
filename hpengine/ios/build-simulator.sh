@@ -1,5 +1,8 @@
 #!/bin/sh
+# Usage: build-simulator.sh [runtime identifier]   (default iossimulator-arm64; ios-arm64 for a device)
+# HPENGINE_BUILD_ONLY=1 stops after the .NET build (the Xcode target copies and signs the app itself).
 set -eu
+rid=${1:-iossimulator-arm64}
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 build_dir="$repo/.artifacts/ios-simulator"
@@ -33,10 +36,26 @@ if [ ! -f "$framework/Info.plist" ]; then
     ditto "$source_framework" "$framework"
 fi
 
-"$dotnet" build "$repo/hpengine/HPEngine.csproj" -c Release -r iossimulator-arm64 \
+out="$build_dir/app"
+[ "$rid" = iossimulator-arm64 ] || out="$build_dir/app-$rid"
+"$dotnet" build "$repo/hpengine/HPEngine.csproj" -c Release -r "$rid" \
     -p:BuildForIos=true -p:SdlIosFramework="$framework" -p:EnableCodeSigning=false \
-    -o "$build_dir/app"
-app="$build_dir/app/HPEngine.app"
-test -f "$app/Info.plist"
+    -o "$out"
+built_app="$out/HPEngine.app"
+test -f "$built_app/Info.plist"
+if [ -n "${HPENGINE_BUILD_ONLY:-}" ]; then
+    exit 0
+fi
+# The simulator on Apple silicon refuses unsigned code; an ad-hoc signature needs no certificate. Sign a copy
+# outside the repository, because a synced folder (iCloud Documents) re-adds Finder attributes codesign rejects.
+app="$HOME/Library/Developer/HPEngine/ios-simulator/HPEngine.app"
+rm -rf "$app"
+mkdir -p "$(dirname "$app")"
+ditto --noextattr --noqtn "$built_app" "$app"
+xattr -cr "$app"
+find "$app" \( -name '*.dylib' -o -name '*.framework' \) -prune -print | while IFS= read -r item; do
+    codesign --force --sign - --timestamp=none "$item"
+done
+codesign --force --sign - --timestamp=none "$app"
 ditto -c -k --keepParent "$app" "$build_dir/HPEngine-iOS-Simulator.zip"
 printf 'Simulator app: %s\nSimulator ZIP: %s\n' "$app" "$build_dir/HPEngine-iOS-Simulator.zip"

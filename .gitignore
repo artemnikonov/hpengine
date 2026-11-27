@@ -6,3 +6,5 @@ obj/
 *.user
 .vs/
 .idea/
+xcuserdata/
+hpengine/ios/Signing.local.xcconfig
