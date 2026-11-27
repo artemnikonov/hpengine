@@ -21,7 +21,7 @@
     <OutputType>Exe</OutputType>
     <SupportedOSPlatformVersion>16.0</SupportedOSPlatformVersion>
     <ApplicationId>org.hpengine.ios</ApplicationId>
-    <ApplicationManifest>ios/Info.plist</ApplicationManifest>
+    <AppBundleManifest>ios/Info.plist</AppBundleManifest>
     <!-- Preserve the runtime types and members inspected by the engine and its package reader. -->
     <TrimMode>copy</TrimMode>
   </PropertyGroup>
