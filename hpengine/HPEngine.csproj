@@ -25,6 +25,11 @@
     <!-- Preserve the runtime types and members inspected by the engine and its package reader. -->
     <TrimMode>copy</TrimMode>
   </PropertyGroup>
+  <ItemGroup Condition="'$(BuildForIos)' == 'true'">
+    <!-- TrimMode=copy alone still trims these on iOS (UELib's UPackage lost the constructor UnrealPackage.CreateObject
+         activates); rooting keeps every type and member of the engine, Core and the package reader. -->
+    <TrimmerRootAssembly Include="Eliot.UELib;HP1.Core;HPEngine" />
+  </ItemGroup>
   <ItemGroup Condition="'$(BuildForIos)' == 'true' and Exists('$(SdlIosFramework)')">
     <NativeReference Include="$(SdlIosFramework)" Kind="Framework" />
   </ItemGroup>
