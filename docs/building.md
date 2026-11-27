@@ -17,10 +17,17 @@ Tests that need no game files:
 
 ## iOS
 
-Use the .NET 10 SDK with the iOS workload and the Xcode version supported by that workload. The `BuildForIos`
+Use .NET SDK 11.0.100 with iOS workload set 11.0.100.1 and Xcode 27.2. The `BuildForIos`
 property selects the iOS app target. The app uses the same engine and Metal shaders as the desktop builds.
 
-    dotnet workload install ios
+From the repository root, the simulator build script installs these dependencies into a local build
+directory and writes a ZIP containing the resulting app. The first run needs network access.
+
+    sh hpengine/ios/build-simulator.sh
+
+For an existing toolchain, install the workload manually:
+
+    dotnet workload install ios --version 11.0.100.1
 
 Download the disk image from the [SDL 3.4.16 release](https://github.com/libsdl-org/SDL/releases/tag/release-3.4.16)
 and copy `SDL3.xcframework` out of it. If you build SDL from source, use the **SDL3.xcframework** target
