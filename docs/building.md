@@ -44,11 +44,39 @@ For a physical device, change the runtime identifier to `ios-arm64`, remove `Ena
 and supply the signing identity and provisioning profile for your Apple development team. Override
 `ApplicationId` if your profile uses a different bundle identifier.
 
+### Xcode
+
+`HPEngine.xcodeproj` has one iOS app target, `HPEngine`. Its build phase (`hpengine/ios/xcode-build-phase.sh`) runs
+the build script above for the selected destination (`iossimulator-arm64` or `ios-arm64`), copies the .NET app into
+Xcode's product and signs nested code with the identity Xcode chose. Pick a team under **Signing & Capabilities**
+(automatic signing) and change the bundle identifier if `org.hpengine.ios` is taken for it; Build and Run then work as
+for any iOS app, on a device or in "My Mac (Designed for iPad)". For gameplay tests, enable the shared scheme's `--map Lev_Tut1`
+argument (Edit Scheme > Run > Arguments) to start in a level instead of the start-up sequence. The iOS Simulator builds and installs, but its GPU
+(Metal family Apple2) is below what SDL_GPU needs, so the game draws nothing there.
+
+### Game files
+
 Copy an installed PC game folder (the folder containing `System` and `Maps`) into the app's folder
 under **On My iPhone** or **On My iPad** in Files. Name it `game` for HP1 or place it at `HP2Data/game`
 for HP2. If both folders are present, the app starts HP1. HP2 uses slot 1 and resumes it when a save
-exists. Use a paired gamepad for gameplay. The desktop launcher and on-screen gamepad controls are
-outside this iOS target.
+exists.
+
+For development, a Mac can serve the game folders instead, and the app downloads a missing one on start:
+
+    sh hpengine/ios/content-server.sh setup --hp1 <HP1 game folder> --hp2 <HP2 game folder>
+
+This writes its files to `~/Library/Application Support/HPEngine Content Server` (outside the repository) and starts
+Caddy (`brew install caddy`) on port 8443 at login through a LaunchAgent: HTTPS with a self-signed certificate the app
+pins, and a bearer token. The Xcode build copies the server's address, token and certificate hash into the app; rebuild
+after `setup` and after the Mac's name or address changes. `content-server.sh manifest` refreshes the file lists,
+`stop` and `status` control the service. A device asks for Local Network access on the first download.
+
+### Controls
+
+A paired gamepad works as on the desktop. Without one, on-screen touch controls are a virtual gamepad: drag on the left
+part of the screen to move, on the right part to turn the camera (and move the menu cursor), the green button jumps
+(A, clicks in menus), the blue button casts (X), the small top-left button opens the menu (Start). The overlay hides
+while a physical pad is connected and the screen is not touched. The desktop launcher is outside this iOS target.
 
 ## What is not in this repository
 
