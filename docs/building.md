@@ -15,6 +15,34 @@ Tests that need no game files:
 
     sh hpengine/tests/run_all.sh
 
+## iOS
+
+Use the .NET 10 SDK with the iOS workload and the Xcode version supported by that workload. The `BuildForIos`
+property selects the iOS app target. The app uses the same engine and Metal shaders as the desktop builds.
+
+    dotnet workload install ios
+
+Download the disk image from the [SDL 3.4.16 release](https://github.com/libsdl-org/SDL/releases/tag/release-3.4.16)
+and copy `SDL3.xcframework` out of it. If you build SDL from source, use the **SDL3.xcframework** target
+in `Xcode/SDL/SDL.xcodeproj`. Set `sdl_framework` to the absolute path to that XCFramework.
+
+From the repository root, build for an Apple Silicon simulator:
+
+```sh
+dotnet build hpengine/HPEngine.csproj -c Release -r iossimulator-arm64 \
+    -p:BuildForIos=true -p:SdlIosFramework="$sdl_framework" -p:EnableCodeSigning=false
+```
+
+For a physical device, change the runtime identifier to `ios-arm64`, remove `EnableCodeSigning=false`,
+and supply the signing identity and provisioning profile for your Apple development team. Override
+`ApplicationId` if your profile uses a different bundle identifier.
+
+Copy an installed PC game folder (the folder containing `System` and `Maps`) into the app's folder
+under **On My iPhone** or **On My iPad** in Files. Name it `game` for HP1 or place it at `HP2Data/game`
+for HP2. If both folders are present, the app starts HP1. HP2 uses slot 1 and resumes it when a save
+exists. Use a paired gamepad for gameplay. The desktop launcher and on-screen gamepad controls are
+outside this iOS target.
+
 ## What is not in this repository
 
 The port is checked against the original game: every native function is compared with the original machine code run

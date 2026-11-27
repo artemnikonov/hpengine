@@ -9,10 +9,19 @@ using static SDL.SDL3;
 
 namespace HPEngine
 {
-    static unsafe class Program
+    static unsafe partial class Program
     {
         const int NoMapExitCode = 6;   // the windowed game: no Maps/<start map>.unr (the Launchers read it: EngineError.Pick)
         static int Main(string[] args)
+        {
+#if IOS
+            return RunIos(args);
+#else
+            return Run(args);
+#endif
+        }
+
+        static int Run(string[] args)
         {
             HarnessEnv.WarnUnread();   // harness probes do not affect the engine: loud
             // macOS: a held key repeats its character (WM_CHAR repeat, as Windows gives the original) instead of opening the
@@ -195,7 +204,7 @@ namespace HPEngine
                 return NoMapExitCode;
             }
             // Startup splash (HP.exe WinMain): before the engine comes up, closed once the first map is loaded.
-            if (windowedGame && UELevelRuntime.ShowsSplash(string.Join(" ", args)))
+            if (!OperatingSystem.IsIOS() && windowedGame && UELevelRuntime.ShowsSplash(string.Join(" ", args)))
             {
                 var inis = UELevelRuntime.InstallInis(Path.Combine(root, "System"));
                 var splashConfig = new UEConfig(inis.System, inis.User);

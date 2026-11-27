@@ -72,6 +72,7 @@ namespace HPEngine
         {
             get
             {
+                if (OperatingSystem.IsIOS()) return ModeList(Array.Empty<(int, int)>(), Pixels(), true);
                 if (_hostIndependentModes && !Fullscreen) return UEConsoleCommand.WindowedResolutions;
                 var modes = new List<(int, int)>();
                 int n;
@@ -101,6 +102,7 @@ namespace HPEngine
         // (WinDrv.dll.c:15366-15379). debugSize (--size) is a debug window outside the shipped chain: not saved.
         public static void OpenStartup(IViewportDevice vp, UEConfig config, string commandLine, (int W, int H)? debugSize)
         {
+            if (OperatingSystem.IsIOS()) return;   // UIKit has already sized the fullscreen drawable.
             if (debugSize is { } s) vp.Resize(s.W, s.H, 0, false);
             else UEViewportStartup.Process.Open(config, commandLine, vp);
         }
@@ -112,6 +114,8 @@ namespace HPEngine
         // Synchronous (SDL_SyncWindow), as the original ResizeViewport: the outcome is known on return, Core stores it.
         public ViewportResizeOutcome Resize(int sizeX, int sizeY, int colorBytes, bool fullscreen)
         {
+            if (OperatingSystem.IsIOS())
+                return fullscreen && (sizeX, sizeY) == Pixels() ? ViewportResizeOutcome.Applied : ViewportResizeOutcome.Rejected;
             var before = (SizeX, SizeY, Fullscreen);
             if (fullscreen)
             {
