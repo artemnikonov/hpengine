@@ -696,6 +696,7 @@ namespace HPEngine
 
         static MoverScene Movers;
         static readonly List<HPEngine.Hud.HudQuad> _hud2 = new();
+        static bool _loggedControl;
         static readonly List<HPEngine.Hud.HudQuad> _coronaQuads = new();
         static float LastRealDt = 1f / 60f;
         static readonly List<ActorDraw> _spritePool = new();
@@ -889,7 +890,12 @@ namespace HPEngine
                     v0.R, v0.G, v0.B, cd.Texture, cd.NoSmooth));
             }
             HPEngine.Hud.ScreenEffects.Overlay(_hud2, _coronaQuads, HPEngine.Hud.ScreenEffects.FlashQuad(f.ViewFlash, pw, ph), quads);
-            HPEngine.Input.TouchControls.AppendOverlay(_hud2, pw, ph);   // NOT ORIGINAL: iOS touch controls (none elsewhere)
+            if (f.PlayerControl != _loggedControl)   // run log: when the touch controls switch (WorldFrame.PlayerControl)
+            {
+                _loggedControl = f.PlayerControl;
+                Console.WriteLine($"[Control] {(f.PlayerControl ? "player controls Harry" : "no direct control")}{(f.PointerTracing ? " (spell lesson)" : "")}");
+            }
+            HPEngine.Input.TouchControls.AppendOverlay(_hud2, pw, ph, f.PointerTracing, f.PlayerControl);   // NOT ORIGINAL: iOS touch controls (none elsewhere)
             r.SetHud(_hud2);
             r.SetCanvasActors(f.Hud, f.CanvasFovAngle, f.CanvasFrameSize.X * f.CanvasScale, f.CanvasFrameSize.Y * f.CanvasScale);
             // Menu brightness (UClient.Brightness, FEOptionsPage.BrightnessChanged): D3DDrv gamma ramp over the whole frame.
@@ -1190,6 +1196,9 @@ namespace HPEngine
             // Input: hpengine/Input: SDL events -> InputStage -> CoreInputSink before the Core tick. Escape is a game key.
             // Free camera (F) only with --debug-cam.
             var input = new HPEngine.Input.InputStage { Warn = Console.Error.WriteLine };
+            HPEngine.Input.TouchControls.MouseMotion = input.OnMouseMotion;   // a drawing finger moves like the mouse (iOS)
+            HPEngine.Input.TouchControls.MenuPointer = input.OnMenuTouch;   // a finger on a menu taps there (iOS)
+            input.ToCanvas = ScaleCursor;
             var sink = new HPEngine.Input.CoreInputSink(host.Interp, host.Runtime) { Warn = Console.Error.WriteLine, Viewport = device };
             // iOS: UIKit shows its on-screen keyboard while text input is on, whatever SDL_ENABLE_SCREEN_KEYBOARD says, and it
             // stayed over the game all session. Text input only with a hardware keyboard there (one connected later types keys

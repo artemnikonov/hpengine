@@ -73,10 +73,14 @@ after `setup` and after the Mac's name or address changes. `content-server.sh ma
 
 ### Controls
 
-A paired gamepad works as on the desktop. Without one, on-screen touch controls are a virtual gamepad: drag on the left
-part of the screen to move, on the right part to turn the camera (and move the menu cursor), the green button jumps
-(A, clicks in menus), the blue button casts (X), the small top-left button opens the menu (Start). The overlay hides
-while a physical pad is connected and the screen is not touched. The desktop launcher is outside this iOS target.
+A paired gamepad works as on the desktop. Without one, on-screen touch controls are a virtual gamepad while the player
+directly controls Harry: drag on the left part of the screen to move, on the right part to turn the camera, the green
+button jumps (A), the blue button casts (X), the small top-left button opens the menu (Start). Touch and hold still for a
+moment on the right part, then drag: the finger is the PC mouse with its button held (Cast). The overlay hides while a
+physical pad is connected and the screen is not touched. In cut-scenes, menus and pauses the sticks and buttons are off
+(the Menu button stays): in a menu a tap is a click where the finger is (drag for sliders). In a spell lesson any touch
+draws at once and the wand follows the finger, so the pattern is traced by dragging along it. The desktop launcher is
+outside this iOS target.
 
 ## What is not in this repository
 

@@ -193,7 +193,7 @@ static class Program
             f1.Paused, new ViewFlashState(1, 2, 3, 4), f1.DrawWorld, f1.Reverb, f1.Views, f1.MeshPoses,
             new[] { 9 }, new UEGalaxyAudio.Playback[0], 5, new ActorViewSets(new Dictionary<int, int>(), new List<int[]>()),
             new CoronaInstance[0], f1.EnhancedVisuals, f1.Drawn, f1.DrawnTextures, new[] { 4 }, 0.25f, new[] { new[] { 1 } }, 3,
-            new Dictionary<string, string> { ["P.A00"] = "P.A01" });
+            new Dictionary<string, string> { ["P.A00"] = "P.A01" }, pointerTracing: true, playerControl: true);
         var fxm = Interp.Frame(f0, fx, 0.5f, 1 / 60f);
         var bare = new WorldFrame(0, null, null, default, null, default, null, null, 0);
         var lerped = new HashSet<string> { "Camera", "Particles", "Views", "Drawn", "DrawnTextures" };

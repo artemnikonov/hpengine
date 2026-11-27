@@ -938,6 +938,15 @@ namespace HP1.UEScript
         // HP1ConsoleRenderer.Active is UI/cursor state ONLY.
         public readonly bool Paused;
 
+        // NOT ORIGINAL (iOS touch controls, 2026-11-27): the player is in the spell lesson's SpellLearning state (set by
+        // SpellLearnTrigger before Template/Draw/Judge and left when the lesson ends), where the PC mouse (left button =
+        // Cast) moves the wand. The frontend's touch controls then draw with a finger instead of showing sticks. Read only.
+        public readonly bool PointerTracing;
+        // NOT ORIGINAL (iOS touch controls, 2026-11-27): the player directly controls Harry: not paused (Pauser), the world
+        // drawn (no menu book), the HUD not in cut-scene mode (baseHud.bCutSceneMode), the console's UWindow not up
+        // (bUWindowActive) and no spell lesson (PointerTracing). The touch sticks and buttons work only then. Read only.
+        public readonly bool PlayerControl;
+
         // Full-screen flash/fade of the viewport actor - see ViewFlashState.
         public readonly ViewFlashState ViewFlash;
 
@@ -1030,8 +1039,9 @@ namespace HP1.UEScript
             IReadOnlyList<DrawnWorld> drawn = null, IReadOnlyList<string> drawnTextures = null,
             IReadOnlyList<int> audioCallStops = null, float audioMixDt = 0f, IReadOnlyList<int[]> drawOrder = null,
             int canvasScale = 1, IReadOnlyDictionary<string, string> textureFrames = null,
-            IReadOnlyList<ScriptedTexels> scriptedTexels = null)
+            IReadOnlyList<ScriptedTexels> scriptedTexels = null, bool pointerTracing = false, bool playerControl = false)
         {
+            PointerTracing = pointerTracing; PlayerControl = playerControl;
             ScriptedTexels = scriptedTexels ?? System.Array.Empty<ScriptedTexels>();
             DrawOrder = drawOrder; CanvasScale = canvasScale; TextureFrames = textureFrames ?? _noTextureFrames;
             AudioCallStops = audioCallStops ?? System.Array.Empty<int>(); AudioMixDt = audioMixDt;
@@ -2077,6 +2087,11 @@ namespace HP1.UEScript
                     a.FrameProjStamp = stamp;
                     ProjectMemoInto(a, list);
                 }
+            bool paused = !string.IsNullOrEmpty(actors0?.GetProp(PK.Pauser)?.ToString());
+            bool tracing = string.Equals(player?.CurrentStateName, "SpellLearning", System.StringComparison.OrdinalIgnoreCase);
+            bool control = player is { Destroyed: false } && !paused && drawWorld && !tracing
+                && !UEInterpreter.ToBool((player.GetProp("myHUD") as UEObject)?.GetProp("bCutSceneMode"))
+                && !UEInterpreter.ToBool(((player.GetProp("Player") as UEObject)?.GetProp("Console") as UEObject)?.GetProp("bUWindowActive"));
             return new WorldFrame(tick, label, list, camera,
                 audio ?? _noAudio, music, hud ?? _noHud,
                 particles ?? _noParticles,
@@ -2084,13 +2099,14 @@ namespace HP1.UEScript
                 ProjectLevelAmbient(actors0), highDetailActors, decals,
                 // Pause - from the same slot 0 (LevelInfo) as ambient: shipped asserts the slot, it does not
                 // search by class (UnLevel.h:0xf7-0xf8).
-                paused: !string.IsNullOrEmpty(actors0?.GetProp(PK.Pauser)?.ToString()),
+                paused: paused,
                 viewFlash: ProjectViewFlash(player), drawWorld: drawWorld,
                 reverb: ProjectReverb(player), views: views, meshPoses: meshPoses, spriteActors: spriteActors,
                 audioChannels: audioChannels, audioResumeSerial: audioResumeSerial, actorViews: actorViews, coronas: coronas,
                 enhancedVisuals: enhancedVisuals, drawn: drawn, drawnTextures: drawnTextures,
                 audioCallStops: audioCallStops, audioMixDt: audioMixDt, drawOrder: drawOrder, canvasScale: canvasScale,
-                textureFrames: textureFrames);
+                textureFrames: textureFrames,
+                pointerTracing: tracing, playerControl: control);
         }
 
         // Galaxy UpdateReverb (FUN_106095c4): the zone is Region.Zone (+0xa0) of the viewport actor's

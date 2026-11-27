@@ -46,7 +46,7 @@ namespace HPEngine.Input
         readonly Dictionary<string, int> _nameDown = new(StringComparer.OrdinalIgnoreCase);
         // ResetRelease: a key-up with the SDL_ResetKeyboard signature (see Feed); FocusRelease: such a key-up that the focus
         // loss right after it proved synthetic — it moves the device state (GetKeyState) but is not an input event.
-        enum Kind { Control, Mouse, Wheel, Char, Focus, ResetRelease, FocusRelease, Resized, AudioViewport }
+        enum Kind { Control, Mouse, Wheel, Char, Focus, ResetRelease, FocusRelease, Resized, AudioViewport, MenuTap }
         // Control events keep the raw device transition: the device state (_ctlDown/_nameDown, i.e. GetKeyState) changes
         // when RunFrame handles the event, so a reset handled in the middle of the queue polls the state AT that point.
         readonly List<(Kind K, string Key, UEInput.InputAction Action, float Delta, SdlControl C, bool Repeat)> _evq = new();
@@ -234,6 +234,16 @@ namespace HPEngine.Input
 
         bool IsDown(SdlControl c) => _ctlDown.TryGetValue(c, out bool d) && d;
 
+        // NOT ORIGINAL (iOS touch controls): a finger on a menu, in window pixels; down / moved (null) / up. Converted to the
+        // canvas as the OS cursor is (ToCanvas = HPEngineProgram.ScaleCursor) and handed to Core in order (UEInput.MenuTap).
+        public Func<(float X, float Y), (float X, float Y)> ToCanvas;
+        readonly List<(float X, float Y, bool? Down)> _taps = new();
+        public void OnMenuTouch(float x, float y, bool? down)
+        {
+            _taps.Add((x, y, down));
+            _evq.Add((Kind.MenuTap, null, default, _taps.Count - 1, default, false));
+        }
+
         // A WM_MOUSEMOVE batch: the frame's deltas are summed; the axis events go at the place of the first move.
         public void OnMouseMotion(float xrel, float yrel)
         {
@@ -276,6 +286,13 @@ namespace HPEngine.Input
                     case Kind.FocusRelease:
                         OnControl(sink, c, key, false, false, deliver: false);
                         break;
+                    case Kind.MenuTap:
+                        {
+                            var t = _taps[(int)delta];
+                            var p = ToCanvas is null ? (t.X, t.Y) : ToCanvas((t.X, t.Y));
+                            sink.MenuTap(p.Item1, p.Item2, t.Down);
+                            break;
+                        }
                     case Kind.Mouse:
                         // WM_MOUSEMOVE (WinDrv.dll.c:3685-3812): captured -> MouseX/MouseY axes, otherwise MousePosition.
                         if (!_captured) MousePosition(sink);
@@ -314,7 +331,7 @@ namespace HPEngine.Input
                         break;
                 }
             }
-            _evq.Clear();
+            _evq.Clear(); _taps.Clear();
             _mouseX = _mouseY = 0f;
         }
     }

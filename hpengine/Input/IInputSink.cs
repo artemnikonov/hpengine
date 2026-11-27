@@ -20,6 +20,8 @@ namespace HPEngine.Input
         void BindDevice(Func<string, bool> keyDown);
         // The gamepad in the joystick's place (Core UEInput.InitGamepad; improvement, not original): raw state read by Core's poll.
         void BindGamepad(UEInput.GamepadRead read);
+        // NOT ORIGINAL (iOS touch): a finger on a menu at a canvas position, down / moved (null) / up (Core UEInput.MenuTap).
+        void MenuTap(float x, float y, bool? down);
         // UWindowsViewport::CauseInputEvent -> UEngine::InputEvent (Core UEInput.InputEvent).
         void CauseInput(string key, UEInput.InputAction action, float delta);
         // WM_CHAR -> UEngine::Key -> Console.KeyType (Core UELevelRuntime.ViewportCharInput).

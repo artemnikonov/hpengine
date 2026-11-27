@@ -54,6 +54,8 @@ namespace HPEngine.Input
 
         public void CharInput(int ch) => _rt.ViewportCharInput(_interp, ch);
 
+        public void MenuTap(float x, float y, bool? down) => _rt.Input.MenuTap(_interp, Console, Player, x, y, down);
+
         public void Focus(bool focused)
         {
             _rt.Input.DeviceFocused = focused;

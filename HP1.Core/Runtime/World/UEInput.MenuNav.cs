@@ -189,6 +189,32 @@ namespace HP1.UEScript
             => interp.Invoke(o, interp.FindGlobalFunction(o, fn)
                 ?? throw new InvalidOperationException($"menu navigation: {o?.Class?.Name} has no {fn}"), a);
 
+        // TOUCH IN MENUS — NOT ORIGINAL (iOS touch controls, 2026-11-27). A finger on a menu is the mouse at that point: the
+        // cursor goes there (the canvas position over Root.GUIScale, as WindowConsole turns Viewport.WindowsMouseX/Y into
+        // MouseX/MouseY) through MoveCursor, and LeftMouse is pressed on the NEXT poll, after HPConsole.RenderUWindow has
+        // moved Root's mouse there (Root.MoveMouse), then released when the finger lifts (at the earliest one poll later).
+        // A drag moves the cursor while held (sliders). Without an open menu it does nothing.
+        int _tapPhase;   // 0 none, 1 moved this poll, 2 press due, 3 pressed
+        bool _tapUp;
+        public void MenuTap(UEInterpreter interp, UEObject console, UEObject pawn, float canvasX, float canvasY, bool? down)
+        {
+            if (down == false) { _tapUp = true; return; }
+            if (!MenuActive(console) || console.GetProp("Root") is not UEObject root) return;
+            if (down is null && _tapPhase == 0) return;
+            float scale = UEInterpreter.AsFloat(root.GetProp("GUIScale"));
+            if (!(scale > 0f)) return;
+            MoveCursor(interp, console, pawn, canvasX / scale, canvasY / scale);
+            if (down == true) { _tapPhase = 1; _tapUp = false; }
+        }
+        // Per poll (PollGamepad, before the virtual keys): whether the tap holds LeftMouse now.
+        bool TapPoll()
+        {
+            if (_tapPhase == 1) _tapPhase = 2;
+            else if (_tapPhase == 2) _tapPhase = 3;
+            else if (_tapPhase == 3 && _tapUp) _tapPhase = 0;
+            return _tapPhase == 3;
+        }
+
         // The cursor moves only as a mouse moves it: MouseX/MouseY axis events through the console.
         void MoveCursor(UEInterpreter interp, UEObject console, UEObject pawn, float x, float y)
         {
