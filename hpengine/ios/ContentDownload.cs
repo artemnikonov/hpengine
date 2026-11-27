@@ -99,7 +99,7 @@ namespace HPEngine
                     string staging = dest + ".download";
                     foreach (var (size, path) in files)
                     {
-                        progress.Status = $"Downloading {name.ToUpperInvariant()}: {path}";
+                        progress.Status = $"Downloading {FriendlyName(name)}: {path}";
                         string target = Path.Combine(staging, path);
                         if (File.Exists(target) && new FileInfo(target).Length == size)
                         {
@@ -130,6 +130,9 @@ namespace HPEngine
             catch (Exception e) { progress.Error = e; }
             finally { progress.Finished = true; }
         }
+
+        // The names the app's own no-game message uses ("Harry Potter 1", "Harry Potter 2"); the edition is not known yet.
+        static string FriendlyName(string name) => name switch { "hp1" => "Harry Potter 1", "hp2" => "Harry Potter 2", _ => name };
 
         static List<(long, string)> ParseManifest(string text)
         {

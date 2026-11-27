@@ -1,6 +1,8 @@
 // Draws the HPEngine launcher icon (original artwork, GPL-3.0-or-later like the rest of the code): a red and gold shield with a
 // wand and sparkles. No crest, no characters, no studio artwork.
 //   xcrun swift launcher/icon.swift <out.iconset>     writes the PNG sizes iconutil expects
+//   xcrun swift launcher/icon.swift --ios <out.png>   the iOS app icon: 1024 px, opaque (iOS fills transparency with black),
+//                                                    on a night-blue ground (hpengine/ios/xcode-build-phase.sh)
 import AppKit
 
 func draw(_ s: CGFloat) -> NSImage {
@@ -48,8 +50,22 @@ func draw(_ s: CGFloat) -> NSImage {
     }
 }
 
+if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--ios" {
+    // No alpha channel at all: a CGContext with the alpha byte skipped.
+    let cg = CGContext(data: nil, width: 1024, height: 1024, bitsPerComponent: 8, bytesPerRow: 0,
+                       space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(cgContext: cg, flipped: false)
+    NSColor(srgbRed: 0.09, green: 0.12, blue: 0.23, alpha: 1).setFill()
+    NSRect(x: 0, y: 0, width: 1024, height: 1024).fill()
+    draw(1024).draw(in: NSRect(x: 0, y: 0, width: 1024, height: 1024))
+    NSGraphicsContext.restoreGraphicsState()
+    try NSBitmapImageRep(cgImage: cg.makeImage()!).representation(using: .png, properties: [:])!
+        .write(to: URL(fileURLWithPath: CommandLine.arguments[2]))
+    exit(0)
+}
 let out = CommandLine.arguments.count == 2 ? CommandLine.arguments[1] : { FileHandle.standardError.write(
-    "usage: icon.swift <out.iconset>\n".data(using: .utf8)!); exit(2) }()
+    "usage: icon.swift <out.iconset> | icon.swift --ios <out.png>\n".data(using: .utf8)!); exit(2) }()
 try FileManager.default.createDirectory(atPath: out, withIntermediateDirectories: true)
 for base in [16, 32, 128, 256, 512] {
     for scale in [1, 2] {

@@ -50,7 +50,9 @@ and supply the signing identity and provisioning profile for your Apple developm
 the build script above for the selected destination (`iossimulator-arm64` or `ios-arm64`), copies the .NET app into
 Xcode's product and signs nested code with the identity Xcode chose. Pick a team under **Signing & Capabilities**
 (automatic signing) and change the bundle identifier if `org.hpengine.ios` is taken for it; Build and Run then work as
-for any iOS app, on a device or in "My Mac (Designed for iPad)". For gameplay tests, enable the shared scheme's `--map Lev_Tut1`
+for any iOS app, on a device or in "My Mac (Designed for iPad)". The app icon is the launcher's original artwork
+(`launcher/icon.swift --ios`, drawn and compiled by the build phase, nothing committed); the home screen shows "Harry
+Potter". For gameplay tests, enable the shared scheme's `--map Lev_Tut1`
 argument (Edit Scheme > Run > Arguments) to start in a level instead of the start-up sequence. The iOS Simulator builds and installs, but its GPU
 (Metal family Apple2) is below what SDL_GPU needs, so the game draws nothing there.
 
