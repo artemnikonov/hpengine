@@ -889,6 +889,7 @@ namespace HPEngine
                     v0.R, v0.G, v0.B, cd.Texture, cd.NoSmooth));
             }
             HPEngine.Hud.ScreenEffects.Overlay(_hud2, _coronaQuads, HPEngine.Hud.ScreenEffects.FlashQuad(f.ViewFlash, pw, ph), quads);
+            HPEngine.Input.TouchControls.AppendOverlay(_hud2, pw, ph);   // NOT ORIGINAL: iOS touch controls (none elsewhere)
             r.SetHud(_hud2);
             r.SetCanvasActors(f.Hud, f.CanvasFovAngle, f.CanvasFrameSize.X * f.CanvasScale, f.CanvasFrameSize.Y * f.CanvasScale);
             // Menu brightness (UClient.Brightness, FEOptionsPage.BrightnessChanged): D3DDrv gamma ramp over the whole frame.
@@ -1219,7 +1220,7 @@ namespace HPEngine
             // Gamepad: Core polls it in its tick. On the Core thread the first poll is read on the window thread (Core waiting);
             // from then on the window thread reads the pad before posting each tick and Core gets that state (SDL updates
             // the pad only in the event pump, so it is the state the single-thread loop reads inside the tick).
-            UEInput.GamepadRead padRead = Script is not null ? Script.ReadPad : HPEngine.Input.SdlGamepad.Read;
+            UEInput.GamepadRead padRead = Script is not null ? Script.ReadPad : HPEngine.Input.TouchControls.Read;   // = SdlGamepad.Read without touch controls
             bool padActive = false, padOk = false; UEInput.GamepadState padState = default;
             if (threaded)
                 input.Gamepad = (out UEInput.GamepadState s) =>
@@ -1399,6 +1400,7 @@ namespace HPEngine
                         while (SDL_PollEvent(&ev))
                         {
                             DisplayEvent((SDL_EventType)ev.type);
+                            if (!isolated) HPEngine.Input.TouchControls.Feed(ev);   // a finger lifted during the load is released
                             if (!isolated && !input.PumpLoadHold(ev, sink, audio.Focus)) running = false;
                         }
                         host.Runtime.PresentLoadMapScreenNow(loadScreen);
@@ -1489,6 +1491,7 @@ namespace HPEngine
                         if (stress && e.common.timestamp == WindowScript.OsStamp) { stressFed++; input.Feed(e); continue; }
                         DisplayEvent((SDL_EventType)e.type);
                         if (isolated) continue;   // judge/bench window: scripted input only
+                        HPEngine.Input.TouchControls.Feed(e);
                         var type = (SDL_EventType)e.type;
                         if (type == SDL_EventType.SDL_EVENT_WINDOW_FOCUS_GAINED) Console.WriteLine("[Focus] gained");
                         if (!input.OnWindowEvent(e, sink, audio.Focus)) { running = false; break; }

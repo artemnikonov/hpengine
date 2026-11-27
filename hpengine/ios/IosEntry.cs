@@ -21,6 +21,9 @@ namespace HPEngine
             // statusBarOrientation, which a scene-based app does not report, and swapped the landscape window to portrait
             // (1640x2360 drawn into a 2360x1640 screen: shifted, black bars, edges cut off).
             SDL.SDL3.SDL_SetHint("SDL_ORIENTATIONS", "LandscapeLeft LandscapeRight");
+            // Touches are the on-screen controls (Input/TouchControls.cs), not also a mouse: SDL's emulated mouse would turn
+            // and click as well.
+            SDL.SDL3.SDL_SetHint("SDL_TOUCH_MOUSE_EVENTS", "0");
 
             // SDL owns UIApplicationMain and calls the engine on UIKit's main thread.
             var runApp = (delegate* unmanaged[Cdecl]<int, byte**, delegate* unmanaged[Cdecl]<int, byte**, int>, void*, int>)
